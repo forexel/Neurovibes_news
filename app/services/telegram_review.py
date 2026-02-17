@@ -214,7 +214,7 @@ def _archive_article_with_reason(article_id: int, reason: str) -> dict:
     return {"ok": True}
 
 
-def send_hourly_top_for_review(article_id: int | None = None) -> dict:
+def send_hourly_top_for_review(article_id: int | None = None, force: bool = False) -> dict:
     configured_chat = _review_chat_id()
     if not configured_chat:
         return {"ok": False, "error": "telegram_review_chat_not_configured"}
@@ -237,8 +237,15 @@ def send_hourly_top_for_review(article_id: int | None = None) -> dict:
             return {"ok": False, "error": "no_selected_article"}
 
         existing = session.scalars(select(TelegramReviewJob).where(TelegramReviewJob.article_id == article.id)).first()
-        if existing:
-            return {"ok": True, "skipped": "already_sent", "article_id": article.id}
+        if existing and not force:
+            return {
+                "ok": True,
+                "skipped": "already_sent",
+                "article_id": article.id,
+                "chat_id": existing.chat_id,
+                "message_id": existing.review_message_id,
+                "hint": "Use force=1 to resend to current review chat.",
+            }
 
         target_article_id = article.id
 
@@ -260,21 +267,28 @@ def send_hourly_top_for_review(article_id: int | None = None) -> dict:
     }
     sent = _send_message(chat_id=chat_id, text=text, reply_markup=markup)
     if not sent.get("ok"):
-        return sent
+        return {**sent, "chat_id": chat_id, "article_id": target_article_id}
 
     message_id = str((sent.get("result") or {}).get("message_id") or "")
     with session_scope() as session:
-        session.add(
-            TelegramReviewJob(
-                article_id=target_article_id,
-                chat_id=chat_id,
-                review_message_id=message_id or None,
-                status="sent",
-                created_at=datetime.utcnow(),
-                updated_at=datetime.utcnow(),
+        existing = session.scalars(select(TelegramReviewJob).where(TelegramReviewJob.article_id == target_article_id)).first()
+        if existing:
+            existing.chat_id = chat_id
+            existing.review_message_id = message_id or None
+            existing.status = "resent"
+            existing.updated_at = datetime.utcnow()
+        else:
+            session.add(
+                TelegramReviewJob(
+                    article_id=target_article_id,
+                    chat_id=chat_id,
+                    review_message_id=message_id or None,
+                    status="sent",
+                    created_at=datetime.utcnow(),
+                    updated_at=datetime.utcnow(),
+                )
             )
-        )
-    return {"ok": True, "article_id": target_article_id, "message_id": message_id}
+    return {"ok": True, "article_id": target_article_id, "chat_id": chat_id, "message_id": message_id, "forced": bool(force)}
 
 
 def send_selected_backlog_for_review(limit: int = 20) -> dict:
