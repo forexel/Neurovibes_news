@@ -275,7 +275,6 @@ def send_hourly_top_for_review(article_id: int | None = None, force: bool = Fals
                 {"text": "Опубликовать", "callback_data": f"rv:pub:{target_article_id}"},
                 {"text": "Скрыть", "callback_data": f"rv:hide:{target_article_id}"},
                 {"text": "Удалить", "callback_data": f"rv:del:{target_article_id}"},
-                {"text": "Отправить позже", "callback_data": f"rv:later:{target_article_id}"},
             ]
         ]
     }
@@ -379,7 +378,6 @@ def send_selected_backlog_for_review(limit: int = 20) -> dict:
                     {"text": "Опубликовать", "callback_data": f"rv:pub:{target_article_id}"},
                     {"text": "Скрыть", "callback_data": f"rv:hide:{target_article_id}"},
                     {"text": "Удалить", "callback_data": f"rv:del:{target_article_id}"},
-                    {"text": "Отправить позже", "callback_data": f"rv:later:{target_article_id}"},
                 ]
             ]
         }
