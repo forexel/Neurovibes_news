@@ -24,7 +24,7 @@ Production-oriented pipeline for AI news curation:
   - brand card system (safe zones / variants)
   - content versioning (`content_versions`)
 - `Admin Panel + Feedback`
-  - legacy inline admin: `/admin`
+  - Web UI (platform root): `/` (legacy `/admin` redirects to `/`)
   - production API (`/v1/*`) with auth/roles/audit
   - structured feedback fields
 - `Preference Model Trainer`
@@ -58,13 +58,13 @@ docker compose up --build -d
 API:
 
 ```bash
-curl http://localhost:8000/health
-curl http://localhost:8000/config
+curl http://localhost:8001/health
+curl http://localhost:8001/config
 ```
 
 Legacy admin:
 
-- `http://localhost:8000/admin`
+- Web UI: `http://localhost:8001/` (legacy `http://localhost:8001/admin` redirects to `/`)
 
 React admin scaffold:
 
@@ -84,7 +84,7 @@ Default seeded admin from `.env`:
 Login:
 
 ```bash
-curl -X POST http://localhost:8000/v1/auth/login \
+curl -X POST http://localhost:8001/v1/auth/login \
   -H "Content-Type: application/json" \
   -d '{"email":"admin@local","password":"admin123"}'
 ```
@@ -129,14 +129,14 @@ Current setup is intentionally simple:
 - split services without queues:
   - `api` (public/API endpoints)
   - `admin` (separate admin container)
-  - `pipeline` (single worker loop for ingest/score/prepare)
+  - `pipeline` (single worker loop for ingest/score/prepare + Telegram polling + scheduled publish)
   - `db`
   - `minio` (generated image storage)
 
-Admin UI: `http://localhost:8002/admin`
-Setup wizard: `http://localhost:8002/admin/setup`
-Score parameters: `http://localhost:8002/admin/score`
-API: `http://localhost:8001`
+Web UI: `http://localhost:8001/`
+Setup wizard: `http://localhost:8001/setup`
+Score parameters: `http://localhost:8001/score`
+API (same service): `http://localhost:8001`
 MinIO console: `http://localhost:9011`
 
 ### Web auth (admin UI)
@@ -160,11 +160,11 @@ Current startup still uses SQLAlchemy `create_all`; next step is writing explici
 
 - Worker picks hourly top article.
 - Bot sends post preview to your private chat with buttons:
-  - `Опубликовать`
-  - `Удалить`
-- After click, bot asks reason:
-  - publish reason -> saved to `editor_feedback`
-  - delete reason -> article archived + reason saved in `audit_logs` (`article_delete_feedback`)
+  - `Опубликовать` (asks time: now / +1h / custom in your timezone)
+  - `Скрыть` (soft-hide, keeps in DB, excluded from All)
+  - `Удалить` (soft-delete, keeps in DB, excluded from All)
+  - `Отправить позже` (keeps in DB and does not spam the review chat)
+- After click, bot asks "почему?" and saves reasons for training.
 
 Important:
 
@@ -176,6 +176,11 @@ Important:
 curl -X POST http://localhost:8001/telegram/review/poll
 curl -X POST http://localhost:8001/telegram/review/send-latest
 ```
+
+## UI styles
+
+- Shared CSS is served from `app/static/app.css` as `/static/app.css`.
+- All UI pages use the same stylesheet (no inline `<style>` blocks).
 
 ## Production deploy on server `77.222.55.88`
 
@@ -258,8 +263,12 @@ Option A (recommended): built-in worker loop (already in `pipeline` service).
 
 - hourly cycle by:
   - `WORKER_INTERVAL_SECONDS=3600`
-- timed auto-publish (UTC):
-  - `AUTO_PUBLISH_TIMES_UTC=07:00,15:00`  # example for 10:00/18:00 Moscow
+- scheduled publish:
+  - публикация по `scheduled_publish_at` происходит в worker loop автоматически
+
+Timezone:
+
+- Отложенная публикация (Schedule) интерпретирует время в `Setup → Telegram → Timezone` (по умолчанию `Europe/Moscow`).
 
 Option B (cron on host):
 
@@ -270,14 +279,20 @@ crontab -e
 Example cron:
 
 ```cron
+# optional: run cron in Moscow time
+CRON_TZ=Europe/Moscow
+
 # every hour: ingest/dedup/score/pick/prepare
-0 * * * * cd /srv/apps/neurovibes_news && docker compose exec -T api python -m app.tasks.full_cycle cycle --backfill-days 1 >> /var/log/neurovibes-cycle.log 2>&1
+0 * * * * cd /srv/apps/neurovibes_news && flock -n /tmp/neurovibes-cycle.lock docker compose exec -T api python -m app.tasks.full_cycle cycle --backfill-days 1 >> /var/log/neurovibes-cycle.log 2>&1
+
+# every hour: send top review message (if you are not using pipeline worker)
+5 * * * * cd /srv/apps/neurovibes_news && curl -fsS -X POST http://127.0.0.1:8001/telegram/review/send-latest >> /var/log/neurovibes-tg-send.log 2>&1
 
 # every minute: handle telegram callbacks/reasons
-* * * * * cd /srv/apps/neurovibes_news && curl -s -X POST http://127.0.0.1:8001/telegram/review/poll >/dev/null 2>&1
+* * * * * cd /srv/apps/neurovibes_news && curl -fsS -X POST http://127.0.0.1:8001/telegram/review/poll >/dev/null 2>&1
 ```
 
-Use either worker scheduling or cron, not both for the same task.
+Use either worker scheduling (`pipeline`) or cron, not both for the same task.
 
 ### 6. Useful checks
 

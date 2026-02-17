@@ -16,6 +16,7 @@ from sqlalchemy.exc import IntegrityError
 from app.db import session_scope
 from app.core.config import settings
 from app.models import Article, ArticleStatus, RawFeedEntry, RawPageSnapshot, Source, SourceHealthMetric
+from app.services.runtime_settings import get_runtime_bool, get_runtime_csv_list
 from app.services.topic_filter import passes_ai_topic_filter
 from app.services.utils import normalize_url, stable_hash, strip_html
 
@@ -192,10 +193,10 @@ def scrape_url(url: str) -> dict:
 
 
 def _should_use_browser_fetch(url: str, status_code: int | None, html: str | None) -> bool:
-    if not settings.browser_fetch_enabled:
+    if not get_runtime_bool("browser_fetch_enabled", default=True):
         return False
     host = (urlparse(url).netloc or "").lower()
-    domains = [x.strip().lower() for x in settings.browser_fetch_domains_csv.split(",") if x.strip()]
+    domains = [x.strip().lower() for x in get_runtime_csv_list("browser_fetch_domains_csv")]
     if not any(d in host for d in domains):
         return False
     if status_code in {401, 403, 406, 429}:

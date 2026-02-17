@@ -12,6 +12,7 @@ from app.core.config import settings
 from app.db import session_scope
 from app.models import Article, ArticleStatus, AuditLog, DailySelection, Score, ScoreParameter, Source
 from app.services.llm import get_client, track_usage_from_response
+from app.services.runtime_settings import get_runtime_bool, get_runtime_csv_list, get_runtime_float, get_runtime_int
 from app.services.topic_filter import passes_ai_topic_filter
 
 CHANNEL_THEME = (
@@ -614,15 +615,15 @@ def _geek_penalty_factor(article: Article, semantic: dict, source_name: str | No
 
 
 def _is_too_technical(semantic: dict, source_name: str | None) -> bool:
-    if not settings.technical_filter_enabled:
+    if not get_runtime_bool("technical_filter_enabled", default=True):
         return False
     domain = str(semantic.get("domain") or "").strip().lower()
     business_it = float(semantic.get("business_it") or 0.0)
     significance = float(semantic.get("significance") or 0.0)
     source_low = (source_name or "").strip().lower()
 
-    low_business = business_it < float(settings.technical_filter_business_it_max)
-    low_significance = significance < float(settings.technical_filter_significance_max)
+    low_business = business_it < get_runtime_float("technical_filter_business_it_max", default=7.4)
+    low_significance = significance < get_runtime_float("technical_filter_significance_max", default=8.8)
     if not (low_business and low_significance):
         return False
 
@@ -634,7 +635,7 @@ def _is_too_technical(semantic: dict, source_name: str | None) -> bool:
 
 
 def _is_too_investing(semantic: dict) -> bool:
-    if not settings.investing_filter_enabled:
+    if not get_runtime_bool("investing_filter_enabled", default=True):
         return False
     domain = str(semantic.get("domain") or "").strip().lower()
     if domain != "finance_investing":
@@ -645,14 +646,14 @@ def _is_too_investing(semantic: dict) -> bool:
     relevance = float(semantic.get("relevance") or 0.0)
 
     return (
-        business_it < float(settings.investing_filter_business_it_max)
-        and significance < float(settings.investing_filter_significance_max)
-        and relevance < float(settings.investing_filter_relevance_max)
+        business_it < get_runtime_float("investing_filter_business_it_max", default=8.0)
+        and significance < get_runtime_float("investing_filter_significance_max", default=8.9)
+        and relevance < get_runtime_float("investing_filter_relevance_max", default=9.0)
     )
 
 
 def _is_too_deep_technical(article: Article, semantic: dict, source_name: str | None) -> bool:
-    if not settings.deep_technical_filter_enabled:
+    if not get_runtime_bool("deep_technical_filter_enabled", default=True):
         return False
     text = f"{article.title or ''} {article.subtitle or ''} {(article.text or '')[:1800]}".lower()
     domain = str(semantic.get("domain") or "").strip().lower()
@@ -660,7 +661,7 @@ def _is_too_deep_technical(article: Article, semantic: dict, source_name: str | 
     significance = float(semantic.get("significance") or 0.0)
     relevance = float(semantic.get("relevance") or 0.0)
 
-    keywords = [k.strip().lower() for k in (settings.deep_technical_keywords_csv or "").split(",") if k.strip()]
+    keywords = [k.strip().lower() for k in get_runtime_csv_list("deep_technical_keywords_csv")]
     kw_hits = sum(1 for k in keywords if k in text)
     # Strict mode for research-heavy sources (arXiv, PapersWithCode) + deep-tech keywords.
     research_like = domain == "research" or (source_name or "").strip().lower() in RESEARCH_HEAVY_SOURCES or kw_hits >= 2
@@ -669,20 +670,20 @@ def _is_too_deep_technical(article: Article, semantic: dict, source_name: str | 
         return False
 
     return (
-        business_it < float(settings.deep_technical_filter_business_it_max)
-        and significance < float(settings.deep_technical_filter_significance_max)
-        and relevance < float(settings.deep_technical_filter_relevance_max)
+        business_it < get_runtime_float("deep_technical_filter_business_it_max", default=8.5)
+        and significance < get_runtime_float("deep_technical_filter_significance_max", default=9.2)
+        and relevance < get_runtime_float("deep_technical_filter_relevance_max", default=9.4)
     )
 
 
 def _has_mass_audience_override(article: Article) -> bool:
     text = f"{article.title or ''} {article.subtitle or ''} {(article.text or '')[:2500]}".lower()
-    keywords = [k.strip().lower() for k in (settings.mass_audience_wow_keywords_csv or "").split(",") if k.strip()]
+    keywords = [k.strip().lower() for k in get_runtime_csv_list("mass_audience_wow_keywords_csv")]
     return any(k in text for k in keywords)
 
 
 def _is_low_mass_audience(semantic: dict, source_name: str | None, article: Article) -> bool:
-    if not settings.mass_audience_filter_enabled:
+    if not get_runtime_bool("mass_audience_filter_enabled", default=True):
         return False
     if _has_mass_audience_override(article):
         return False
@@ -694,9 +695,9 @@ def _is_low_mass_audience(semantic: dict, source_name: str | None, article: Arti
     relevance = float(semantic.get("relevance") or 0.0)
 
     low_triple = (
-        business_it < float(settings.mass_audience_business_it_max)
-        and significance < float(settings.mass_audience_significance_max)
-        and relevance < float(settings.mass_audience_relevance_max)
+        business_it < get_runtime_float("mass_audience_business_it_max", default=8.6)
+        and significance < get_runtime_float("mass_audience_significance_max", default=9.1)
+        and relevance < get_runtime_float("mass_audience_relevance_max", default=9.2)
     )
     if not low_triple:
         return False
@@ -744,6 +745,9 @@ def score_article_in_session(session, article: Article, max_rank: int, editor_st
         score.features = {"topical_gate": "failed"}
         score.uncertainty = 0.0
         article.status = ArticleStatus.ARCHIVED
+        article.archived_kind = "filter"
+        article.archived_reason = "non_ai"
+        article.archived_at = datetime.utcnow()
         article.updated_at = datetime.utcnow()
         return {"ok": True, "article_id": article.id, "archived": True, "reason": "non_ai"}
 
@@ -830,51 +834,89 @@ def score_article_in_session(session, article: Article, max_rank: int, editor_st
     }
     score.uncertainty = round(uncertainty, 6)
 
-    if float(semantic["relevance"]) < settings.min_relevance_for_content:
+    if float(semantic["relevance"]) < get_runtime_float("min_relevance_for_content", default=7.0):
         article.status = ArticleStatus.ARCHIVED
+        article.archived_kind = "filter"
+        article.archived_reason = "low_relevance"
+        article.archived_at = datetime.utcnow()
     elif _is_personnel_move_low_value(article, semantic):
         article.status = ArticleStatus.ARCHIVED
+        article.archived_kind = "filter"
+        article.archived_reason = "personnel_move_gate"
+        article.archived_at = datetime.utcnow()
         score.reasoning = f"{score.reasoning} | personnel_move_gate=failed"
         score.features = {**(score.features or {}), "personnel_move_gate": "failed"}
     elif _is_low_local_practical_value(article, semantic):
         article.status = ArticleStatus.ARCHIVED
+        article.archived_kind = "filter"
+        article.archived_reason = "local_practical_gate"
+        article.archived_at = datetime.utcnow()
         score.reasoning = f"{score.reasoning} | local_practical_gate=failed"
         score.features = {**(score.features or {}), "local_practical_gate": "failed"}
     elif _is_summary_and_boring(article, semantic):
         article.status = ArticleStatus.ARCHIVED
+        article.archived_kind = "filter"
+        article.archived_reason = "summary_boring_gate"
+        article.archived_at = datetime.utcnow()
         score.reasoning = f"{score.reasoning} | summary_boring_gate=failed"
         score.features = {**(score.features or {}), "summary_boring_gate": "failed"}
     elif _is_bloomberg_low_hype(article, semantic, source.name if source else None):
         article.status = ArticleStatus.ARCHIVED
+        article.archived_kind = "filter"
+        article.archived_reason = "bloomberg_hype_gate"
+        article.archived_at = datetime.utcnow()
         score.reasoning = f"{score.reasoning} | bloomberg_hype_gate=failed"
         score.features = {**(score.features or {}), "bloomberg_hype_gate": "failed"}
     elif _is_too_technical(semantic, source.name if source else None):
         article.status = ArticleStatus.ARCHIVED
+        article.archived_kind = "filter"
+        article.archived_reason = "technical_gate"
+        article.archived_at = datetime.utcnow()
         score.reasoning = f"{score.reasoning} | technical_gate=failed"
         score.features = {**(score.features or {}), "technical_gate": "failed"}
     elif _is_too_deep_technical(article, semantic, source.name if source else None):
         article.status = ArticleStatus.ARCHIVED
+        article.archived_kind = "filter"
+        article.archived_reason = "deep_technical_gate"
+        article.archived_at = datetime.utcnow()
         score.reasoning = f"{score.reasoning} | deep_technical_gate=failed"
         score.features = {**(score.features or {}), "deep_technical_gate": "failed"}
     elif _is_too_geek_for_mass(article, semantic, source.name if source else None):
         article.status = ArticleStatus.ARCHIVED
+        article.archived_kind = "filter"
+        article.archived_reason = "geek_gate"
+        article.archived_at = datetime.utcnow()
         score.reasoning = f"{score.reasoning} | geek_gate=failed"
         score.features = {**(score.features or {}), "geek_gate": "failed"}
     elif _is_too_investing(semantic):
         article.status = ArticleStatus.ARCHIVED
+        article.archived_kind = "filter"
+        article.archived_reason = "investing_gate"
+        article.archived_at = datetime.utcnow()
         score.reasoning = f"{score.reasoning} | investing_gate=failed"
         score.features = {**(score.features or {}), "investing_gate": "failed"}
     elif _is_low_mass_audience(semantic, source.name if source else None, article):
         article.status = ArticleStatus.ARCHIVED
+        article.archived_kind = "filter"
+        article.archived_reason = "mass_audience_gate"
+        article.archived_at = datetime.utcnow()
         score.reasoning = f"{score.reasoning} | mass_audience_gate=failed"
         score.features = {**(score.features or {}), "mass_audience_gate": "failed"}
     elif _fails_editor_style_gate(style_score, style_hits, semantic):
         article.status = ArticleStatus.ARCHIVED
+        article.archived_kind = "filter"
+        article.archived_reason = "editor_style_gate"
+        article.archived_at = datetime.utcnow()
         score.reasoning = f"{score.reasoning} | editor_style_gate=failed"
         score.features = {**(score.features or {}), "editor_style_gate": "failed"}
     else:
         article.status = ArticleStatus.REVIEW if (0.45 < p < 0.60) else ArticleStatus.SCORED
     article.updated_at = datetime.utcnow()
+
+    # Fast RU preview (title + one-line overview) for the article list.
+    # This is intentionally cheaper than Generate Post and helps browsing.
+    if article.status not in {ArticleStatus.ARCHIVED, ArticleStatus.DOUBLE}:
+        _ensure_ru_preview(session, article)
 
     return {
         "ok": True,
@@ -884,6 +926,85 @@ def score_article_in_session(session, article: Article, max_rank: int, editor_st
         "relevance": score.relevance,
         "reasoning": score.reasoning,
     }
+
+
+def _ensure_ru_preview(session, article: Article) -> None:
+    """
+    Fill `ru_title` and `short_hook` (used as RU overview in list UI) if missing.
+    Uses the per-request OpenRouter key if available (see llm middleware).
+    """
+    # Don't overwrite editor-written RU text.
+    if (article.ru_title or "").strip() and (article.short_hook or "").strip():
+        return
+
+    title = (article.title or "").strip()
+    subtitle = (article.subtitle or "").strip()
+    text = (article.text or "").strip()
+    if not title:
+        return
+
+    # If title already looks Russian, use it as-is and derive overview from subtitle/text.
+    if not (article.ru_title or "").strip() and re.search(r"[А-Яа-яЁё]", title):
+        article.ru_title = title[: get_runtime_int("max_title_chars", default=130)]
+    if not (article.short_hook or "").strip() and (subtitle or text):
+        raw = (subtitle or text[:260]).strip()
+        if raw:
+            article.short_hook = raw[: get_runtime_int("max_overview_chars", default=260)]
+
+    # If still missing, ask LLM for RU title + 1-sentence overview.
+    if (article.ru_title or "").strip() and (article.short_hook or "").strip():
+        return
+
+    max_title = get_runtime_int("max_title_chars", default=130)
+    max_overview = get_runtime_int("max_overview_chars", default=260)
+    prompt = f"""
+Ты — редактор русскоязычного AI-канала.
+Нужно быстро дать русскую "превью-версию" статьи для списка.
+
+Сделай:
+1) RU заголовок (до {max_title} символов)
+2) Короткий RU обзор (1 предложение, до {max_overview} символов), без воды, без эмоций, без домыслов.
+
+Правила:
+- Только факты из текста.
+- Сохраняй имена компаний/моделей и цифры.
+- Не делай кликбейт.
+- Никаких эмодзи.
+
+Верни JSON only:
+{{"ru_title":"...", "ru_overview":"..."}}
+
+EN title: {title}
+EN subtitle: {subtitle}
+EN excerpt: {(text[:1200] if text else "")}
+URL: {article.canonical_url}
+""".strip()
+
+    try:
+        client = get_client()
+        resp = client.chat.completions.create(
+            model=settings.llm_text_model,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": "Return strictly valid JSON."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.2,
+        )
+        track_usage_from_response(resp, operation="content.ru_preview", model=settings.llm_text_model, kind="chat")
+        data = json.loads(resp.choices[0].message.content or "{}")
+        ru_title = (str(data.get("ru_title") or "").strip() or title)[:max_title]
+        ru_overview = (str(data.get("ru_overview") or "").strip() or (subtitle or text[:max_overview]))[:max_overview]
+        if not (article.ru_title or "").strip():
+            article.ru_title = ru_title
+        if not (article.short_hook or "").strip():
+            article.short_hook = ru_overview
+    except Exception:
+        # Best-effort fallback.
+        if not (article.ru_title or "").strip():
+            article.ru_title = title[:max_title]
+        if not (article.short_hook or "").strip() and (subtitle or text):
+            article.short_hook = (subtitle or text[:max_overview]).strip()[:max_overview]
 
 
 def score_article_by_id(article_id: int) -> dict:
@@ -934,6 +1055,38 @@ def run_scoring(limit: int = 300, progress_cb=None) -> int:
             processed += 1
             if progress_cb:
                 progress_cb(processed, total)
+
+        # Backfill RU preview fields for already-scored items (helps list browsing).
+        # This is cheaper than full Generate Post and only targets AI-relevant items.
+        if get_runtime_bool("ru_preview_enabled", default=True):
+            min_rel = get_runtime_float("min_relevance_for_content", default=7.0)
+            days_back = get_runtime_int("ru_preview_days_back", default=14)
+            fill_limit = get_runtime_int("ru_preview_fill_limit", default=120)
+            cutoff = datetime.utcnow() - timedelta(days=days_back)
+            targets = session.scalars(
+                select(Article)
+                .join(Score, Score.article_id == Article.id)
+                .where(
+                    Article.status.in_(
+                        [
+                            ArticleStatus.INBOX,
+                            ArticleStatus.REVIEW,
+                            ArticleStatus.SCORED,
+                            ArticleStatus.READY,
+                            ArticleStatus.SELECTED_HOURLY,
+                        ]
+                    ),
+                    Article.status != ArticleStatus.ARCHIVED,
+                    Article.status != ArticleStatus.DOUBLE,
+                    (Article.ru_title.is_(None) | (Article.ru_title == "") | Article.short_hook.is_(None) | (Article.short_hook == "")),
+                    Score.relevance >= min_rel,
+                    (Article.published_at.is_(None) | (Article.published_at >= cutoff)),
+                )
+                .order_by(Article.updated_at.desc())
+                .limit(fill_limit)
+            ).all()
+            for t in targets:
+                _ensure_ru_preview(session, t)
 
     return processed
 
@@ -1020,14 +1173,18 @@ def prune_bad_articles(limit: int = 50000, archive_summary_only: bool = True, ar
                 counts["non_ai"] += 1
                 continue
 
-            if archive_low_relevance and score is not None and float(score.relevance or 0.0) < settings.min_relevance_for_content:
+            if (
+                archive_low_relevance
+                and score is not None
+                and float(score.relevance or 0.0) < get_runtime_float("min_relevance_for_content", default=7.0)
+            ):
                 article.status = ArticleStatus.ARCHIVED
                 article.updated_at = datetime.utcnow()
                 counts["archived"] += 1
                 counts["low_relevance"] += 1
                 continue
 
-            if score is not None and settings.technical_filter_enabled:
+            if score is not None and get_runtime_bool("technical_filter_enabled", default=True):
                 semantic = {
                     "domain": ((score.features or {}).get("domain") if isinstance(score.features, dict) else None),
                     "business_it": (float((score.features or {}).get("business_it", 0)) * 10.0) if isinstance(score.features, dict) else 0.0,
@@ -1129,7 +1286,12 @@ def rescore_all_articles(limit: int = 50000, include_archived: bool = True) -> d
     return {"processed": processed, "reactivated_archived": reactivated}
 
 
-def reclassify_all_articles(limit: int = 100000, include_archived: bool = True) -> dict:
+def reclassify_all_articles(
+    limit: int = 100000,
+    include_archived: bool = True,
+    days_back: int | None = None,
+    exclude_deleted: bool = False,
+) -> dict:
     """
     Re-apply gates to all articles using existing scores/features, without
     triggering expensive LLM rescoring for every record.
@@ -1157,6 +1319,11 @@ def reclassify_all_articles(limit: int = 100000, include_archived: bool = True) 
         q = select(Article.id).where(Article.status != ArticleStatus.DOUBLE, Article.status != ArticleStatus.PUBLISHED)
         if not include_archived:
             q = q.where(Article.status != ArticleStatus.ARCHIVED)
+        if exclude_deleted:
+            q = q.where((Article.archived_kind.is_(None)) | (Article.archived_kind != "delete"))
+        if days_back is not None:
+            cutoff = datetime.utcnow() - timedelta(days=int(days_back))
+            q = q.where((Article.created_at >= cutoff) | (Article.published_at >= cutoff))
         ids = session.scalars(q.order_by(Article.created_at.asc()).limit(limit)).all()
 
         for article_id in ids:
@@ -1202,7 +1369,7 @@ def reclassify_all_articles(limit: int = 100000, include_archived: bool = True) 
             style_score, style_hits = _editor_style_score(editor_style_profile, article)
             source = session.get(Source, article.source_id)
             should_archive = (
-                float(score.relevance or 0.0) < settings.min_relevance_for_content
+                float(score.relevance or 0.0) < get_runtime_float("min_relevance_for_content", default=7.0)
                 or _is_personnel_move_low_value(article, semantic)
                 or _is_low_local_practical_value(article, semantic)
                 or _is_summary_and_boring(article, semantic)

@@ -1,0 +1,184 @@
+/* Shared UI styles for the whole platform (served from /static/app.css). */
+
+:root {
+  --bg: #0d1321;
+  --panel: #131d33;
+  --panel2: #17213a;
+  --border: #2a3b60;
+  --border2: #345;
+  --text: #e8eef9;
+  --muted: #9ab;
+  --link: #9ec5ff;
+  --input: #101a31;
+  --input2: #0d172d;
+  --hover: #6ca8ff;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  font-family: -apple-system, Segoe UI, sans-serif;
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+}
+
+header {
+  padding: 14px 16px;
+  background: var(--panel2);
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: flex-start;
+}
+
+main { padding: 16px 20px; }
+
+button, select, input, textarea {
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border2);
+  background: var(--input);
+  color: var(--text);
+}
+
+textarea {
+  width: 100%;
+  background: var(--input2);
+}
+
+button {
+  cursor: pointer;
+  transition: border-color .15s ease, color .15s ease, background .15s ease;
+}
+
+button:hover {
+  border-color: var(--hover);
+  color: #cfe2ff;
+  text-decoration: underline;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: .6;
+  text-decoration: none;
+}
+
+a { color: var(--link); }
+pre { white-space: pre-wrap; word-break: break-word; }
+code { color: #cfe2ff; }
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px;
+  margin-bottom: 12px;
+}
+
+.tag {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #1f2e4f;
+  font-size: 12px;
+}
+
+.muted { color: var(--muted); font-size: 12px; }
+
+table { width: 100%; border-collapse: collapse; }
+th, td {
+  border-bottom: 1px solid #24334f;
+  padding: 10px;
+  text-align: left;
+  font-size: 14px;
+  vertical-align: top;
+}
+tr:hover { background: #111c34; }
+
+th.sortable { cursor: pointer; user-select: none; }
+th.sortable:hover { color: #cfe2ff; }
+.sort-indicator { display: inline-block; width: 12px; margin-left: 4px; color: var(--link); }
+
+.nv-container { max-width: 1100px; margin: 0 auto; }
+.nv-container-sm { max-width: 1000px; margin: 0 auto; }
+
+/* Auth pages */
+body.auth {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 100vh;
+}
+body.auth .card { width: min(520px, 92vw); padding: 18px; }
+body.auth input, body.auth button {
+  width: 100%;
+  margin-top: 10px;
+  padding: 10px;
+  background: var(--input2);
+}
+body.auth button { background: var(--input); }
+
+/* Hover dropdown menu (tabs) */
+.menu { position: relative; }
+.menu-trigger {
+  padding: 8px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  cursor: default;
+  height: 38px;
+  display: flex;
+  align-items: center;
+}
+.menu-trigger:hover { border-color: var(--hover); color: #cfe2ff; text-decoration: underline; }
+.menu-panel {
+  display: none;
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 5000;
+  padding: 10px;
+  background: #0f1a33;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 12px 30px rgba(0,0,0,.35);
+  gap: 8px;
+  flex-direction: column;
+  align-items: stretch;
+  min-width: 240px;
+  max-width: 360px;
+}
+.menu:hover .menu-panel,
+.menu:focus-within .menu-panel { display: flex; }
+.menu-panel a { text-decoration: none; }
+.menu-panel button { width: 100%; text-align: left; }
+.menu-panel label { width: 100%; justify-content: space-between; }
+.menu-panel select { width: 140px; }
+
+.statusbar {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 8px;
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+  background: var(--panel);
+}
+.statusbar .muted { max-width: 520px; }
+.statusbar label,
+.statusbar span {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 38px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #0f1a33;
+}
+.statusbar input[type="number"] { height: 28px; padding: 4px 10px; }
+.statusbar input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--hover); }
+.statusbar #result { max-width: 520px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.spacer { flex: 1 1 auto; min-width: 20px; }

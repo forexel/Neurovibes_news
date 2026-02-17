@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from app.core.config import settings
+from app.services.runtime_settings import get_runtime_bool, get_runtime_csv_list
 
 
 def _normalize_text(value: str) -> str:
@@ -13,7 +13,7 @@ def _normalize_text(value: str) -> str:
 
 
 def passes_ai_topic_filter(title: str, subtitle: str, text: str, tags: list[str] | None = None) -> bool:
-    if not settings.ai_prefilter_enabled:
+    if not get_runtime_bool("ai_prefilter_enabled", default=True):
         return True
 
     tags = tags or []
@@ -25,7 +25,7 @@ def passes_ai_topic_filter(title: str, subtitle: str, text: str, tags: list[str]
     if not hay:
         return False
 
-    keywords = [x.strip().lower() for x in settings.ai_prefilter_keywords_csv.split(",") if x.strip()]
+    keywords = [x.strip().lower() for x in get_runtime_csv_list("ai_prefilter_keywords_csv") if x.strip()]
     title_hits = 0
     title_subtitle_hits = 0
     body_hits = 0

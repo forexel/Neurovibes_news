@@ -14,6 +14,7 @@ from app.db import session_scope
 from app.models import Article, ArticleStatus, ContentVersion, Score
 from app.services.llm import get_client, track_usage_from_response
 from app.services.object_storage import upload_generated_image
+from app.services.runtime_settings import get_runtime_csv_list, get_runtime_int
 
 
 def generate_ru_summary(article_id: int) -> bool:
@@ -150,7 +151,7 @@ def _rewrite_ru(article: Article, extraction: dict) -> dict:
     if not settings.openrouter_api_key:
         return {
             "ru_title": article.title,
-            "ru_summary": (article.subtitle or article.text[:300])[: settings.max_summary_chars],
+            "ru_summary": (article.subtitle or article.text[:300])[: get_runtime_int("max_summary_chars", default=1400)],
             "short_hook": (article.subtitle or article.title)[:100],
         }
 
@@ -183,8 +184,8 @@ Source url: {article.canonical_url}
         data = {}
 
     return {
-        "ru_title": (data.get("ru_title") or article.title)[: settings.max_title_chars],
-        "ru_summary": (data.get("ru_summary") or article.subtitle or article.text[:300])[: settings.max_summary_chars],
+        "ru_title": (data.get("ru_title") or article.title)[: get_runtime_int("max_title_chars", default=130)],
+        "ru_summary": (data.get("ru_summary") or article.subtitle or article.text[:300])[: get_runtime_int("max_summary_chars", default=1400)],
         "short_hook": (data.get("short_hook") or article.title)[:100],
     }
 
@@ -235,7 +236,7 @@ Text: {src[:12000]}
         data = json.loads(raw)
         return {
             "ok": True,
-            "ru_title": (data.get("ru_title") or article.title)[: settings.max_title_chars],
+            "ru_title": (data.get("ru_title") or article.title)[: get_runtime_int("max_title_chars", default=130)],
             "ru_translation": (data.get("ru_translation") or src)[:14000],
         }
     except Exception:
@@ -313,7 +314,7 @@ Fragment:
 
     return {
         "ok": True,
-        "ru_title": ru_title[: settings.max_title_chars],
+        "ru_title": ru_title[: get_runtime_int("max_title_chars", default=130)],
         "ru_translation": "\n\n".join([p for p in translated_parts if p]),
     }
 
@@ -337,12 +338,12 @@ def _chunk_text(text: str, chunk_size: int = 5000) -> list[str]:
 
 
 def _quality_checks(rewrite: dict) -> dict:
-    banned = [x.strip().lower() for x in settings.banned_phrases_csv.split(",") if x.strip()]
+    banned = [x.strip().lower() for x in get_runtime_csv_list("banned_phrases_csv")]
     text = f"{rewrite.get('ru_title', '')}\n{rewrite.get('ru_summary', '')}".lower()
     banned_hits = [b for b in banned if b in text]
 
     date_or_number_count = len(re.findall(r"\d", rewrite.get("ru_summary", "")))
-    too_long = len(rewrite.get("ru_summary", "")) > settings.max_summary_chars
+    too_long = len(rewrite.get("ru_summary", "")) > get_runtime_int("max_summary_chars", default=1400)
     empty = not rewrite.get("ru_summary") or not rewrite.get("ru_title")
 
     return {
@@ -359,8 +360,8 @@ def _safe_fallback_summary(article: Article, extraction: dict) -> str:
     if isinstance(pts, list) and pts:
         first = " ".join(str(x) for x in pts[:2])
         second = "Подробнее: " + article.canonical_url
-        return f"{first}\n\n{second}"[: settings.max_summary_chars]
-    return (article.subtitle or article.text[:400])[: settings.max_summary_chars]
+        return f"{first}\n\n{second}"[: get_runtime_int("max_summary_chars", default=1400)]
+    return (article.subtitle or article.text[:400])[: get_runtime_int("max_summary_chars", default=1400)]
 
 
 def generate_image_prompt(article_id: int) -> str:

@@ -11,17 +11,20 @@ from app.core.config import settings
 from app.db import session_scope
 from app.models import Article, ArticleStatus, PublishJob, PublishStatus
 from app.services.content_generation import generate_ru_summary
+from app.services.telegram_context import telegram_bot_token, telegram_channel_id, telegram_signature
 
 
 def send_test_message(text: str = "Neurovibes bot test message") -> dict:
-    if not settings.telegram_bot_token or not settings.telegram_channel_id:
+    channel_id = (telegram_channel_id() or settings.telegram_channel_id or "").strip()
+    token = (telegram_bot_token() or settings.telegram_bot_token or "").strip()
+    if not token or not channel_id:
         return {"ok": False, "error": "telegram_not_configured"}
 
-    url_base = f"https://api.telegram.org/bot{settings.telegram_bot_token}"
+    url_base = f"https://api.telegram.org/bot{token}"
     try:
         resp = httpx.post(
             f"{url_base}/sendMessage",
-            data={"chat_id": settings.telegram_channel_id, "text": text[:4096]},
+            data={"chat_id": channel_id, "text": text[:4096]},
             timeout=30,
         )
         data = resp.json()
@@ -55,17 +58,19 @@ def publish_article(article_id: int) -> dict:
         title = escape(article.ru_title or "")
         summary = escape(article.ru_summary or "")
         url = escape(article.canonical_url or "")
-        signature = escape(settings.telegram_signature or "@neuro_vibes_future")
+        signature = escape(telegram_signature() or settings.telegram_signature or "@neuro_vibes_future")
         caption = (
             f"<b>{title}</b>\n\n"
-            f"{summary}\n\n"
+            f"{summary}\n"
             f"<a href=\"{url}\">Подробнее</a>\n\n"
             f"{signature}"
         )
         job = PublishJob(article_id=article.id, status=PublishStatus.PENDING)
         session.add(job)
 
-    if not settings.telegram_bot_token or not settings.telegram_channel_id:
+    channel_id = (telegram_channel_id() or settings.telegram_channel_id or "").strip()
+    token = (telegram_bot_token() or settings.telegram_bot_token or "").strip()
+    if not token or not channel_id:
         with session_scope() as session:
             pending = session.scalars(select(PublishJob).where(PublishJob.article_id == article_id).order_by(PublishJob.id.desc()).limit(1)).first()
             if pending:
@@ -73,7 +78,7 @@ def publish_article(article_id: int) -> dict:
                 pending.error_text = "telegram_not_configured"
         return {"ok": False, "error": "telegram_not_configured"}
 
-    url_base = f"https://api.telegram.org/bot{settings.telegram_bot_token}"
+    url_base = f"https://api.telegram.org/bot{token}"
 
     try:
         image_path = None
@@ -87,7 +92,7 @@ def publish_article(article_id: int) -> dict:
             photo_resp = httpx.post(
                 f"{url_base}/sendPhoto",
                 data={
-                    "chat_id": settings.telegram_channel_id,
+                    "chat_id": channel_id,
                     "caption": caption[:1024],
                     "parse_mode": "HTML",
                     "photo": image_path,
@@ -102,7 +107,7 @@ def publish_article(article_id: int) -> dict:
                 photo_resp = httpx.post(
                     f"{url_base}/sendPhoto",
                     data={
-                        "chat_id": settings.telegram_channel_id,
+                        "chat_id": channel_id,
                         "caption": caption[:1024],
                         "parse_mode": "HTML",
                     },
@@ -116,7 +121,7 @@ def publish_article(article_id: int) -> dict:
         if resp is None:
             resp = httpx.post(
                 f"{url_base}/sendMessage",
-                data={"chat_id": settings.telegram_channel_id, "text": caption[:4096], "parse_mode": "HTML"},
+                data={"chat_id": channel_id, "text": caption[:4096], "parse_mode": "HTML"},
                 timeout=30,
             )
 

@@ -108,6 +108,9 @@ class Article(Base):
     short_hook: Mapped[str | None] = mapped_column(Text, nullable=True)
     generated_image_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     scheduled_publish_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    archived_kind: Mapped[str | None] = mapped_column(String(32), nullable=True)  # delete|hide|filter
+    archived_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
@@ -336,6 +339,12 @@ class UserWorkspace(Base):
     sources_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     audience_description: Mapped[str | None] = mapped_column(Text, nullable=True)
     scoring_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    openrouter_api_key_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    telegram_bot_token_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    telegram_review_chat_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    telegram_channel_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    telegram_signature: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    timezone_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
     onboarding_step: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     onboarding_completed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
@@ -370,6 +379,22 @@ class LLMUsageLog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
     __table_args__ = (Index("ix_llm_usage_logs_created", "created_at"),)
+
+
+class RuntimeSetting(Base):
+    __tablename__ = "runtime_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    scope: Mapped[str] = mapped_column(String(32), nullable=False, default="global")  # global|topic
+    topic_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    key: Mapped[str] = mapped_column(String(128), nullable=False)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("scope", "topic_key", "key", name="uq_runtime_settings_scope_topic_key"),
+        Index("ix_runtime_settings_scope_topic", "scope", "topic_key"),
+    )
 
 
 class TelegramReviewJob(Base):

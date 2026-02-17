@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 import threading
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from html import escape
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -51,7 +52,16 @@ from app.services.telegram_publisher import publish_article, send_test_message
 from app.services.telegram_review import poll_review_updates, send_hourly_top_for_review, send_selected_backlog_for_review
 from app.services.audit import audit
 from app.services.auth import create_access_token, decode_token, hash_password, verify_password
-from app.services.llm import get_client, track_usage_from_response
+from app.services.llm import get_client, get_workspace_api_key, set_user_api_key, track_usage_from_response
+from app.services.user_secrets import encrypt_secret
+from app.services.telegram_context import load_workspace_telegram_context
+from app.services.runtime_settings import (
+    RUNTIME_DEFAULTS,
+    delete_runtime_setting,
+    get_runtime_float,
+    list_runtime_settings,
+    upsert_runtime_setting,
+)
 
 app = FastAPI(title="Neurovibes News API", version="0.3.0")
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
@@ -76,6 +86,19 @@ def _get_session_user(request: Request) -> User | None:
         return None
     with session_scope() as session:
         return session.scalars(select(User).where(User.id == user_id, User.is_active.is_(True))).first()
+
+
+@app.middleware("http")
+async def _user_llm_key_middleware(request: Request, call_next):
+    user = _get_session_user(request)
+    if user is None:
+        set_user_api_key(None)
+        load_workspace_telegram_context(None)
+        return await call_next(request)
+    # Load API key once per request and set it for get_client().
+    set_user_api_key(get_workspace_api_key(user.id))
+    load_workspace_telegram_context(user.id)
+    return await call_next(request)
 
 
 def _require_session_user(request: Request) -> User:
@@ -166,14 +189,30 @@ class ScoreParamUpsertIn(BaseModel):
     is_active: bool = True
 
 
+class RuntimeSettingUpsertIn(BaseModel):
+    key: str = Field(min_length=2, max_length=128)
+    value: str = Field(default="", max_length=12000)
+    scope: str = Field(default="global", pattern="^(global|topic)$")
+    topic_key: str | None = Field(default=None, max_length=128)
+
+
 class SetupStep1In(BaseModel):
     channel_name: str = Field(min_length=2, max_length=255)
     channel_theme: str = Field(min_length=10, max_length=6000)
     sources_text: str = Field(min_length=3, max_length=20000)
+    openrouter_api_key: str | None = Field(default=None, max_length=400)
 
 
 class SetupStep2In(BaseModel):
     audience_description: str = Field(min_length=10, max_length=6000)
+
+
+class SetupTelegramIn(BaseModel):
+    telegram_bot_token: str | None = Field(default=None, max_length=512)
+    telegram_review_chat_id: str = Field(default="", max_length=255)
+    telegram_channel_id: str = Field(default="", max_length=255)
+    telegram_signature: str = Field(default="", max_length=255)
+    timezone_name: str = Field(default="Europe/Moscow", max_length=64)
 
 @app.on_event("startup")
 def on_startup() -> None:
@@ -195,15 +234,9 @@ def login_page() -> str:
   <meta charset='utf-8'>
   <meta name='viewport' content='width=device-width, initial-scale=1'>
   <title>Login</title>
-  <style>
-    body { font-family:-apple-system,Segoe UI,sans-serif; margin:0; background:#0d1321; color:#e8eef9; display:flex; justify-content:center; align-items:center; min-height:100vh; }
-    .card { width:min(520px,92vw); background:#131d33; border:1px solid #2a3b60; border-radius:12px; padding:18px; }
-    input, button { width:100%; margin-top:10px; padding:10px; border-radius:8px; border:1px solid #355; background:#0d172d; color:#e8eef9; box-sizing:border-box; }
-    button { background:#101a31; cursor:pointer; }
-    a { color:#9ec5ff; }
-  </style>
+  <link rel="stylesheet" href="/static/app.css?v=1">
 </head>
-<body>
+<body class="auth">
   <form class='card' method='post' action='/login'>
     <h2>Sign In</h2>
     <input name='login' type='text' placeholder='Login' required />
@@ -224,7 +257,7 @@ def login_submit(login: str = Form(...), password: str = Form(...)) -> RedirectR
     if not user or not verify_password(password, user.password_hash):
         return RedirectResponse(url="/login", status_code=303)
     token = create_access_token(user)
-    resp = RedirectResponse(url="/admin", status_code=303)
+    resp = RedirectResponse(url="/", status_code=303)
     resp.set_cookie("nv_session", token, httponly=True, samesite="lax", max_age=60 * 60 * 24 * 7)
     return resp
 
@@ -238,15 +271,9 @@ def register_page() -> str:
   <meta charset='utf-8'>
   <meta name='viewport' content='width=device-width, initial-scale=1'>
   <title>Create User</title>
-  <style>
-    body { font-family:-apple-system,Segoe UI,sans-serif; margin:0; background:#0d1321; color:#e8eef9; display:flex; justify-content:center; align-items:center; min-height:100vh; }
-    .card { width:min(520px,92vw); background:#131d33; border:1px solid #2a3b60; border-radius:12px; padding:18px; }
-    input, button { width:100%; margin-top:10px; padding:10px; border-radius:8px; border:1px solid #355; background:#0d172d; color:#e8eef9; box-sizing:border-box; }
-    button { background:#101a31; cursor:pointer; }
-    a { color:#9ec5ff; }
-  </style>
+  <link rel="stylesheet" href="/static/app.css?v=1">
 </head>
-<body>
+<body class="auth">
   <form class='card' method='post' action='/register'>
     <h2>Sign Up</h2>
     <input name='login' type='text' placeholder='Login' required />
@@ -315,6 +342,7 @@ def scoring_prune_non_ai(body: RunScoringIn) -> dict:
 
 @app.post("/scoring/start")
 def scoring_start(body: RunScoringIn) -> dict:
+    user = _get_session_user(Request)  # placeholder
     job_id = uuid.uuid4().hex
     with SCORING_LOCK:
         SCORING_JOBS[job_id] = {
@@ -560,7 +588,7 @@ def prune_start(body: PruneIn) -> dict:
                                 c_non_ai += 1
                             elif body.archive_low_relevance:
                                 score = session.get(Score, article_id)
-                                if score is not None and float(score.relevance or 0.0) < settings.min_relevance_for_content:
+                                if score is not None and float(score.relevance or 0.0) < get_runtime_float("min_relevance_for_content", default=7.0):
                                     article.status = ArticleStatus.ARCHIVED
                                     article.updated_at = datetime.utcnow()
                                     did_archive = True
@@ -656,10 +684,11 @@ def _ensure_content_allowed(article_id: int) -> None:
         score = session.get(Score, article_id)
         if score is None:
             raise HTTPException(status_code=409, detail="score_required_before_content")
-        if float(score.relevance or 0.0) < settings.min_relevance_for_content:
+        min_rel = get_runtime_float("min_relevance_for_content", default=7.0)
+        if float(score.relevance or 0.0) < min_rel:
             raise HTTPException(
                 status_code=400,
-                detail=f"article_not_ai_relevant_enough: relevance={score.relevance}, min={settings.min_relevance_for_content}",
+                detail=f"article_not_ai_relevant_enough: relevance={score.relevance}, min={min_rel}",
             )
 
 
@@ -930,6 +959,20 @@ def admin_data_articles(
         result = [x for x in result if str(x.get("status") or "").upper() != "DOUBLE"]
 
     reverse = sort_dir.lower() != "asc"
+    # Default sort for ALL: newest day first, and within the day show the highest-scored items on top.
+    # This matches the workflow: "сначала последние новости; в рамках дня самые сильные сверху".
+    if view == "all" and sort_by == "created_at" and reverse:
+        def _dt(x: dict) -> datetime:
+            return x.get("published_at") or x.get("created_at") or datetime.min
+
+        result.sort(
+            key=lambda x: (
+                _dt(x).date(),
+                float(x.get("final_score") or -1),
+                _dt(x),
+            ),
+            reverse=True,
+        )
     if sort_by == "score":
         result.sort(key=lambda x: float(x["final_score"] or -1), reverse=reverse)
     elif sort_by == "source":
@@ -1064,7 +1107,7 @@ def admin_data_costs(request: Request) -> dict:
         "estimated_cost_usd_24h": round(day_cost, 6),
         "estimated_cost_usd_7d": round(week_cost, 6),
         "estimated_cost_usd_30d": round(month_cost, 6),
-        "total_tokens": total_tokens,
+        # Hide token counters in UI by default; keep only $ estimates.
         "note": "Estimated by token counters and configured per-million rates.",
     }
 
@@ -1174,6 +1217,36 @@ def score_params_delete(param_id: int, request: Request) -> dict:
     return {"ok": True, "deleted_id": param_id}
 
 
+@app.get("/admin-data/runtime-settings")
+def admin_data_runtime_settings(request: Request, scope: str | None = None, topic_key: str | None = None) -> dict:
+    _require_session_user(request)
+    rows = list_runtime_settings(scope=scope if scope in {"global", "topic"} else None, topic_key=topic_key)
+    return {"ok": True, "items": rows, "defaults": dict(RUNTIME_DEFAULTS)}
+
+
+@app.post("/runtime-settings/upsert")
+def runtime_settings_upsert(body: RuntimeSettingUpsertIn, request: Request) -> dict:
+    _require_session_user(request)
+    try:
+        row = upsert_runtime_setting(
+            key=body.key,
+            value=body.value,
+            scope=("topic" if body.scope == "topic" else "global"),
+            topic_key=body.topic_key,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, "item": row}
+
+
+@app.delete("/runtime-settings/{setting_id}")
+def runtime_settings_delete(setting_id: int, request: Request) -> dict:
+    _require_session_user(request)
+    if not delete_runtime_setting(setting_id):
+        raise HTTPException(status_code=404, detail="runtime_setting_not_found")
+    return {"ok": True, "deleted_id": setting_id}
+
+
 @app.get("/setup/state")
 def setup_state(request: Request) -> dict:
     user = _require_session_user(request)
@@ -1183,6 +1256,14 @@ def setup_state(request: Request) -> dict:
             ws = UserWorkspace(user_id=user.id, onboarding_step=1, onboarding_completed=False)
             session.add(ws)
             session.flush()
+        # If DB already has data (legacy single-user mode), don't force onboarding.
+        if not ws.onboarding_completed:
+            articles_cnt = int(session.scalar(select(func.count(Article.id))) or 0)
+            sources_cnt = int(session.scalar(select(func.count(Source.id))) or 0)
+            if articles_cnt > 0 and sources_cnt > 0:
+                ws.onboarding_step = 4
+                ws.onboarding_completed = True
+                ws.updated_at = datetime.utcnow()
         return {
             "user_id": user.id,
             "email": user.email,
@@ -1191,6 +1272,12 @@ def setup_state(request: Request) -> dict:
             "sources_text": ws.sources_text or "",
             "audience_description": ws.audience_description or "",
             "scoring_notes": ws.scoring_notes or "",
+            "openrouter_api_key_set": bool((ws.openrouter_api_key_enc or "").strip()),
+            "telegram_bot_token_set": bool((ws.telegram_bot_token_enc or "").strip()),
+            "telegram_review_chat_id": ws.telegram_review_chat_id or "",
+            "telegram_channel_id": ws.telegram_channel_id or "",
+            "telegram_signature": ws.telegram_signature or "",
+            "timezone_name": ws.timezone_name or "Europe/Moscow",
             "onboarding_step": int(ws.onboarding_step or 1),
             "onboarding_completed": bool(ws.onboarding_completed),
         }
@@ -1207,6 +1294,10 @@ def setup_step1(body: SetupStep1In, request: Request) -> dict:
         ws.channel_name = body.channel_name.strip()
         ws.channel_theme = body.channel_theme.strip()
         ws.sources_text = body.sources_text.strip()
+        # Optional: store per-user OpenRouter key (encrypted). Empty string means "unset".
+        if body.openrouter_api_key is not None:
+            raw_key = (body.openrouter_api_key or "").strip()
+            ws.openrouter_api_key_enc = encrypt_secret(raw_key) if raw_key else None
         ws.onboarding_step = max(2, int(ws.onboarding_step or 1))
         ws.updated_at = datetime.utcnow()
         # Optional convenience: auto-add provided urls as sources if they are not present yet.
@@ -1232,6 +1323,26 @@ def setup_step1(body: SetupStep1In, request: Request) -> dict:
                     )
                 )
     return {"ok": True, "step": 1}
+
+
+@app.post("/setup/telegram")
+def setup_telegram(body: SetupTelegramIn, request: Request) -> dict:
+    user = _require_session_user(request)
+    with session_scope() as session:
+        ws = session.scalars(select(UserWorkspace).where(UserWorkspace.user_id == user.id)).first()
+        if ws is None:
+            ws = UserWorkspace(user_id=user.id)
+            session.add(ws)
+        # Empty token means "unset"
+        if body.telegram_bot_token is not None:
+            raw = (body.telegram_bot_token or "").strip()
+            ws.telegram_bot_token_enc = encrypt_secret(raw) if raw else None
+        ws.telegram_review_chat_id = (body.telegram_review_chat_id or "").strip()
+        ws.telegram_channel_id = (body.telegram_channel_id or "").strip()
+        ws.telegram_signature = (body.telegram_signature or "").strip()
+        ws.timezone_name = (body.timezone_name or "Europe/Moscow").strip() or "Europe/Moscow"
+        ws.updated_at = datetime.utcnow()
+    return {"ok": True}
 
 
 @app.post("/setup/step2/analyze")
@@ -1593,6 +1704,9 @@ def delete_article(article_id: int, body: DeleteIn) -> dict:
         )
 
         article.status = ArticleStatus.ARCHIVED
+        article.archived_kind = "delete"
+        article.archived_reason = delete_reason
+        article.archived_at = datetime.utcnow()
         article.updated_at = datetime.utcnow()
         session.query(DailySelection).filter(
             DailySelection.article_id == article_id,
@@ -1628,7 +1742,12 @@ def publish(article_id: int) -> dict:
 
 
 @app.post("/articles/{article_id}/schedule-publish")
-def schedule_publish(article_id: int, body: SchedulePublishIn) -> dict:
+def schedule_publish(article_id: int, body: SchedulePublishIn, request: Request) -> dict:
+    # Interpret publish time in user's configured timezone (default: Europe/Moscow),
+    # then store in DB as naive UTC for stable scheduling.
+    # This fixes the common confusion: selecting "10:00" should mean 10:00 local time,
+    # not 10:00 UTC.
+    user = _require_session_user(request)
     raw = (body.publish_at or "").strip()
     if not raw:
         raise HTTPException(status_code=400, detail="publish_at_required")
@@ -1636,20 +1755,36 @@ def schedule_publish(article_id: int, body: SchedulePublishIn) -> dict:
         dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="invalid_publish_at") from exc
-    if dt.tzinfo is not None:
-        dt = dt.astimezone().replace(tzinfo=None)
+    with session_scope() as session:
+        ws = session.scalars(select(UserWorkspace).where(UserWorkspace.user_id == user.id)).first()
+        tz_name = (ws.timezone_name if ws else "") or "Europe/Moscow"
+    try:
+        user_tz = ZoneInfo(tz_name)
+    except Exception:
+        user_tz = ZoneInfo("Europe/Moscow")
+
+    if dt.tzinfo is None:
+        dt_utc = dt.replace(tzinfo=user_tz).astimezone(timezone.utc).replace(tzinfo=None)
+    else:
+        dt_utc = dt.astimezone(timezone.utc).replace(tzinfo=None)
 
     with session_scope() as session:
         article = session.get(Article, article_id)
         if not article:
             raise HTTPException(status_code=404, detail="Article not found")
-        article.scheduled_publish_at = dt
+        article.scheduled_publish_at = dt_utc
         article.updated_at = datetime.utcnow()
-    return {"ok": True, "article_id": article_id, "scheduled_publish_at": dt.isoformat(sep=" ", timespec="seconds")}
+    return {
+        "ok": True,
+        "article_id": article_id,
+        "scheduled_publish_at": _dt_to_utc_z(dt_utc),
+        "timezone_name": tz_name,
+    }
 
 
 @app.post("/articles/{article_id}/unschedule-publish")
-def unschedule_publish(article_id: int) -> dict:
+def unschedule_publish(article_id: int, request: Request) -> dict:
+    _require_session_user(request)
     with session_scope() as session:
         article = session.get(Article, article_id)
         if not article:
@@ -1690,23 +1825,13 @@ def admin_score_page(request: Request):
   <meta charset='utf-8'>
   <meta name='viewport' content='width=device-width, initial-scale=1'>
   <title>Score Parameters</title>
-  <style>
-    body { font-family: -apple-system, Segoe UI, sans-serif; margin: 0; background: #0d1321; color: #e8eef9; }
-    header { padding: 16px 20px; background: #17213a; display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
-    button, input, textarea { padding: 8px 10px; border-radius: 8px; border: 1px solid #345; background: #101a31; color: #e8eef9; }
-    button { cursor: pointer; }
-    main { padding: 16px 20px; }
-    table { width: 100%; border-collapse: collapse; }
-    th, td { border-bottom: 1px solid #24334f; padding: 10px; text-align: left; font-size: 14px; vertical-align: top; }
-    textarea { width: 100%; min-height: 68px; box-sizing: border-box; }
-    .muted { color: #9ab; font-size: 12px; }
-  </style>
+  <link rel="stylesheet" href="/static/app.css?v=1">
 </head>
 <body>
   <header>
-    <a href="/admin"><button>← Back</button></a>
-    <a href="/admin/setup"><button>Setup</button></a>
-    <a href="/admin/sources"><button>Sources</button></a>
+    <a href="/"><button>← Back</button></a>
+    <a href="/setup"><button>Setup</button></a>
+    <a href="/sources"><button>Sources</button></a>
     <span class="muted">Параметры влияют на формулу скоринга. Весы нормализуются автоматически.</span>
     <span id="result" class="muted"></span>
   </header>
@@ -1727,6 +1852,24 @@ def admin_score_page(request: Request):
     <table>
       <thead><tr><th>ID</th><th>Key</th><th>Title</th><th>Weight</th><th>Active</th><th>Description</th><th>Rule</th><th>Action</th></tr></thead>
       <tbody id="rows"></tbody>
+    </table>
+
+    <h3 style="margin-top:24px;">Runtime Filters / Style Settings</h3>
+    <p class="muted">Эти значения больше не нужно держать в .env. Поддерживается global или topic scope.</p>
+    <p class="muted">Telegram настройки теперь настраиваются в <code>/setup</code> (как secret в workspace пользователя). Здесь остаются только non-secret runtime параметры.</p>
+    <div style="display:grid;gap:8px;grid-template-columns: 180px 120px 180px 1fr;">
+      <input id="rs_key" placeholder="key" />
+      <select id="rs_scope"><option value="global">global</option><option value="topic">topic</option></select>
+      <input id="rs_topic" placeholder="topic_key (for topic scope)" />
+      <input id="rs_value" placeholder="value (string/number/csv/bool)" />
+    </div>
+    <div style="margin-top:8px;">
+      <button onclick="saveRuntime()">Save Runtime Setting</button>
+      <button onclick="loadRuntimeSettings()">Reload</button>
+    </div>
+    <table style="margin-top:12px;">
+      <thead><tr><th>ID</th><th>Scope</th><th>Topic</th><th>Key</th><th>Value</th><th>Action</th></tr></thead>
+      <tbody id="runtime_rows"></tbody>
     </table>
   </main>
   <script>
@@ -1781,11 +1924,60 @@ def admin_score_page(request: Request):
       if (!resp.ok) return alert(out.detail || 'delete failed');
       loadParams();
     }
+    async function loadRuntimeSettings(){
+      const resp = await fetch('/admin-data/runtime-settings');
+      if (!resp.ok) { if (resp.status === 401) location.href='/login'; return; }
+      const out = await resp.json();
+      const items = out.items || [];
+      document.getElementById('runtime_rows').innerHTML = items.map(r => `
+        <tr>
+          <td>${r.id}</td><td>${esc(r.scope)}</td><td>${esc(r.topic_key || '')}</td><td>${esc(r.key)}</td>
+          <td style="max-width:660px;word-break:break-word;">${esc(r.value)}</td>
+          <td><button onclick='fillRuntime(${r.id})'>Edit</button><button onclick='deleteRuntime(${r.id})'>Delete</button></td>
+        </tr>
+      `).join('');
+      window.runtimeById = {};
+      for (const i of items) window.runtimeById[String(i.id)] = i;
+    }
+    function fillRuntime(id){
+      const r = (window.runtimeById || {})[String(id)] || {};
+      document.getElementById('rs_key').value = r.key || '';
+      document.getElementById('rs_scope').value = r.scope || 'global';
+      document.getElementById('rs_topic').value = r.topic_key || '';
+      document.getElementById('rs_value').value = r.value || '';
+    }
+    async function saveRuntime(){
+      const body = {
+        key: (document.getElementById('rs_key').value || '').trim(),
+        scope: (document.getElementById('rs_scope').value || 'global').trim(),
+        topic_key: (document.getElementById('rs_topic').value || '').trim() || null,
+        value: (document.getElementById('rs_value').value || '').trim()
+      };
+      const resp = await fetch('/runtime-settings/upsert', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+      const out = await resp.json();
+      setResult(out);
+      if (!resp.ok) return alert(out.detail || 'save runtime failed');
+      loadRuntimeSettings();
+    }
+    async function deleteRuntime(id){
+      if (!confirm('Delete runtime setting '+id+'?')) return;
+      const resp = await fetch('/runtime-settings/' + id, {method:'DELETE'});
+      const out = await resp.json();
+      setResult(out);
+      if (!resp.ok) return alert(out.detail || 'delete failed');
+      loadRuntimeSettings();
+    }
     loadParams();
+    loadRuntimeSettings();
   </script>
 </body>
 </html>
 """
+
+
+@app.get("/score", response_class=HTMLResponse)
+def score_page(request: Request):
+    return admin_score_page(request)
 
 
 @app.get("/admin/setup", response_class=HTMLResponse)
@@ -1799,31 +1991,23 @@ def admin_setup_page(request: Request):
   <meta charset='utf-8'>
   <meta name='viewport' content='width=device-width, initial-scale=1'>
   <title>Setup Wizard</title>
-  <style>
-    body { font-family: -apple-system, Segoe UI, sans-serif; margin: 0; background: #0d1321; color: #e8eef9; }
-    header { padding: 16px 20px; background: #17213a; display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
-    main { max-width: 980px; margin: 0 auto; padding: 18px; }
-    .card { background:#131d33; border:1px solid #2a3b60; border-radius:12px; padding:14px; margin-bottom:12px; }
-    input, textarea, button { padding: 8px 10px; border-radius: 8px; border: 1px solid #345; background: #101a31; color: #e8eef9; box-sizing: border-box; }
-    textarea { width:100%; min-height:140px; }
-    input { width:100%; }
-    button { cursor:pointer; margin-right:8px; }
-    .muted { color:#9ab; font-size:12px; }
-  </style>
+  <link rel="stylesheet" href="/static/app.css?v=1">
 </head>
 <body>
   <header>
-    <a href="/admin"><button>← Back</button></a>
-    <a href="/admin/score"><button>Score</button></a>
-    <a href="/admin/sources"><button>Sources</button></a>
+    <a href="/"><button>← Back</button></a>
+    <a href="/score"><button>Score</button></a>
+    <a href="/sources"><button>Sources</button></a>
     <span id="status" class="muted"></span>
   </header>
-  <main>
+  <main class="nv-container-sm">
     <div class="card">
       <h3>Step 1: Channel</h3>
-      <p class="muted">Название канала, тематика, и список источников (по одному в строке).</p>
+      <p class="muted">Название канала, тематика, OpenRouter API key (твой), и список источников (по одному в строке).</p>
       <p><input id="channel_name" placeholder="Название канала" /></p>
       <p><textarea id="channel_theme" placeholder="Тематика канала"></textarea></p>
+      <p><input id="openrouter_api_key" type="password" placeholder="OpenRouter API key (sk-or-v1-...)" /></p>
+      <p class="muted" id="openrouter_hint"></p>
       <p><textarea id="sources_text" placeholder="Добавьте источники (rss/html urls), по одному в строке"></textarea></p>
       <p><button onclick="saveStep1()">Save Step 1</button></p>
     </div>
@@ -1835,7 +2019,19 @@ def admin_setup_page(request: Request):
       <pre id="analysis_out"></pre>
     </div>
     <div class="card">
-      <h3>Step 3: Initial Bootstrap</h3>
+      <h3>Step 3: Telegram</h3>
+      <p class="muted">Куда слать превью на review и куда публиковать. Bot token хранится как secret у пользователя (в базе, зашифрованно) и не отображается обратно.</p>
+      <p><input id="telegram_bot_token" type="password" placeholder="Bot token (123:AA...)" /></p>
+      <p class="muted" id="telegram_token_hint"></p>
+      <p><input id="telegram_review_chat_id" placeholder="Review chat id (например @username или -100...)" /></p>
+      <p><input id="telegram_channel_id" placeholder="Channel id (например -100...)" /></p>
+      <p><input id="telegram_signature" placeholder="Signature (например @neuro_vibes_future)" /></p>
+      <p><input id="timezone_name" placeholder="Timezone (например Europe/Moscow)" /></p>
+      <p><button onclick="saveTelegram()">Save Telegram</button></p>
+      <p class="muted" id="telegram_hint"></p>
+    </div>
+    <div class="card">
+      <h3>Step 4: Initial Bootstrap</h3>
       <p class="muted">Сбор за месяц + дедуп + скоринг + автоподбор top hour.</p>
       <p><button onclick="completeSetup()">Run Initial Import</button></p>
       <pre id="bootstrap_out"></pre>
@@ -1851,6 +2047,13 @@ def admin_setup_page(request: Request):
       document.getElementById('channel_theme').value = s.channel_theme || '';
       document.getElementById('sources_text').value = s.sources_text || '';
       document.getElementById('audience_description').value = s.audience_description || '';
+      document.getElementById('telegram_review_chat_id').value = s.telegram_review_chat_id || '';
+      document.getElementById('telegram_channel_id').value = s.telegram_channel_id || '';
+      document.getElementById('telegram_signature').value = s.telegram_signature || '';
+      document.getElementById('timezone_name').value = s.timezone_name || 'Europe/Moscow';
+      document.getElementById('openrouter_hint').textContent = s.openrouter_api_key_set ? 'OpenRouter key: set (hidden). To change it, paste a new key and Save Step 1.' : 'OpenRouter key: not set. You must set it to use LLM features for your account.';
+      document.getElementById('telegram_token_hint').textContent = s.telegram_bot_token_set ? 'Bot token: set (hidden). To change it, paste a new token and Save Telegram.' : 'Bot token: not set. Review/publish will not work until you set it.';
+      document.getElementById('telegram_hint').textContent = (s.telegram_review_chat_id && s.telegram_channel_id) ? 'Telegram: chat + channel configured.' : 'Telegram: chat/channel not configured yet.';
       setStatus(`User: ${s.email} | step: ${s.onboarding_step} | completed: ${s.onboarding_completed ? 'yes':'no'}`);
     }
     async function saveStep1(){
@@ -1858,11 +2061,13 @@ def admin_setup_page(request: Request):
         channel_name: (document.getElementById('channel_name').value || '').trim(),
         channel_theme: (document.getElementById('channel_theme').value || '').trim(),
         sources_text: (document.getElementById('sources_text').value || '').trim(),
+        openrouter_api_key: (document.getElementById('openrouter_api_key').value || '').trim(),
       };
       const resp = await fetch('/setup/step1', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
       const out = await resp.json();
       if (!resp.ok) return alert(out.detail || 'save step1 failed');
       setStatus('Step 1 saved');
+      document.getElementById('openrouter_api_key').value = '';
       loadState();
     }
     async function analyzeStep2(){
@@ -1872,6 +2077,21 @@ def admin_setup_page(request: Request):
       document.getElementById('analysis_out').textContent = JSON.stringify(out, null, 2);
       if (!resp.ok) return alert(out.detail || 'analyze failed');
       setStatus('Scoring params updated');
+      loadState();
+    }
+    async function saveTelegram(){
+      const body = {
+        telegram_bot_token: (document.getElementById('telegram_bot_token').value || '').trim(),
+        telegram_review_chat_id: (document.getElementById('telegram_review_chat_id').value || '').trim(),
+        telegram_channel_id: (document.getElementById('telegram_channel_id').value || '').trim(),
+        telegram_signature: (document.getElementById('telegram_signature').value || '').trim(),
+        timezone_name: (document.getElementById('timezone_name').value || '').trim(),
+      };
+      const resp = await fetch('/setup/telegram', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+      const out = await resp.json();
+      if (!resp.ok) return alert(out.detail || 'save telegram failed');
+      document.getElementById('telegram_bot_token').value = '';
+      setStatus('Telegram settings saved');
       loadState();
     }
     async function completeSetup(){
@@ -1889,8 +2109,20 @@ def admin_setup_page(request: Request):
 """
 
 
+@app.get("/setup", response_class=HTMLResponse)
+def setup_page(request: Request):
+    return admin_setup_page(request)
+
+
 @app.get("/admin", response_class=HTMLResponse)
 def admin_page(request: Request):
+    # Keep /admin for backward compatibility, but treat root "/" as the main entrypoint.
+    return RedirectResponse(url="/", status_code=303)
+
+
+@app.get("/", response_class=HTMLResponse)
+def home_page(request: Request):
+    # Platform root.
     user = _get_session_user(request)
     if user is None:
         return RedirectResponse(url="/login", status_code=303)
@@ -1901,7 +2133,14 @@ def admin_page(request: Request):
             session.add(ws)
             session.flush()
         if not ws.onboarding_completed:
-            return RedirectResponse(url="/admin/setup", status_code=303)
+            articles_cnt = int(session.scalar(select(func.count(Article.id))) or 0)
+            sources_cnt = int(session.scalar(select(func.count(Source.id))) or 0)
+            if articles_cnt > 0 and sources_cnt > 0:
+                ws.onboarding_step = 4
+                ws.onboarding_completed = True
+                ws.updated_at = datetime.utcnow()
+            else:
+                return RedirectResponse(url="/setup", status_code=303)
     return _render_admin_list_page("all")
 
 
@@ -1912,11 +2151,21 @@ def admin_published_page(request: Request):
     return _render_admin_list_page("published")
 
 
+@app.get("/published", response_class=HTMLResponse)
+def published_page(request: Request):
+    return admin_published_page(request)
+
+
 @app.get("/admin/selected-day", response_class=HTMLResponse)
 def admin_selected_day_page(request: Request):
     if _get_session_user(request) is None:
         return RedirectResponse(url="/login", status_code=303)
     return _render_admin_list_page("selected_day")
+
+
+@app.get("/selected-day", response_class=HTMLResponse)
+def selected_day_page(request: Request):
+    return admin_selected_day_page(request)
 
 
 @app.get("/admin/selected-hour", response_class=HTMLResponse)
@@ -1926,6 +2175,11 @@ def admin_selected_hour_page(request: Request):
     return _render_admin_list_page("selected_hour")
 
 
+@app.get("/selected-hour", response_class=HTMLResponse)
+def selected_hour_page(request: Request):
+    return admin_selected_hour_page(request)
+
+
 @app.get("/admin/no-double", response_class=HTMLResponse)
 def admin_no_double_page(request: Request):
     if _get_session_user(request) is None:
@@ -1933,11 +2187,21 @@ def admin_no_double_page(request: Request):
     return _render_admin_list_page("no_double")
 
 
+@app.get("/no-double", response_class=HTMLResponse)
+def no_double_page(request: Request):
+    return admin_no_double_page(request)
+
+
 @app.get("/admin/deleted", response_class=HTMLResponse)
 def admin_deleted_page(request: Request):
     if _get_session_user(request) is None:
         return RedirectResponse(url="/login", status_code=303)
     return _render_admin_list_page("deleted")
+
+
+@app.get("/deleted", response_class=HTMLResponse)
+def deleted_page(request: Request):
+    return admin_deleted_page(request)
 
 
 @app.get("/admin/sources", response_class=HTMLResponse)
@@ -1952,26 +2216,13 @@ def admin_sources_page(request: Request):
   <meta charset='utf-8'>
   <meta name='viewport' content='width=device-width, initial-scale=1'>
   <title>Sources</title>
-  <style>
-    body { font-family: -apple-system, Segoe UI, sans-serif; margin: 0; background: #0d1321; color: #e8eef9; }
-    header { padding: 16px 20px; background: #17213a; display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
-    button, input { padding: 8px 10px; border-radius: 8px; border: 1px solid #345; background: #101a31; color: #e8eef9; }
-    button { cursor: pointer; transition: border-color .15s ease, color .15s ease, background .15s ease; }
-    button:hover { border-color: #6ca8ff; color: #cfe2ff; text-decoration: underline; }
-    main { padding: 16px 20px; }
-    table { width: 100%; border-collapse: collapse; }
-    th, td { border-bottom: 1px solid #24334f; padding: 10px; text-align: left; font-size: 14px; vertical-align: top; }
-    tr:hover { background: #111c34; }
-    .muted { color: #9ab; font-size: 12px; }
-    a { color: #9ec5ff; }
-    code { color: #cfe2ff; }
-  </style>
+  <link rel="stylesheet" href="/static/app.css?v=1">
 </head>
 <body>
   <header>
-    <a href="/admin"><button>← Back</button></a>
-    <a href="/admin/score"><button>Score</button></a>
-    <a href="/admin/setup"><button>Setup</button></a>
+    <a href="/"><button>← Back</button></a>
+    <a href="/score"><button>Score</button></a>
+    <a href="/setup"><button>Setup</button></a>
     <a href="/logout"><button>Logout</button></a>
     <span class="muted">Sources: включай/выключай фиды. Выключенный источник не будет загружаться при Sync.</span>
     <span id="result" class="muted"></span>
@@ -2085,6 +2336,120 @@ def admin_sources_page(request: Request):
 """
 
 
+@app.get("/sources", response_class=HTMLResponse)
+def sources_page(request: Request):
+    return admin_sources_page(request)
+
+
+@app.get("/bot", response_class=HTMLResponse)
+def bot_page(request: Request):
+    _require_session_user(request)
+    user = _get_session_user(request)
+    with session_scope() as session:
+        ws = session.scalars(select(UserWorkspace).where(UserWorkspace.user_id == user.id)).first()
+        bot_set = bool(getattr(ws, "telegram_bot_token_enc", None))
+        review_chat = (getattr(ws, "telegram_review_chat_id", "") or "").strip()
+        channel_id = (getattr(ws, "telegram_channel_id", "") or "").strip()
+        signature = (getattr(ws, "telegram_signature", "") or "").strip()
+        tz = (getattr(ws, "timezone_name", "") or "").strip()
+
+    def _mask(v: str) -> str:
+        if not v:
+            return "-"
+        if len(v) <= 6:
+            return v
+        return v[:3] + "…" + v[-2:]
+
+    return f"""
+<!doctype html>
+<html lang='ru'>
+<head>
+  <meta charset='utf-8'>
+  <meta name='viewport' content='width=device-width, initial-scale=1'>
+  <title>Bot</title>
+  <link rel="stylesheet" href="/static/app.css?v=1">
+</head>
+<body>
+  <header>
+    <a href="/"><button>← Articles</button></a>
+    <a href="/setup"><button>Setup</button></a>
+    <a href="/logout"><button>Logout</button></a>
+  </header>
+  <main class="nv-container-sm">
+    <div class="card">
+      <h2 style="margin:0 0 10px 0;">Telegram Bot</h2>
+      <div class="muted">Настройки (токены/чаты) редактируются в <code>Setup → Telegram</code>.</div>
+      <p class="muted" style="margin-top:10px;">
+        Bot token: <b>{'set' if bot_set else 'not set'}</b><br>
+        Review chat: <b>{review_chat or '-'}</b><br>
+        Channel: <b>{channel_id or '-'}</b><br>
+        Signature: <b>{signature or '-'}</b><br>
+        Timezone: <b>{tz or '-'}</b>
+      </p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button onclick="telegramTest()">Telegram Test</button>
+        <button onclick="telegramBacklog()">Send TG Backlog</button>
+      </div>
+      <pre id="out" style="white-space:pre-wrap;background:#0b1428;border:1px solid #2a3b60;padding:12px;border-radius:8px;margin-top:12px;"></pre>
+    </div>
+  </main>
+  <script>
+    function setOut(v) {{ document.getElementById('out').textContent = v; }}
+    async function telegramTest() {{
+      setOut('Sending test…');
+      const resp = await fetch('/telegram/test', {{method:'POST'}});
+      const out = await resp.json();
+      setOut(JSON.stringify(out, null, 2));
+      if (!resp.ok) alert(out.detail || 'telegram test failed');
+    }}
+    async function telegramBacklog() {{
+      const n = prompt('How many messages to send? (1..100)', '10');
+      if (n === null) return;
+      setOut('Sending backlog…');
+      const resp = await fetch(`/telegram/review/send-backlog?limit=${{Math.max(1, Math.min(100, Number(n) || 10))}}`, {{method:'POST'}});
+      const out = await resp.json();
+      setOut(JSON.stringify(out, null, 2));
+      if (!resp.ok) alert(out.detail || 'send backlog failed');
+    }}
+  </script>
+</body>
+</html>
+"""
+
+
+@app.get("/publish", response_class=HTMLResponse)
+def publish_settings_page(request: Request):
+    _require_session_user(request)
+    return """
+<!doctype html>
+<html lang='ru'>
+<head>
+  <meta charset='utf-8'>
+  <meta name='viewport' content='width=device-width, initial-scale=1'>
+  <title>Publish</title>
+  <link rel="stylesheet" href="/static/app.css?v=1">
+</head>
+<body>
+  <header>
+    <a href="/"><button>← Articles</button></a>
+    <a href="/setup"><button>Setup</button></a>
+    <a href="/logout"><button>Logout</button></a>
+  </header>
+  <main class="nv-container-sm">
+    <div class="card">
+      <h2 style="margin:0 0 10px 0;">Publish Settings</h2>
+      <div class="muted">
+        Настройки публикации (channel_id, signature, timezone, bot token) находятся в <code>Setup → Telegram</code>.
+        Публикация делается через Telegram-review (кнопка "Опубликовать") или из карточки статьи.
+      </div>
+      <p class="muted" style="margin-top:10px;">Если хочешь, добавлю сюда управление расписанием и очередь запланированных постов.</p>
+    </div>
+  </main>
+</body>
+</html>
+"""
+
+
 def _render_admin_list_page(view: str) -> str:
     return """
 <!doctype html>
@@ -2093,61 +2458,71 @@ def _render_admin_list_page(view: str) -> str:
   <meta charset='utf-8'>
   <meta name='viewport' content='width=device-width, initial-scale=1'>
   <title>Neurovibes Admin</title>
-  <style>
-    body { font-family: -apple-system, Segoe UI, sans-serif; margin: 0; background: #0d1321; color: #e8eef9; }
-    header { padding: 16px 20px; background: #17213a; display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
-    button, select, input { padding: 8px 10px; border-radius: 8px; border: 1px solid #345; background: #101a31; color: #e8eef9; }
-    button { cursor: pointer; transition: border-color .15s ease, color .15s ease, background .15s ease; }
-    button:hover { border-color: #6ca8ff; color: #cfe2ff; text-decoration: underline; }
-    button:disabled { cursor: not-allowed; opacity: .6; text-decoration: none; }
-    main { padding: 16px 20px; }
-    table { width: 100%; border-collapse: collapse; }
-    th, td { border-bottom: 1px solid #24334f; padding: 10px; text-align: left; font-size: 14px; vertical-align: top; }
-    th.sortable { cursor: pointer; user-select: none; }
-    th.sortable:hover { color: #cfe2ff; }
-    .sort-indicator { display: inline-block; width: 12px; margin-left: 4px; color: #9ec5ff; }
-    tr:hover { background: #111c34; }
-    .tag { padding: 2px 8px; border-radius: 999px; background: #1f2e4f; font-size: 12px; }
-    .muted { color: #9ab; font-size: 12px; }
-    a { color: #9ec5ff; }
-  </style>
+  <link rel="stylesheet" href="/static/app.css?v=1">
 </head>
 <body>
   <header>
-    <a href="/admin"><button>All</button></a>
-    <a href="/admin/published"><button>Published</button></a>
-    <a href="/admin/selected-day"><button>Selected Day</button></a>
-    <a href="/admin/selected-hour"><button>Selected Hour</button></a>
-    <a href="/admin/deleted"><button>Deleted</button></a>
-    <label><input id="hideDoubleToggle" type="checkbox" onchange="onHideDoubleChange()"> No Double</label>
-    <a href="/admin/setup"><button>Setup</button></a>
-    <a href="/admin/score"><button>Score</button></a>
-    <a href="/admin/sources"><button>Sources</button></a>
-    <a href="/logout"><button>Logout</button></a>
-    <button onclick="runPipeline()">Run Pipeline</button>
-    <button onclick="runScoring()">Score Inbox</button>
-    <button onclick="enrichFullText()">Enrich Full Text</button>
-    <button onclick="pruneBad()">Prune</button>
-    <label>Aggregate:
-      <select id="aggregatePeriod">
-        <option value="hour">1h</option>
-        <option value="day">1d</option>
-        <option value="week">1w</option>
-        <option value="month" selected>1m</option>
-      </select>
-    </label>
-    <button onclick="aggregateNews()" title="Load only new items for selected period">Sync</button>
-    <button onclick="rebuildProfile()">Rebuild Profile</button>
-    <button onclick="autoSelect()">Auto Select</button>
-    <button onclick="telegramTest()">Telegram Test</button>
-    <button onclick="telegramReviewSend()">Send TG Review</button>
-    <button onclick="telegramBacklog()">Send TG Backlog</button>
-    <button onclick="telegramReviewPoll()">Poll TG</button>
-    <label>Page size: <input id="pageSizeInput" type="number" value="25" min="5" max="100" onchange="onPageSizeChange()"></label>
-    <span class="muted">Generate Post: RU заголовок + 2 абзаца + превью (без Translate Full)</span>
-    <span id="costBadge" class="muted">Cost: ...</span>
-    <span id="action_state" class="muted">Ready</span>
-    <span id="result" class="muted"></span>
+    <div class="menu" tabindex="0">
+      <div class="menu-trigger">Account ▾</div>
+      <div class="menu-panel">
+        <a href="/setup"><button>Setup</button></a>
+        <a href="/sources"><button>Sources</button></a>
+        <a href="/logout"><button>Logout</button></a>
+      </div>
+    </div>
+
+    <div class="menu" tabindex="0">
+      <div class="menu-trigger">Articles ▾</div>
+      <div class="menu-panel">
+        <a href="/"><button>All</button></a>
+        <a href="/published"><button>Published</button></a>
+        <a href="/selected-day"><button>Selected Day</button></a>
+        <a href="/selected-hour"><button>Selected Hour</button></a>
+        <a href="/deleted"><button>Deleted</button></a>
+        <button onclick="autoSelect()" title="Pick best candidate using preference profile (no publish)">Auto Select</button>
+      </div>
+    </div>
+
+    <div class="menu" tabindex="0">
+      <div class="menu-trigger">Actions ▾</div>
+      <div class="menu-panel">
+        <label>Period:
+          <select id="aggregatePeriod">
+            <option value="hour">1h</option>
+            <option value="day">1d</option>
+            <option value="week">1w</option>
+            <option value="month" selected>1m</option>
+          </select>
+        </label>
+        <button onclick="aggregateNews()" title="Load only new items for selected period">Sync</button>
+        <button onclick="runPipeline()" title="Sync + Enrich full text + Dedup + Score + Pick hourly top + Prepare RU+Image">Run Pipeline</button>
+        <button onclick="runScoring()" title="Score unscored items (new) and update Selected Hour">Score New</button>
+        <button onclick="enrichFullText()" title="Try to fetch full text from site for summary_only articles">Get Full Text</button>
+        <button onclick="pruneBad()" title="Archive items that don't match filters (non-AI, too technical, low relevance, etc.)">Prune</button>
+        <button onclick="rebuildProfile()" title="Rebuild preference profile from feedback (LLM-costly)">Rebuild Profile</button>
+      </div>
+    </div>
+
+    <div class="menu" tabindex="0">
+      <div class="menu-trigger">Tools ▾</div>
+      <div class="menu-panel">
+        <a href="/bot"><button>Bot</button></a>
+        <a href="/publish"><button>Publish</button></a>
+        <a href="/score"><button>Score</button></a>
+      </div>
+    </div>
+
+    <div class="spacer"></div>
+
+    <div class="statusbar">
+      <label><input id="hideDoubleToggle" type="checkbox" onchange="onHideDoubleChange()"> No Double</label>
+      <label>Page size: <input id="pageSizeInput" type="number" value="25" min="5" max="100" onchange="onPageSizeChange()"></label>
+      <span class="muted">Generate Post: RU заголовок + 2 абзаца (без Translate Full)</span>
+      <span id="costBadge" class="muted">Cost: ...</span>
+      <span id="action_state" class="muted">Ready</span>
+      <span id="result" class="muted"></span>
+    </div>
+
     <div id="scoreProgressWrap" style="display:none;min-width:260px;">
       <div class="muted" id="scoreProgressText">Scoring: 0/0</div>
       <div style="height:10px;background:#0c1a33;border:1px solid #355;border-radius:999px;overflow:hidden;">
@@ -2231,7 +2606,11 @@ def _render_admin_list_page(view: str) -> str:
           <td><span class='tag'>${a.status}</span></td>
           <td><span class='tag'>${a.content_mode || 'summary_only'}</span></td>
           <td>${a.score_10 ?? 'not scored'}</td>
-          <td><a href='/admin/article/${a.id}'>${escapeHtml(a.ru_title || a.title)}</a><div class='muted'><a href='${a.canonical_url}' target='_blank'>source</a></div></td>
+          <td>
+            <a href='/article/${a.id}'>${escapeHtml(a.ru_title || a.title)}</a>
+            <div class='muted' style='margin-top:6px;'>${escapeHtml((a.short_hook || a.subtitle || '').slice(0, 220))}</div>
+            <div class='muted' style='margin-top:6px;'><a href='${a.canonical_url}' target='_blank'>source</a></div>
+          </td>
           <td>${escapeHtml(a.source_name || ('#' + a.source_id))}</td>
           <td>${a.published_at ?? '-'}</td>
           <td>
@@ -2252,7 +2631,7 @@ def _render_admin_list_page(view: str) -> str:
         const c = await resp.json();
         const el = document.getElementById('costBadge');
         if (!el) return;
-        el.textContent = `Cost est: $${Number(c.estimated_cost_usd_total || 0).toFixed(3)} | 24h: $${Number(c.estimated_cost_usd_24h || 0).toFixed(3)} | tokens: ${Number(c.total_tokens || 0).toLocaleString()}`;
+        el.textContent = `Cost est: $${Number(c.estimated_cost_usd_total || 0).toFixed(3)} | 24h: $${Number(c.estimated_cost_usd_24h || 0).toFixed(3)}`;
       } catch (_) {}
     }
 
@@ -2740,6 +3119,7 @@ def _render_admin_list_page(view: str) -> str:
 """.replace("__VIEW__", view)
 
 
+@app.get("/article/{article_id}", response_class=HTMLResponse)
 @app.get("/admin/article/{article_id}", response_class=HTMLResponse)
 def admin_article_page(article_id: int, request: Request):
     if _get_session_user(request) is None:
@@ -2791,7 +3171,7 @@ def admin_article_page(article_id: int, request: Request):
         "source_id": article.source_id,
         "published_at": article.published_at,
         "canonical_url": article.canonical_url,
-        "scheduled_publish_at": article.scheduled_publish_at,
+        "scheduled_publish_at": _dt_to_utc_z(article.scheduled_publish_at),
         "image": image_raw,
         "image_web": image_web,
         "score": score.final_score if score else None,
@@ -2810,24 +3190,13 @@ def admin_article_page(article_id: int, request: Request):
 <meta charset='utf-8'>
 <meta name='viewport' content='width=device-width, initial-scale=1'>
 <title>Article {article_id}</title>
-<style>
- body {{ font-family: -apple-system, Segoe UI, sans-serif; margin: 0; background:#0d1321; color:#e8eef9; }}
- main {{ max-width: 1100px; margin: 0 auto; padding: 18px; }}
- .card {{ background:#131d33; border:1px solid #2a3b60; border-radius:12px; padding:14px; margin-bottom:12px; }}
- * {{ box-sizing: border-box; }}
- textarea {{ width:100%; min-height:130px; background:#0d172d; color:#e8eef9; border:1px solid #355; border-radius:8px; padding:8px; }}
- button {{ padding:8px 10px; border-radius:8px; border:1px solid #355; background:#101a31; color:#e8eef9; margin-right:8px; cursor:pointer; transition:border-color .15s ease, color .15s ease, background .15s ease; }}
- button:hover {{ border-color:#6ca8ff; color:#cfe2ff; text-decoration:underline; }}
- button:disabled {{ cursor:not-allowed; opacity:.6; text-decoration:none; }}
- a {{ color:#9ec5ff; }}
- pre {{ white-space: pre-wrap; word-break: break-word; }}
-</style>
+<link rel="stylesheet" href="/static/app.css?v=1">
 </head>
 <body>
-<main>
-  <p><a href='/admin'>← back</a></p>
-  <div class='card'>
-    <div id='meta'></div>
+  <main class="nv-container">
+	  <p><a href='/'>← back</a></p>
+	  <div class='card'>
+	    <div id='meta'></div>
     <p><a id='sourceLink' target='_blank'>original source</a></p>
     <p id='score'></p>
   </div>
@@ -2895,7 +3264,7 @@ def admin_article_page(article_id: int, request: Request):
   <div class='card'>
     <h3>Actions</h3>
     <p id='action_state' style='color:#9ec5ff;margin-top:0;'>Ready</p>
-    <p class='muted'>Отложенная публикация (локальное время браузера):</p>
+    <p class='muted'>Отложенная публикация (локальное время из Setup → Telegram timezone):</p>
     <p>
       <input id='schedule_at' type='datetime-local' />
       <button onclick='schedulePublish()'>Schedule</button>
@@ -2937,8 +3306,15 @@ function toLocalInputValue(v) {{
   const p = (n) => String(n).padStart(2, '0');
   return `${{d.getFullYear()}}-${{p(d.getMonth()+1)}}-${{p(d.getDate())}}T${{p(d.getHours())}}:${{p(d.getMinutes())}}`;
 }}
+function toLocalDisplay(v) {{
+  if (!v) return '';
+  const d = new Date(v);
+  if (Number.isNaN(d.getTime())) return String(v);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${{p(d.getDate())}}.${{p(d.getMonth()+1)}}.${{d.getFullYear()}} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}}
 function renderMeta(d) {{
-  const sched = d.scheduled_publish_at ? ` | scheduled_at: ${{d.scheduled_publish_at}}` : '';
+  const sched = d.scheduled_publish_at ? ` | scheduled_at: ${{toLocalDisplay(d.scheduled_publish_at)}}` : '';
   document.getElementById('meta').innerHTML = `ID: ${{d.id}} | status: ${{d.status}} | content: ${{d.content_mode || 'summary_only'}} | source_id: ${{d.source_id}} | published_at: ${{d.published_at || '-'}}${{sched}}`;
 }}
 renderMeta(data);
@@ -3457,6 +3833,7 @@ def _serialize_article(article: Article, score: Score | None, source: Source | N
         "title": article.title,
         "subtitle": article.subtitle,
         "ru_title": article.ru_title,
+        "short_hook": article.short_hook,
         "source_id": article.source_id,
         "source_name": source.name if source else None,
         "published_at": article.published_at,
@@ -3465,7 +3842,7 @@ def _serialize_article(article: Article, score: Score | None, source: Source | N
         "score_10": _score_to_10(score),
         "canonical_url": article.canonical_url,
         "generated_image_path": article.generated_image_path,
-        "scheduled_publish_at": article.scheduled_publish_at,
+        "scheduled_publish_at": _dt_to_utc_z(article.scheduled_publish_at),
     }
 
 
@@ -3482,6 +3859,17 @@ def _build_post_preview_text(article: Article) -> str:
         settings.telegram_signature or "@neuro_vibes_future",
     ]
     return "\n\n".join([p for p in parts if p])
+
+
+def _dt_to_utc_z(dt: datetime | None) -> str | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        aware = dt.replace(tzinfo=timezone.utc)
+    else:
+        aware = dt.astimezone(timezone.utc)
+    # `Z` makes JS Date parsing deterministic (UTC).
+    return aware.isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def _score_to_10(score: Score | None) -> int | None:

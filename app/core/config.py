@@ -41,44 +41,7 @@ class Settings:
     score_scale_weight: float = float(os.getenv("W_SCALE", "0.05"))
     score_source_trust_weight: float = float(os.getenv("W_SOURCE_TRUST", "0.10"))
 
-    max_summary_chars: int = int(os.getenv("MAX_SUMMARY_CHARS", "1400"))
-    max_title_chars: int = int(os.getenv("MAX_TITLE_CHARS", "130"))
-    banned_phrases_csv: str = os.getenv("BANNED_PHRASES", "шок!,ты не поверишь")
-    ai_prefilter_enabled: bool = os.getenv("AI_PREFILTER_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
-    ai_prefilter_keywords_csv: str = os.getenv(
-        "AI_PREFILTER_KEYWORDS",
-        "ai,artificial intelligence,llm,large language model,generative,ai agent,ai agents,openai,anthropic,deepmind,chatgpt,gemini,claude,transformer,fine-tuning,model inference,neural,chips,compute,gpu,nvidia,robotics",
-    )
-    min_relevance_for_content: float = float(os.getenv("MIN_RELEVANCE_FOR_CONTENT", "7"))
-    technical_filter_enabled: bool = os.getenv("TECHNICAL_FILTER_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
-    technical_filter_business_it_max: float = float(os.getenv("TECHNICAL_FILTER_BUSINESS_IT_MAX", "7.4"))
-    technical_filter_significance_max: float = float(os.getenv("TECHNICAL_FILTER_SIGNIFICANCE_MAX", "8.8"))
-    deep_technical_filter_enabled: bool = os.getenv("DEEP_TECHNICAL_FILTER_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
-    deep_technical_filter_business_it_max: float = float(os.getenv("DEEP_TECHNICAL_FILTER_BUSINESS_IT_MAX", "8.5"))
-    deep_technical_filter_significance_max: float = float(os.getenv("DEEP_TECHNICAL_FILTER_SIGNIFICANCE_MAX", "9.2"))
-    deep_technical_filter_relevance_max: float = float(os.getenv("DEEP_TECHNICAL_FILTER_RELEVANCE_MAX", "9.4"))
-    deep_technical_keywords_csv: str = os.getenv(
-        "DEEP_TECHNICAL_KEYWORDS",
-        "benchmark,parameterized logical,sat,petri net,theorem,proof,ablation,architecture search,diffusion equation,formal verification,retrosynthesis",
-    )
-    investing_filter_enabled: bool = os.getenv("INVESTING_FILTER_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
-    investing_filter_business_it_max: float = float(os.getenv("INVESTING_FILTER_BUSINESS_IT_MAX", "8.0"))
-    investing_filter_significance_max: float = float(os.getenv("INVESTING_FILTER_SIGNIFICANCE_MAX", "8.9"))
-    investing_filter_relevance_max: float = float(os.getenv("INVESTING_FILTER_RELEVANCE_MAX", "9.0"))
-    mass_audience_filter_enabled: bool = os.getenv("MASS_AUDIENCE_FILTER_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
-    mass_audience_significance_max: float = float(os.getenv("MASS_AUDIENCE_SIGNIFICANCE_MAX", "9.1"))
-    mass_audience_relevance_max: float = float(os.getenv("MASS_AUDIENCE_RELEVANCE_MAX", "9.2"))
-    mass_audience_business_it_max: float = float(os.getenv("MASS_AUDIENCE_BUSINESS_IT_MAX", "8.6"))
-    mass_audience_wow_keywords_csv: str = os.getenv(
-        "MASS_AUDIENCE_WOW_KEYWORDS",
-        "new version,release,launched,rollout,available now,security,privacy,data breach,safety,major update,first in world,breakthrough,wow",
-    )
     auto_score_on_ingest: bool = os.getenv("AUTO_SCORE_ON_INGEST", "true").lower() in {"1", "true", "yes", "on"}
-    browser_fetch_enabled: bool = os.getenv("BROWSER_FETCH_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
-    browser_fetch_domains_csv: str = os.getenv(
-        "BROWSER_FETCH_DOMAINS",
-        "forbes.com,wired.com,bloomberg.com,ft.com,businessinsider.com,openai.com",
-    )
     browser_cookies_json: str = os.getenv("BROWSER_COOKIES_JSON", "")
     minio_endpoint: str = os.getenv("MINIO_ENDPOINT", "minio:9000")
     minio_access_key: str = os.getenv("MINIO_ACCESS_KEY", "minioadmin")

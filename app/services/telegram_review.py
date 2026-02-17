@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta
 from html import escape
+from zoneinfo import ZoneInfo
 
 import httpx
 from sqlalchemy import select
@@ -21,17 +23,58 @@ from app.models import (
 )
 from app.services.content_generation import generate_ru_summary
 from app.services.telegram_publisher import publish_article
+from app.services.telegram_context import (
+    telegram_bot_token,
+    telegram_review_chat_id,
+    telegram_signature,
+    telegram_timezone_name,
+)
+from app.services.runtime_settings import get_runtime_str
+from app.services.pipeline import pick_hourly_top
+from app.services.scoring import reclassify_all_articles
+
+_SQLI_PATTERNS = [
+    re.compile(r"(?i)(?:'|\"|`)\s*or\s+1\s*=\s*1"),
+    re.compile(r"(?i)\bunion\s+select\b"),
+    re.compile(r"(?i);\s*(?:drop|truncate|alter|delete|insert|update|create)\b"),
+    re.compile(r"(--|/\*|\*/)"),
+]
+
+def _post_decision_recalc() -> None:
+    # Cheap recalc only: re-apply gates and update hourly selection using existing scores.
+    try:
+        reclassify_all_articles(limit=20000, include_archived=True, days_back=1, exclude_deleted=True)
+    except Exception:
+        pass
+    try:
+        pick_hourly_top()
+    except Exception:
+        pass
+
+
+def _sanitize_reason_input(text: str) -> tuple[bool, str, str | None]:
+    raw = str(text or "")
+    cleaned = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", " ", raw)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if len(cleaned) < 5:
+        return False, "", "слишком коротко (минимум 5 символов)"
+    if len(cleaned) > 1000:
+        cleaned = cleaned[:1000].strip()
+    for pattern in _SQLI_PATTERNS:
+        if pattern.search(cleaned):
+            return False, "", "текст похож на небезопасный ввод"
+    return True, cleaned, None
 
 
 def _bot_base_url() -> str | None:
-    token = (settings.telegram_bot_token or "").strip()
+    token = (telegram_bot_token() or settings.telegram_bot_token or "").strip()
     if not token:
         return None
     return f"https://api.telegram.org/bot{token}"
 
 
 def _review_chat_id() -> str:
-    return (settings.telegram_review_chat_id or "").strip()
+    return (telegram_review_chat_id() or get_runtime_str("telegram_review_chat_id") or settings.telegram_review_chat_id or "").strip()
 
 
 def _build_review_text(article: Article) -> str:
@@ -49,11 +92,11 @@ def _build_review_text(article: Article) -> str:
     if not summary:
         summary = ((article.subtitle or "")[:900]).strip() or "Короткий текст пока не готов."
     url = escape((article.canonical_url or "").strip())
-    signature = escape(settings.telegram_signature or "@neuro_vibes_future")
+    signature = escape(telegram_signature() or get_runtime_str("telegram_signature") or settings.telegram_signature or "@neuro_vibes_future")
     return (
         "Топ-1 за последний час. Публиковать?\n\n"
         f"<b>{escape(title)}</b>\n\n"
-        f"{escape(summary)}\n\n"
+        f"{escape(summary)}\n"
         f"<a href=\"{url}\">Подробнее</a>\n\n"
         f"{signature}"
     )
@@ -160,6 +203,9 @@ def _archive_article_with_reason(article_id: int, reason: str) -> dict:
             )
         )
         article.status = ArticleStatus.ARCHIVED
+        article.archived_kind = "delete"
+        article.archived_reason = reason
+        article.archived_at = datetime.utcnow()
         article.updated_at = datetime.utcnow()
         session.query(DailySelection).filter(
             DailySelection.article_id == article_id,
@@ -206,6 +252,7 @@ def send_hourly_top_for_review(article_id: int | None = None) -> dict:
         "inline_keyboard": [
             [
                 {"text": "Опубликовать", "callback_data": f"rv:pub:{target_article_id}"},
+                {"text": "Скрыть", "callback_data": f"rv:hide:{target_article_id}"},
                 {"text": "Удалить", "callback_data": f"rv:del:{target_article_id}"},
                 {"text": "Отправить позже", "callback_data": f"rv:later:{target_article_id}"},
             ]
@@ -268,6 +315,7 @@ def send_selected_backlog_for_review(limit: int = 20) -> dict:
             "inline_keyboard": [
                 [
                     {"text": "Опубликовать", "callback_data": f"rv:pub:{target_article_id}"},
+                    {"text": "Скрыть", "callback_data": f"rv:hide:{target_article_id}"},
                     {"text": "Удалить", "callback_data": f"rv:del:{target_article_id}"},
                     {"text": "Отправить позже", "callback_data": f"rv:later:{target_article_id}"},
                 ]
@@ -311,12 +359,28 @@ def _handle_callback(update: dict) -> dict:
         return {"ok": True, "skipped": "not_review_callback"}
 
     parts = data.split(":")
-    if len(parts) != 3 or not parts[2].isdigit():
+    if len(parts) < 3 or not parts[2].isdigit():
         return {"ok": True, "skipped": "bad_callback"}
     action = parts[1]
     article_id = int(parts[2])
 
     if action == "pub":
+        _edit_message_reply_markup(chat_id, message_id)
+        kb = {
+            "inline_keyboard": [
+                [
+                    {"text": "Сейчас", "callback_data": f"rv:pubnow:{article_id}"},
+                    {"text": "+1 час", "callback_data": f"rv:pub1h:{article_id}"},
+                ],
+                [
+                    {"text": "Ввести время (МСК)", "callback_data": f"rv:pubpick:{article_id}"},
+                ],
+            ]
+        }
+        _send_message(chat_id, "Когда публиковать?", reply_markup=kb)
+        return {"ok": True, "action": "publish_choose_time", "article_id": article_id}
+
+    if action == "pubnow":
         _edit_message_reply_markup(chat_id, message_id)
         out = publish_article(article_id)
         with session_scope() as session:
@@ -324,7 +388,7 @@ def _handle_callback(update: dict) -> dict:
             if job and out.get("ok"):
                 job.status = "published"
                 job.updated_at = datetime.utcnow()
-        prompt = _send_message(chat_id, f"Опубликовано. Почему выбрал эту новость? Ответь реплаем на это сообщение.", force_reply=True)
+        prompt = _send_message(chat_id, "Ок. Почему публикуем сейчас? Ответь реплаем на это сообщение.", force_reply=True)
         if prompt.get("ok"):
             prompt_id = str((prompt.get("result") or {}).get("message_id") or "")
             if prompt_id:
@@ -339,7 +403,54 @@ def _handle_callback(update: dict) -> dict:
                             created_at=datetime.utcnow(),
                         )
                     )
-        return {"ok": True, "action": "publish", "article_id": article_id, "publish": out}
+        return {"ok": True, "action": "publish_now", "article_id": article_id, "publish": out}
+
+    if action == "pub1h":
+        _edit_message_reply_markup(chat_id, message_id)
+        with session_scope() as session:
+            article = session.get(Article, article_id)
+            if article:
+                article.scheduled_publish_at = datetime.utcnow() + timedelta(hours=1)
+                article.updated_at = datetime.utcnow()
+        prompt = _send_message(chat_id, "Поставил публикацию через 1 час. Почему выбрал именно эту новость? Ответь реплаем.", force_reply=True)
+        if prompt.get("ok"):
+            prompt_id = str((prompt.get("result") or {}).get("message_id") or "")
+            if prompt_id:
+                with session_scope() as session:
+                    session.add(
+                        TelegramPendingReason(
+                            chat_id=chat_id,
+                            user_id=user_id or "0",
+                            article_id=article_id,
+                            action="schedule_1h",
+                            prompt_message_id=prompt_id,
+                            created_at=datetime.utcnow(),
+                        )
+                    )
+        return {"ok": True, "action": "publish_plus_1h", "article_id": article_id}
+
+    if action == "pubpick":
+        _edit_message_reply_markup(chat_id, message_id)
+        prompt = _send_message(
+            chat_id,
+            "Напиши время публикации по Москве: `HH:MM` или `YYYY-MM-DD HH:MM`. Ответь реплаем на это сообщение.",
+            force_reply=True,
+        )
+        if prompt.get("ok"):
+            prompt_id = str((prompt.get("result") or {}).get("message_id") or "")
+            if prompt_id:
+                with session_scope() as session:
+                    session.add(
+                        TelegramPendingReason(
+                            chat_id=chat_id,
+                            user_id=user_id or "0",
+                            article_id=article_id,
+                            action="pick_time",
+                            prompt_message_id=prompt_id,
+                            created_at=datetime.utcnow(),
+                        )
+                    )
+        return {"ok": True, "action": "publish_pick_time", "article_id": article_id}
 
     if action == "del":
         _edit_message_reply_markup(chat_id, message_id)
@@ -359,6 +470,25 @@ def _handle_callback(update: dict) -> dict:
                         )
                     )
         return {"ok": True, "action": "delete", "article_id": article_id}
+
+    if action == "hide":
+        _edit_message_reply_markup(chat_id, message_id)
+        prompt = _send_message(chat_id, "Почему скрываем (не удаляем) эту новость? Ответь реплаем.", force_reply=True)
+        if prompt.get("ok"):
+            prompt_id = str((prompt.get("result") or {}).get("message_id") or "")
+            if prompt_id:
+                with session_scope() as session:
+                    session.add(
+                        TelegramPendingReason(
+                            chat_id=chat_id,
+                            user_id=user_id or "0",
+                            article_id=article_id,
+                            action="hide",
+                            prompt_message_id=prompt_id,
+                            created_at=datetime.utcnow(),
+                        )
+                    )
+        return {"ok": True, "action": "hide", "article_id": article_id}
 
     if action == "later":
         _edit_message_reply_markup(chat_id, message_id)
@@ -388,7 +518,7 @@ def _handle_callback(update: dict) -> dict:
 
 def _handle_message(update: dict) -> dict:
     msg = update.get("message") or {}
-    text = str(msg.get("text") or "").strip()
+    text = str(msg.get("text") or "")
     if not text:
         return {"ok": True, "skipped": "no_text"}
     chat = msg.get("chat") or {}
@@ -418,31 +548,185 @@ def _handle_message(update: dict) -> dict:
             return {"ok": True, "skipped": "no_pending"}
         article_id = int(pending.article_id)
         action = pending.action
-        session.delete(pending)
+
+    ok_input, safe_text, input_error = _sanitize_reason_input(text)
+    if not ok_input:
+        _send_message(chat_id, f"Не могу принять такой ввод: {input_error}. Напиши причину обычным текстом и ответь на то же сообщение.")
+        return {"ok": True, "skipped": "invalid_reason_input"}
 
     if action == "publish":
         with session_scope() as session:
-            session.add(EditorFeedback(article_id=article_id, explanation_text=text))
+            pending = session.scalars(
+                select(TelegramPendingReason).where(
+                    TelegramPendingReason.prompt_message_id == prompt_id,
+                    TelegramPendingReason.chat_id == chat_id,
+                )
+            ).first()
+            if pending:
+                session.delete(pending)
+            session.add(EditorFeedback(article_id=article_id, explanation_text=safe_text))
             job = session.scalars(select(TelegramReviewJob).where(TelegramReviewJob.article_id == article_id)).first()
             if job:
-                job.decision_reason = text
+                job.decision_reason = safe_text
                 job.updated_at = datetime.utcnow()
         _send_message(chat_id, "Причину публикации сохранил.")
+        _post_decision_recalc()
         return {"ok": True, "action": "publish_reason_saved", "article_id": article_id}
 
-    if action == "delete":
-        out = _archive_article_with_reason(article_id=article_id, reason=text)
+    if action == "schedule_1h":
         with session_scope() as session:
+            pending = session.scalars(
+                select(TelegramPendingReason).where(
+                    TelegramPendingReason.prompt_message_id == prompt_id,
+                    TelegramPendingReason.chat_id == chat_id,
+                )
+            ).first()
+            if pending:
+                session.delete(pending)
+            session.add(EditorFeedback(article_id=article_id, explanation_text=f"SCHEDULE(+1h): {safe_text}"))
+            job = session.scalars(select(TelegramReviewJob).where(TelegramReviewJob.article_id == article_id)).first()
+            if job:
+                job.decision_reason = safe_text
+                job.updated_at = datetime.utcnow()
+        _send_message(chat_id, "Причину отложенной публикации сохранил.")
+        _post_decision_recalc()
+        return {"ok": True, "action": "schedule_reason_saved", "article_id": article_id}
+
+    if action == "pick_time":
+        # Parse a Moscow-time timestamp from user's reply and store as UTC in scheduled_publish_at.
+        raw = safe_text
+        m = re.match(r"^(\d{4}-\d{2}-\d{2})\s+(\d{1,2}:\d{2})$", raw)
+        m2 = re.match(r"^(\d{1,2}):(\d{2})$", raw)
+        dt_msk: datetime | None = None
+        try:
+            tz = ZoneInfo(telegram_timezone_name() or get_runtime_str("timezone_name") or "Europe/Moscow")
+        except Exception:
+            tz = ZoneInfo("Europe/Moscow")
+        try:
+            if m:
+                dt_msk = datetime.fromisoformat(f"{m.group(1)} {m.group(2)}").replace(tzinfo=tz)
+            elif m2:
+                now_msk = datetime.now(tz=tz)
+                hh = int(m2.group(1))
+                mm = int(m2.group(2))
+                dt_msk = now_msk.replace(hour=hh, minute=mm, second=0, microsecond=0)
+                if dt_msk < now_msk:
+                    dt_msk = dt_msk + timedelta(days=1)
+        except Exception:
+            dt_msk = None
+        if dt_msk is None:
+            _send_message(chat_id, "Не понял время. Напиши `HH:MM` или `YYYY-MM-DD HH:MM` (по Москве) и ответь на то же сообщение.")
+            return {"ok": True, "skipped": "invalid_publish_time"}
+        dt_utc = dt_msk.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+
+        with session_scope() as session:
+            pending = session.scalars(
+                select(TelegramPendingReason).where(
+                    TelegramPendingReason.prompt_message_id == prompt_id,
+                    TelegramPendingReason.chat_id == chat_id,
+                )
+            ).first()
+            if pending:
+                session.delete(pending)
+            article = session.get(Article, article_id)
+            if not article:
+                _send_message(chat_id, "Не нашел статью для планирования публикации.")
+                return {"ok": True, "action": "pick_time_missing_article", "article_id": article_id}
+            article.scheduled_publish_at = dt_utc
+            article.updated_at = datetime.utcnow()
+        prompt2 = _send_message(chat_id, f"Ок, поставил публикацию на {dt_msk.strftime('%Y-%m-%d %H:%M')} МСК. Почему выбрал эту новость? Ответь реплаем.", force_reply=True)
+        if prompt2.get("ok"):
+            prompt2_id = str((prompt2.get("result") or {}).get("message_id") or "")
+            if prompt2_id:
+                with session_scope() as session:
+                    session.add(
+                        TelegramPendingReason(
+                            chat_id=chat_id,
+                            user_id=user_id or "0",
+                            article_id=article_id,
+                            action="schedule_custom",
+                            prompt_message_id=prompt2_id,
+                            created_at=datetime.utcnow(),
+                        )
+                    )
+        return {"ok": True, "action": "scheduled_custom_time", "article_id": article_id, "scheduled_utc": dt_utc.isoformat(sep=" ", timespec="seconds")}
+
+    if action == "schedule_custom":
+        with session_scope() as session:
+            pending = session.scalars(
+                select(TelegramPendingReason).where(
+                    TelegramPendingReason.prompt_message_id == prompt_id,
+                    TelegramPendingReason.chat_id == chat_id,
+                )
+            ).first()
+            if pending:
+                session.delete(pending)
+            session.add(EditorFeedback(article_id=article_id, explanation_text=f"SCHEDULE(custom): {safe_text}"))
+            job = session.scalars(select(TelegramReviewJob).where(TelegramReviewJob.article_id == article_id)).first()
+            if job:
+                job.decision_reason = safe_text
+                job.updated_at = datetime.utcnow()
+        _send_message(chat_id, "Причину отложенной публикации сохранил.")
+        _post_decision_recalc()
+        return {"ok": True, "action": "schedule_custom_reason_saved", "article_id": article_id}
+
+    if action == "delete":
+        out = _archive_article_with_reason(article_id=article_id, reason=safe_text)
+        with session_scope() as session:
+            pending = session.scalars(
+                select(TelegramPendingReason).where(
+                    TelegramPendingReason.prompt_message_id == prompt_id,
+                    TelegramPendingReason.chat_id == chat_id,
+                )
+            ).first()
+            if pending:
+                session.delete(pending)
             job = session.scalars(select(TelegramReviewJob).where(TelegramReviewJob.article_id == article_id)).first()
             if job:
                 job.status = "deleted" if out.get("ok") else "failed"
-                job.decision_reason = text
+                job.decision_reason = safe_text
                 job.updated_at = datetime.utcnow()
         _send_message(chat_id, "Удалил новость и сохранил причину." if out.get("ok") else f"Не удалось удалить: {out.get('error')}")
+        _post_decision_recalc()
         return {"ok": True, "action": "delete_reason_saved", "article_id": article_id, "delete": out}
+
+    if action == "hide":
+        with session_scope() as session:
+            pending = session.scalars(
+                select(TelegramPendingReason).where(
+                    TelegramPendingReason.prompt_message_id == prompt_id,
+                    TelegramPendingReason.chat_id == chat_id,
+                )
+            ).first()
+            if pending:
+                session.delete(pending)
+            article = session.get(Article, article_id)
+            if article:
+                article.status = ArticleStatus.ARCHIVED
+                article.archived_kind = "hide"
+                article.archived_reason = safe_text
+                article.archived_at = datetime.utcnow()
+                article.updated_at = datetime.utcnow()
+            session.add(EditorFeedback(article_id=article_id, explanation_text=f"HIDE: {safe_text}"))
+            job = session.scalars(select(TelegramReviewJob).where(TelegramReviewJob.article_id == article_id)).first()
+            if job:
+                job.status = "deleted"
+                job.decision_reason = safe_text
+                job.updated_at = datetime.utcnow()
+        _send_message(chat_id, "Скрыл новость и сохранил причину.")
+        _post_decision_recalc()
+        return {"ok": True, "action": "hide_reason_saved", "article_id": article_id}
 
     if action == "later":
         with session_scope() as session:
+            pending = session.scalars(
+                select(TelegramPendingReason).where(
+                    TelegramPendingReason.prompt_message_id == prompt_id,
+                    TelegramPendingReason.chat_id == chat_id,
+                )
+            ).first()
+            if pending:
+                session.delete(pending)
             article = session.get(Article, article_id)
             if not article:
                 _send_message(chat_id, "Не нашел статью для отложенной отправки.")
@@ -452,13 +736,13 @@ def _handle_message(update: dict) -> dict:
             session.add(
                 EditorFeedback(
                     article_id=article_id,
-                    explanation_text=f"LATER: {text}",
+                    explanation_text=f"LATER: {safe_text}",
                 )
             )
             job = session.scalars(select(TelegramReviewJob).where(TelegramReviewJob.article_id == article_id)).first()
             if job:
                 job.status = "sent"
-                job.decision_reason = f"later: {text}"
+                job.decision_reason = f"later: {safe_text}"
                 job.updated_at = datetime.utcnow()
         _send_message(
             chat_id,
