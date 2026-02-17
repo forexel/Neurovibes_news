@@ -300,29 +300,63 @@ def send_selected_backlog_for_review(limit: int = 20) -> dict:
     chat_id = runtime_chat or configured_chat
 
     sent = 0
+    skipped_exists = 0
+    considered = 0
     last_article_id = None
-    for _ in range(max(1, min(int(limit), 100))):
+
+    # Priority backlog:
+    # 1) Selected Day (DailySelection.active)
+    # 2) Selected Hour (ArticleStatus.SELECTED_HOURLY)
+    # This matches the expectation: "send me many messages for previous hours/days".
+    with session_scope() as session:
+        day_rows = session.scalars(
+            select(Article)
+            .join(DailySelection, DailySelection.article_id == Article.id)
+            .where(
+                DailySelection.active.is_(True),
+                Article.status != ArticleStatus.PUBLISHED,
+                Article.status != ArticleStatus.ARCHIVED,
+                Article.status != ArticleStatus.DOUBLE,
+                Article.status != ArticleStatus.REJECTED,
+            )
+            .order_by(DailySelection.selected_date.asc(), Article.updated_at.asc())
+            .limit(2000)
+        ).all()
+        hour_rows = session.scalars(
+            select(Article)
+            .where(
+                Article.status == ArticleStatus.SELECTED_HOURLY,
+                Article.status != ArticleStatus.PUBLISHED,
+                Article.status != ArticleStatus.ARCHIVED,
+                Article.status != ArticleStatus.DOUBLE,
+                Article.status != ArticleStatus.REJECTED,
+            )
+            .order_by(Article.updated_at.asc())
+            .limit(2000)
+        ).all()
+
+    candidates: list[Article] = []
+    seen_ids: set[int] = set()
+    for a in day_rows + hour_rows:
+        if int(a.id) in seen_ids:
+            continue
+        seen_ids.add(int(a.id))
+        candidates.append(a)
+
+    max_send = max(1, min(int(limit), 100))
+    for a in candidates:
+        if sent >= max_send:
+            break
+        considered += 1
+        target_article_id = int(a.id)
         with session_scope() as session:
-            rows = session.scalars(
-                select(Article)
-                .join(DailySelection, DailySelection.article_id == Article.id)
-                .where(
-                    DailySelection.active.is_(True),
-                    Article.status != ArticleStatus.PUBLISHED,
-                    Article.status != ArticleStatus.ARCHIVED,
-                )
-                .order_by(DailySelection.selected_date.asc(), Article.updated_at.asc())
-                .limit(200)
-            ).all()
-            article = None
-            for a in rows:
-                exists = session.scalars(select(TelegramReviewJob).where(TelegramReviewJob.article_id == a.id)).first()
-                if exists is None:
-                    article = a
-                    break
-            if article is None:
-                break
-            target_article_id = int(article.id)
+            exists = session.scalars(select(TelegramReviewJob).where(TelegramReviewJob.article_id == target_article_id)).first()
+            if exists is not None:
+                skipped_exists += 1
+                continue
+            article = session.get(Article, target_article_id)
+            if not article:
+                continue
             text = _build_review_text(article)
 
         markup = {
@@ -337,7 +371,14 @@ def send_selected_backlog_for_review(limit: int = 20) -> dict:
         }
         out = _send_message(chat_id=chat_id, text=text, reply_markup=markup)
         if not out.get("ok"):
-            return {"ok": False, "error": out.get("error"), "sent": sent}
+            return {
+                "ok": False,
+                "error": out.get("error"),
+                "sent": sent,
+                "considered": considered,
+                "skipped_exists": skipped_exists,
+                "chat_id": chat_id,
+            }
         message_id = str((out.get("result") or {}).get("message_id") or "")
         with session_scope() as session:
             session.add(
@@ -352,7 +393,15 @@ def send_selected_backlog_for_review(limit: int = 20) -> dict:
             )
         sent += 1
         last_article_id = target_article_id
-    return {"ok": True, "sent": sent, "last_article_id": last_article_id}
+
+    return {
+        "ok": True,
+        "sent": sent,
+        "last_article_id": last_article_id,
+        "considered": considered,
+        "skipped_exists": skipped_exists,
+        "chat_id": chat_id,
+    }
 
 
 def _handle_callback(update: dict) -> dict:
