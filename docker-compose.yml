@@ -19,9 +19,9 @@ services:
       - ./app:/app/app
     ports:
       - "8001:8000"
-    depends_on:
-      db:
-        condition: service_healthy
+    networks:
+      - default
+      - apps-net
     restart: unless-stopped
 
   admin:
@@ -45,9 +45,9 @@ services:
       - ./app:/app/app
     ports:
       - "8002:8000"
-    depends_on:
-      db:
-        condition: service_healthy
+    networks:
+      - default
+      - apps-net
     restart: unless-stopped
 
   pipeline:
@@ -73,15 +73,14 @@ services:
     command: ["python", "-m", "app.tasks.worker"]
     volumes:
       - ./app:/app/app
-    depends_on:
-      db:
-        condition: service_healthy
-      minio:
-        condition: service_started
+    networks:
+      - default
+      - apps-net
     restart: unless-stopped
 
   db:
     image: pgvector/pgvector:pg16
+    profiles: ["local"]
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
@@ -99,6 +98,7 @@ services:
 
   minio:
     image: minio/minio:latest
+    profiles: ["local"]
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin123}
@@ -113,3 +113,7 @@ services:
 volumes:
   postgres_data:
   minio_data:
+
+networks:
+  apps-net:
+    external: true
