@@ -11,7 +11,7 @@ from app.db import session_scope
 from app.models import Article, ArticleStatus, DecisionMode, Score
 from app.services.content_generation import generate_image_card, generate_ru_summary
 from app.services.embedding_dedup import process_embeddings_and_dedup
-from app.services.ingestion import enrich_summary_only_articles, run_ingestion
+from app.services.ingestion import enrich_summary_only_articles, run_ingestion_fast
 from app.services.llm import get_client, track_usage_from_response
 from app.services.preference import get_active_profile, save_selection_decision
 from app.services.scoring import run_scoring
@@ -188,7 +188,9 @@ def auto_select_by_profile(top_n: int = 5) -> dict:
 
 
 def run_hourly_cycle(backfill_days: int = 1) -> dict:
-    ingest = run_ingestion(days_back=backfill_days)
+    # Fast ingestion: do not fetch full pages here.
+    # Full text is handled by the explicit enrich step.
+    ingest = run_ingestion_fast(days_back=backfill_days, max_entries=200)
     enrich = enrich_summary_only_articles(limit=300, days_back=30)
     embedded = process_embeddings_and_dedup(limit=300)
     scored = run_scoring(limit=300)

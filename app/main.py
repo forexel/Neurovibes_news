@@ -353,7 +353,11 @@ def pipeline_start(body: RunPipelineIn, request: Request) -> dict:
     def _run() -> None:
         try:
             _set_stage("ingestion")
-            ingest = run_ingestion(days_back=body.backfill_days)
+            ingest = run_ingestion_fast(
+                days_back=body.backfill_days,
+                max_entries=200,
+                status_cb=lambda s: _set_stage(f"ingestion: {s}"),
+            )
 
             _set_stage("enrich_summary_only")
             enrich = enrich_summary_only_articles(limit=300, days_back=30)

@@ -892,18 +892,24 @@ def check_source_health(source_id: int) -> dict:
     }
 
 
-def run_ingestion(days_back: int = 30, hours_back: int | None = None) -> dict[str, int]:
+def run_ingestion(days_back: int = 30, hours_back: int | None = None, status_cb=None) -> dict[str, int]:
     results: dict[str, int] = {}
     with session_scope() as session:
         source_ids = [row[0] for row in session.execute(select(Source.id).where(Source.is_active.is_(True)).order_by(Source.priority_rank.asc())).all()]
 
-    for source_id in source_ids:
+    total = len(source_ids)
+    for idx, source_id in enumerate(source_ids, start=1):
         with session_scope() as session:
             source = session.get(Source, source_id)
             if not source:
                 continue
             source_name = source.name
             source_kind = (source.kind or "rss").lower()
+        if status_cb:
+            try:
+                status_cb(f"{idx}/{total}: {source_name}")
+            except Exception:
+                pass
         if source_kind == "html":
             results[source_name] = fetch_source_articles_html(source, days_back=days_back, hours_back=hours_back)
         else:
@@ -912,7 +918,7 @@ def run_ingestion(days_back: int = 30, hours_back: int | None = None) -> dict[st
     return results
 
 
-def run_ingestion_fast(days_back: int = 30, hours_back: int | None = None, max_entries: int = 120) -> dict[str, int]:
+def run_ingestion_fast(days_back: int = 30, hours_back: int | None = None, max_entries: int = 120, status_cb=None) -> dict[str, int]:
     """RSS-only ingestion that does not fetch full article pages (much faster)."""
     results: dict[str, int] = {}
     with session_scope() as session:
@@ -925,13 +931,19 @@ def run_ingestion_fast(days_back: int = 30, hours_back: int | None = None, max_e
             ).all()
         ]
 
-    for source_id in source_ids:
+    total = len(source_ids)
+    for idx, source_id in enumerate(source_ids, start=1):
         with session_scope() as session:
             source = session.get(Source, source_id)
             if not source:
                 continue
             source_name = source.name
             source_kind = (source.kind or "rss").lower()
+        if status_cb:
+            try:
+                status_cb(f"{idx}/{total}: {source_name}")
+            except Exception:
+                pass
 
         if source_kind != "rss":
             # html sources require page fetch; skip in fast mode
