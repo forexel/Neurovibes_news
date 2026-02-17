@@ -40,6 +40,7 @@ def _parse_publish_times(value: str) -> set[int]:
 def main() -> None:
     init_db()
     seed_sources()
+    print("[worker] started", {"interval_seconds": INTERVAL_SECONDS, "backfill_days": BACKFILL_DAYS}, flush=True)
     next_cycle_ts = 0.0
     publish_minutes = _parse_publish_times(AUTO_PUBLISH_TIMES_UTC)
     published_slots: set[str] = set()
@@ -47,6 +48,7 @@ def main() -> None:
         now = time.time()
         if now >= next_cycle_ts:
             try:
+                print("[worker] cycle start", {"backfill_days": BACKFILL_DAYS}, flush=True)
                 result = run_hourly_cycle(backfill_days=BACKFILL_DAYS)
                 print("[worker] cycle done", result, flush=True)
                 top_article_id = result.get("top_article_id")

@@ -28,6 +28,7 @@ admin-web/dist/
 
 # Runtime artifacts
 app/static/generated/
+backups/
 
 # Logs
 *.log

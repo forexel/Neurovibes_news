@@ -73,6 +73,8 @@ ENRICH_JOBS: dict[str, dict] = {}
 ENRICH_LOCK = threading.Lock()
 PRUNE_JOBS: dict[str, dict] = {}
 PRUNE_LOCK = threading.Lock()
+PIPELINE_JOBS: dict[str, dict] = {}
+PIPELINE_LOCK = threading.Lock()
 
 
 def _get_session_user(request: Request) -> User | None:
@@ -325,6 +327,86 @@ def config() -> dict[str, str]:
 @app.post("/pipeline/run")
 def pipeline_run(body: RunPipelineIn) -> dict:
     return run_hourly_cycle(backfill_days=body.backfill_days)
+
+
+@app.post("/pipeline/start")
+def pipeline_start(body: RunPipelineIn, request: Request) -> dict:
+    _require_session_user(request)
+    job_id = uuid.uuid4().hex
+    with PIPELINE_LOCK:
+        PIPELINE_JOBS[job_id] = {
+            "job_id": job_id,
+            "status": "running",
+            "stage": "starting",
+            "started_at": datetime.utcnow().isoformat(),
+            "finished_at": None,
+            "error": None,
+            "result": None,
+        }
+
+    def _set_stage(stage: str) -> None:
+        with PIPELINE_LOCK:
+            job = PIPELINE_JOBS.get(job_id)
+            if job:
+                job["stage"] = stage
+
+    def _run() -> None:
+        try:
+            _set_stage("ingestion")
+            ingest = run_ingestion(days_back=body.backfill_days)
+
+            _set_stage("enrich_summary_only")
+            enrich = enrich_summary_only_articles(limit=300, days_back=30)
+
+            _set_stage("dedup_embeddings")
+            embedded = process_embeddings_and_dedup(limit=300)
+
+            _set_stage("scoring")
+            scored = run_scoring(limit=300)
+
+            _set_stage("pick_hourly_top")
+            top_id = pick_hourly_top()
+
+            if top_id:
+                _set_stage("prepare_ru")
+                generate_ru_summary(int(top_id))
+                _set_stage("prepare_image")
+                generate_image_card(int(top_id))
+
+            result = {
+                "ingestion": ingest,
+                "enrich_summary_only": enrich,
+                "embedded": embedded,
+                "scored": scored,
+                "top_article_id": top_id,
+            }
+            with PIPELINE_LOCK:
+                job = PIPELINE_JOBS.get(job_id)
+                if job:
+                    job["status"] = "done"
+                    job["stage"] = "done"
+                    job["result"] = result
+                    job["finished_at"] = datetime.utcnow().isoformat()
+        except Exception as exc:
+            with PIPELINE_LOCK:
+                job = PIPELINE_JOBS.get(job_id)
+                if job:
+                    job["status"] = "error"
+                    job["error"] = str(exc)
+                    job["finished_at"] = datetime.utcnow().isoformat()
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"ok": True, "job_id": job_id}
+
+
+@app.get("/pipeline/jobs/{job_id}")
+def pipeline_job_status(job_id: str, request: Request) -> dict:
+    _require_session_user(request)
+    with PIPELINE_LOCK:
+        job = PIPELINE_JOBS.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="job_not_found")
+        return dict(job)
 
 
 @app.post("/scoring/run")
@@ -2710,16 +2792,38 @@ def _render_admin_list_page(view: str) -> str:
       }
     }
 
+    let pipelinePollTimer = null;
+    function startPipelinePolling(jobId) {
+      if (pipelinePollTimer) clearInterval(pipelinePollTimer);
+      pipelinePollTimer = setInterval(async () => {
+        try {
+          const resp = await fetch(`/pipeline/jobs/${jobId}`);
+          const out = await resp.json();
+          document.getElementById('result').textContent = JSON.stringify(out, null, 2);
+          const stage = out.stage || out.status || '';
+          const state = document.getElementById('action_state');
+          if (state) state.textContent = `Running: pipeline (${stage})...`;
+          if (out.status === 'done' || out.status === 'error') {
+            clearInterval(pipelinePollTimer);
+            pipelinePollTimer = null;
+            setBusy(false, 'pipeline');
+            if (out.status === 'done') loadArticles();
+          }
+        } catch (_) {}
+      }, 1500);
+    }
+
     async function runPipeline() {
       setBusy(true, 'pipeline');
-      setResult('running pipeline...');
-      try {
-        const resp = await fetch('/pipeline/run', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({backfill_days:1})});
-        setResult(JSON.stringify(await resp.json()));
-        loadArticles();
-      } finally {
+      setResult('starting pipeline...');
+      const resp = await fetch('/pipeline/start', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({backfill_days:1})});
+      const out = await resp.json();
+      setResult(JSON.stringify(out, null, 2));
+      if (!resp.ok || !out.job_id) {
         setBusy(false, 'pipeline');
+        return;
       }
+      startPipelinePolling(out.job_id);
     }
 
     async function runScoring() {

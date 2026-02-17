@@ -135,7 +135,8 @@ body.auth button { background: var(--input); }
 .menu-panel {
   display: none;
   position: absolute;
-  top: calc(100% + 8px);
+  /* No gap between trigger and panel; otherwise hover collapses while moving mouse. */
+  top: 100%;
   left: 0;
   z-index: 5000;
   padding: 10px;
