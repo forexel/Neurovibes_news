@@ -1882,13 +1882,37 @@ def telegram_test() -> dict:
 
 
 @app.post("/telegram/review/send-latest")
-def telegram_review_send_latest() -> dict:
-    return send_hourly_top_for_review(article_id=None)
+def telegram_review_send_latest(force: bool = False) -> dict:
+    return send_hourly_top_for_review(article_id=None, force=bool(force))
 
 
 @app.post("/telegram/review/send-backlog")
 def telegram_review_send_backlog(limit: int = 10) -> dict:
     return send_selected_backlog_for_review(limit=limit)
+
+@app.get("/telegram/review/jobs")
+def telegram_review_jobs(request: Request, limit: int = 20) -> dict:
+    _require_session_user(request)
+    n = max(1, min(int(limit), 200))
+    with session_scope() as session:
+        rows = session.execute(
+            select(TelegramReviewJob).order_by(TelegramReviewJob.id.desc()).limit(n)
+        ).scalars().all()
+    return {
+        "ok": True,
+        "items": [
+            {
+                "id": r.id,
+                "article_id": r.article_id,
+                "chat_id": r.chat_id,
+                "review_message_id": r.review_message_id,
+                "status": r.status,
+                "created_at": r.created_at,
+                "updated_at": r.updated_at,
+            }
+            for r in rows
+        ],
+    }
 
 
 @app.post("/telegram/review/poll")
