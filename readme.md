@@ -307,3 +307,69 @@ curl -s http://127.0.0.1:8001/health
 - Postgres daily dump (`pg_dump`) to separate disk.
 - MinIO bucket lifecycle/backups.
 - `.env` backup in secure secret storage.
+
+### 8. One-time migration: dump local DB and restore on server
+
+If you already curated/scored articles locally and want to move the whole DB to the server.
+
+#### 8.1 Create dump locally
+
+Make sure your local compose DB is running. If you are using the `local` profile:
+
+```bash
+docker compose --profile local up -d db
+```
+
+Create a custom-format dump:
+
+```bash
+./scripts/db_dump.sh backups/local.dump
+ls -lh backups/local.dump
+```
+
+#### 8.2 Copy dump to server
+
+```bash
+scp backups/local.dump root@77.222.55.88:/srv/apps/neurovibes_news/backups/
+```
+
+#### 8.3 Restore into shared infra DB on server
+
+1) SSH into server:
+
+```bash
+ssh root@77.222.55.88
+cd /srv/apps/neurovibes_news
+```
+
+2) Identify Postgres container name (examples):
+
+```bash
+docker ps --format '{{.Names}}' | rg -n 'infra-db|postgres'
+```
+
+3) Ensure the target database/user exist (example):
+
+```bash
+docker exec -it apps-infra-db-1 psql -U postgres -d postgres
+```
+
+```sql
+CREATE USER neurovibes_user WITH PASSWORD 'STRONG_PASSWORD';
+CREATE DATABASE neurovibes_news OWNER neurovibes_user;
+GRANT ALL PRIVILEGES ON DATABASE neurovibes_news TO neurovibes_user;
+```
+
+4) Restore:
+
+```bash
+INFRA_DB_CONTAINER=apps-infra-db-1 \
+TARGET_DB=neurovibes_news \
+TARGET_USER=neurovibes_user \
+TARGET_PASSWORD='STRONG_PASSWORD' \
+./scripts/db_restore_infra.sh backups/local.dump
+```
+
+Notes:
+- This restore uses `--clean --if-exists --no-owner --no-privileges` (idempotent and safe to replay).
+- After restore, start your app containers and verify via UI.
