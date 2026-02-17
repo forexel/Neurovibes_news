@@ -164,6 +164,20 @@ def _edit_message_caption_action(chat_id: str, message_id: str, action_label: st
         pass
 
 
+def _delete_message(chat_id: str, message_id: str) -> None:
+    base = _bot_base_url()
+    if not base or not chat_id or not message_id:
+        return
+    try:
+        httpx.post(
+            f"{base}/deleteMessage",
+            json={"chat_id": chat_id, "message_id": int(message_id)},
+            timeout=20,
+        )
+    except Exception:
+        pass
+
+
 def _get_kv(session, key: str, default: str = "0") -> str:
     row = session.get(TelegramBotKV, key)
     if not row:
@@ -581,6 +595,7 @@ def _handle_callback(update: dict) -> dict:
 
 def _handle_message(update: dict) -> dict:
     msg = update.get("message") or {}
+    msg_id = str(msg.get("message_id") or "")
     text = str(msg.get("text") or "")
     if not text:
         return {"ok": True, "skipped": "no_text"}
@@ -632,7 +647,14 @@ def _handle_message(update: dict) -> dict:
             if job:
                 job.decision_reason = safe_text
                 job.updated_at = datetime.utcnow()
-        _send_message(chat_id, "Причину публикации сохранил.")
+        # Keep chat clean: remove bot prompt + user's reply + original preview message.
+        _delete_message(chat_id, prompt_id)
+        if msg_id:
+            _delete_message(chat_id, msg_id)
+        with session_scope() as session:
+            job = session.scalars(select(TelegramReviewJob).where(TelegramReviewJob.article_id == article_id)).first()
+            if job and (job.review_message_id or "").strip():
+                _delete_message(chat_id, str(job.review_message_id))
         _post_decision_recalc()
         return {"ok": True, "action": "publish_reason_saved", "article_id": article_id}
 
@@ -651,7 +673,13 @@ def _handle_message(update: dict) -> dict:
             if job:
                 job.decision_reason = safe_text
                 job.updated_at = datetime.utcnow()
-        _send_message(chat_id, "Причину отложенной публикации сохранил.")
+        _delete_message(chat_id, prompt_id)
+        if msg_id:
+            _delete_message(chat_id, msg_id)
+        with session_scope() as session:
+            job = session.scalars(select(TelegramReviewJob).where(TelegramReviewJob.article_id == article_id)).first()
+            if job and (job.review_message_id or "").strip():
+                _delete_message(chat_id, str(job.review_message_id))
         _post_decision_recalc()
         return {"ok": True, "action": "schedule_reason_saved", "article_id": article_id}
 
@@ -729,7 +757,13 @@ def _handle_message(update: dict) -> dict:
             if job:
                 job.decision_reason = safe_text
                 job.updated_at = datetime.utcnow()
-        _send_message(chat_id, "Причину отложенной публикации сохранил.")
+        _delete_message(chat_id, prompt_id)
+        if msg_id:
+            _delete_message(chat_id, msg_id)
+        with session_scope() as session:
+            job = session.scalars(select(TelegramReviewJob).where(TelegramReviewJob.article_id == article_id)).first()
+            if job and (job.review_message_id or "").strip():
+                _delete_message(chat_id, str(job.review_message_id))
         _post_decision_recalc()
         return {"ok": True, "action": "schedule_custom_reason_saved", "article_id": article_id}
 
@@ -749,7 +783,13 @@ def _handle_message(update: dict) -> dict:
                 job.status = "deleted" if out.get("ok") else "failed"
                 job.decision_reason = safe_text
                 job.updated_at = datetime.utcnow()
-        _send_message(chat_id, "Удалил новость и сохранил причину." if out.get("ok") else f"Не удалось удалить: {out.get('error')}")
+        _delete_message(chat_id, prompt_id)
+        if msg_id:
+            _delete_message(chat_id, msg_id)
+        with session_scope() as session:
+            job = session.scalars(select(TelegramReviewJob).where(TelegramReviewJob.article_id == article_id)).first()
+            if job and (job.review_message_id or "").strip():
+                _delete_message(chat_id, str(job.review_message_id))
         _post_decision_recalc()
         return {"ok": True, "action": "delete_reason_saved", "article_id": article_id, "delete": out}
 
@@ -776,7 +816,13 @@ def _handle_message(update: dict) -> dict:
                 job.status = "deleted"
                 job.decision_reason = safe_text
                 job.updated_at = datetime.utcnow()
-        _send_message(chat_id, "Скрыл новость и сохранил причину.")
+        _delete_message(chat_id, prompt_id)
+        if msg_id:
+            _delete_message(chat_id, msg_id)
+        with session_scope() as session:
+            job = session.scalars(select(TelegramReviewJob).where(TelegramReviewJob.article_id == article_id)).first()
+            if job and (job.review_message_id or "").strip():
+                _delete_message(chat_id, str(job.review_message_id))
         _post_decision_recalc()
         return {"ok": True, "action": "hide_reason_saved", "article_id": article_id}
 

@@ -5,17 +5,58 @@ import time
 from datetime import datetime
 
 from app.db import init_db
+from app.db import session_scope
+from app.models import UserWorkspace
+from sqlalchemy import select
 from app.services.bootstrap import seed_sources
 from app.services.pipeline import pick_hourly_top, run_hourly_cycle
 from app.services.telegram_publisher import publish_article
 from app.services.telegram_publisher import publish_scheduled_due
 from app.services.telegram_review import poll_review_updates, send_hourly_top_for_review
+from app.services.telegram_context import load_workspace_telegram_context
+from app.services.llm import get_workspace_api_key, set_user_api_key
 
 
 INTERVAL_SECONDS = int(os.getenv("WORKER_INTERVAL_SECONDS", "3600"))
 BACKFILL_DAYS = int(os.getenv("WORKER_BACKFILL_DAYS", "1"))
 SCHEDULE_TICK_SECONDS = int(os.getenv("SCHEDULE_TICK_SECONDS", "30"))
 AUTO_PUBLISH_TIMES_UTC = os.getenv("AUTO_PUBLISH_TIMES_UTC", "").strip()
+
+_DEFAULT_USER_ID: int | None = None
+_DEFAULT_USER_LOADED_AT: float = 0.0
+
+
+def _load_default_user_context() -> None:
+    """
+    Worker runs out of request context, so it must load per-user secrets (bot token, OpenRouter key)
+    from DB. If not found, it will fall back to env/runtime settings.
+    """
+    global _DEFAULT_USER_ID
+    global _DEFAULT_USER_LOADED_AT
+    now = time.time()
+    if _DEFAULT_USER_ID is not None and (now - _DEFAULT_USER_LOADED_AT) < 60.0:
+        load_workspace_telegram_context(_DEFAULT_USER_ID)
+        set_user_api_key(get_workspace_api_key(_DEFAULT_USER_ID))
+        return
+
+    user_id = None
+    with session_scope() as session:
+        ws = session.scalars(
+            select(UserWorkspace)
+            .where(UserWorkspace.telegram_bot_token_enc.is_not(None), UserWorkspace.telegram_bot_token_enc != "")
+            .order_by(UserWorkspace.updated_at.desc())
+            .limit(1)
+        ).first()
+        if ws is not None:
+            user_id = int(ws.user_id)
+
+    _DEFAULT_USER_ID = user_id
+    _DEFAULT_USER_LOADED_AT = now
+    load_workspace_telegram_context(user_id)
+    if user_id:
+        set_user_api_key(get_workspace_api_key(user_id))
+    else:
+        set_user_api_key(None)
 
 
 def _parse_publish_times(value: str) -> set[int]:
@@ -45,6 +86,7 @@ def main() -> None:
     publish_minutes = _parse_publish_times(AUTO_PUBLISH_TIMES_UTC)
     published_slots: set[str] = set()
     while True:
+        _load_default_user_context()
         now = time.time()
         if now >= next_cycle_ts:
             try:
