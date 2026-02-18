@@ -221,11 +221,11 @@ def send_review_status_once_per_hour(kind: str, text: str) -> dict:
         prev = _get_kv(session, kv_key, "")
         if prev == slot:
             return {"ok": True, "skipped": "already_sent_this_hour", "slot": slot, "kind": kind}
-        # Prefix with the hour window label so it's obvious if this is a fresh hour or "old".
+        # Prefix with previous completed hour window so operator always sees the exact hour context.
         if (text or "").strip().startswith("Новость "):
             payload_text = text
         else:
-            w = _slot_window_local(slot)
+            w = _current_window_local()
             payload_text = f"{_hour_window_label_ru(*w)}\n{text}"
         sent = _send_message(chat_id=chat_id, text=payload_text)
         if sent.get("ok"):
@@ -466,9 +466,9 @@ def send_hourly_top_for_review(article_id: int | None = None, force: bool = Fals
         article = session.get(Article, target_article_id)
         if not article:
             return {"ok": False, "error": "article_not_found"}
-        # For hourly auto-send, show the window we are processing (previous completed hour slot).
-        # This avoids "20:00-21:00" at 20:15 confusion.
-        window = _slot_window_local(slot)
+        # Always show the previous completed hour relative to current local time (Moscow/user TZ).
+        # This removes ambiguity and keeps UI expectation: at 22:45 -> 21:00..22:00.
+        window = _current_window_local()
         text = _build_review_text(article, window=window)
 
     markup = {
