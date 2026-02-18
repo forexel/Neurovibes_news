@@ -606,17 +606,31 @@ def _handle_callback(update: dict) -> dict:
     except Exception:
         pass
 
-    if callback_id:
-        _answer_callback(callback_id, "Принято")
-
     if not data.startswith("rv:") or not chat_id:
+        if callback_id:
+            _answer_callback(callback_id, "ok")
         return {"ok": True, "skipped": "not_review_callback"}
 
     parts = data.split(":")
     if len(parts) < 3 or not parts[2].isdigit():
+        if callback_id:
+            _answer_callback(callback_id, "ok")
         return {"ok": True, "skipped": "bad_callback"}
     action = parts[1]
     article_id = int(parts[2])
+
+    # Fast feedback in Telegram (toast) so user sees the click was received.
+    if callback_id:
+        ack_map = {
+            "pub": "pending: выбор времени",
+            "pubnow": "pending: жду причину",
+            "pub1h": "pending: +1 час",
+            "pubpick": "pending: жду время",
+            "del": "pending: жду причину",
+            "hide": "pending: жду причину",
+            "later": "pending: жду причину",
+        }
+        _answer_callback(callback_id, ack_map.get(action, "pending"))
 
     if action == "pub":
         _edit_message_reply_markup(chat_id, message_id)

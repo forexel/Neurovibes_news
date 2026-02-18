@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -26,8 +27,15 @@ from app.services.llm import get_workspace_api_key, set_user_api_key
 
 INTERVAL_SECONDS = int(os.getenv("WORKER_INTERVAL_SECONDS", "3600"))
 BACKFILL_DAYS = int(os.getenv("WORKER_BACKFILL_DAYS", "1"))
+# Telegram polling interval (controls how fast inline кнопки реагируют).
+TELEGRAM_POLL_INTERVAL_SECONDS = float(os.getenv("TELEGRAM_POLL_INTERVAL_SECONDS", "2"))
+# How often we check scheduled publications.
+PUBLISH_TICK_SECONDS = float(os.getenv("PUBLISH_TICK_SECONDS", "10"))
+# Legacy: keep for backwards compatibility (do NOT use it to delay Telegram polling).
 SCHEDULE_TICK_SECONDS = int(os.getenv("SCHEDULE_TICK_SECONDS", "30"))
 AUTO_PUBLISH_TIMES_UTC = os.getenv("AUTO_PUBLISH_TIMES_UTC", "").strip()
+# If the hourly cycle hangs, we can't kill the thread, but we can surface it.
+MAX_CYCLE_SECONDS = int(os.getenv("MAX_CYCLE_SECONDS", str(20 * 60)))
 
 _DEFAULT_USER_ID: int | None = None
 _DEFAULT_USER_LOADED_AT: float = 0.0
@@ -104,85 +112,105 @@ def _parse_publish_times(value: str) -> set[int]:
     return out
 
 
+def _run_cycle_thread(backfill_days: int) -> None:
+    # Cycle runs in background so Telegram polling stays responsive.
+    _load_default_user_context()
+    _set_worker_kv("worker_cycle_state", "running")
+    _set_worker_kv("worker_last_cycle_error", "")
+    _set_worker_kv("worker_last_cycle_start_utc", datetime.now(timezone.utc).isoformat())
+    try:
+        print("[worker] cycle start", {"backfill_days": backfill_days}, flush=True)
+        result = run_hourly_cycle(backfill_days=backfill_days)
+        print("[worker] cycle done", result, flush=True)
+
+        top_article_id = result.get("top_article_id")
+        ingest = result.get("ingestion") or {}
+        inserted_total = 0
+        try:
+            inserted_total = int(sum(int(v or 0) for v in ingest.values()))
+        except Exception:
+            inserted_total = 0
+
+        feedback_count = 0
+        try:
+            with session_scope() as session:
+                feedback_count = int(session.execute(select(func.count(EditorFeedback.id))).scalar() or 0)
+        except Exception:
+            feedback_count = 0
+        force_resend = feedback_count < 10
+
+        if top_article_id:
+            review_out = send_hourly_top_for_review(int(top_article_id), force=force_resend)
+            print("[worker] telegram review send", review_out, flush=True)
+            if review_out.get("skipped") == "already_sent":
+                status_out = send_review_status_once_per_hour(
+                    "top_unchanged",
+                    "За последний час новый топ не появился: лучший кандидат не изменился.",
+                )
+                print("[worker] telegram review status", status_out, flush=True)
+            backlog_out = send_selected_backlog_for_review(limit=1)
+            print("[worker] telegram review backlog", backlog_out, flush=True)
+        else:
+            if inserted_total <= 0:
+                status_out = send_review_status_once_per_hour(
+                    "no_new_articles",
+                    "За последний час новых статей нет (по источникам пришло 0 новых ссылок).",
+                )
+            else:
+                status_out = send_review_status_once_per_hour(
+                    "all_filtered",
+                    f"За последний час новые статьи были (+{inserted_total}), но все не прошли фильтры/скоринг.",
+                )
+            print("[worker] telegram review status", status_out, flush=True)
+            backlog_out = send_selected_backlog_for_review(limit=1)
+            print("[worker] telegram review backlog", backlog_out, flush=True)
+    except Exception as exc:
+        print(f"[worker] cycle failed: {exc}", flush=True)
+        _set_worker_kv("worker_last_cycle_error", str(exc)[:800])
+    finally:
+        _set_worker_kv("worker_last_cycle_finish_utc", datetime.now(timezone.utc).isoformat())
+        _set_worker_kv("worker_cycle_state", "idle")
+
+
 def main() -> None:
     init_db()
     seed_sources()
     print("[worker] started", {"interval_seconds": INTERVAL_SECONDS, "backfill_days": BACKFILL_DAYS}, flush=True)
-    next_cycle_ts = 0.0
     publish_minutes = _parse_publish_times(AUTO_PUBLISH_TIMES_UTC)
     published_slots: set[str] = set()
+    next_cycle_ts = 0.0
+    cycle_thread: threading.Thread | None = None
+    cycle_started_at: float | None = None
+    last_publish_check_ts = 0.0
     while True:
         _load_default_user_context()
         now = time.time()
-        if now >= next_cycle_ts:
-            # Compute next run immediately so UI can show it even while the cycle is running/hanging.
+        cycle_running = bool(cycle_thread and cycle_thread.is_alive())
+        if cycle_running and cycle_started_at and MAX_CYCLE_SECONDS > 0 and (now - cycle_started_at) > MAX_CYCLE_SECONDS:
+            _set_worker_kv("worker_last_cycle_error", f"cycle_timeout>{MAX_CYCLE_SECONDS}s (still running)")
+
+        if now >= next_cycle_ts and not cycle_running:
+            # Compute next run immediately so UI can show it even while cycle is running.
             next_cycle_ts = now + INTERVAL_SECONDS
             _set_worker_kv("worker_next_cycle_utc", datetime.fromtimestamp(next_cycle_ts, tz=timezone.utc).isoformat())
-            _set_worker_kv("worker_cycle_state", "running")
-            _set_worker_kv("worker_last_cycle_error", "")
+            cycle_thread = threading.Thread(
+                target=_run_cycle_thread,
+                args=(BACKFILL_DAYS,),
+                daemon=True,
+                name="hourly-cycle",
+            )
+            cycle_started_at = now
+            cycle_thread.start()
+
+        # Scheduled publishing check (separate cadence, should not delay Telegram polling).
+        if (now - last_publish_check_ts) >= max(1.0, PUBLISH_TICK_SECONDS):
+            last_publish_check_ts = now
             try:
-                _set_worker_kv("worker_last_cycle_start_utc", datetime.now(timezone.utc).isoformat())
-                print("[worker] cycle start", {"backfill_days": BACKFILL_DAYS}, flush=True)
-                result = run_hourly_cycle(backfill_days=BACKFILL_DAYS)
-                print("[worker] cycle done", result, flush=True)
-                top_article_id = result.get("top_article_id")
-                ingest = result.get("ingestion") or {}
-                inserted_total = 0
-                try:
-                    inserted_total = int(sum(int(v or 0) for v in ingest.values()))
-                except Exception:
-                    inserted_total = 0
-
-                # Early stage: we want to collect feedback. If you have very few feedback items,
-                # allow re-sending the same candidate again (force resend).
-                feedback_count = 0
-                try:
-                    with session_scope() as session:
-                        feedback_count = int(session.execute(select(func.count(EditorFeedback.id))).scalar() or 0)
-                except Exception:
-                    feedback_count = 0
-                force_resend = feedback_count < 10
-
-                if top_article_id:
-                    review_out = send_hourly_top_for_review(int(top_article_id), force=force_resend)
-                    print("[worker] telegram review send", review_out, flush=True)
-                    # If the same top was already sent earlier, still send a status once per hour.
-                    if review_out.get("skipped") == "already_sent":
-                        status_out = send_review_status_once_per_hour(
-                            "top_unchanged",
-                            "За последний час новый топ не появился: лучший кандидат не изменился.",
-                        )
-                        print("[worker] telegram review status", status_out, flush=True)
-                    # Also deliver any missed auto-selected hourly items (backlog) one-by-one.
-                    backlog_out = send_selected_backlog_for_review(limit=1)
-                    print("[worker] telegram review backlog", backlog_out, flush=True)
-                else:
-                    # Always report to review chat once per hour if there is no selected hourly candidate.
-                    if inserted_total <= 0:
-                        status_out = send_review_status_once_per_hour(
-                            "no_new_articles",
-                            "За последний час новых статей нет (по источникам пришло 0 новых ссылок).",
-                        )
-                    else:
-                        status_out = send_review_status_once_per_hour(
-                            "all_filtered",
-                            f"За последний час новые статьи были (+{inserted_total}), но все не прошли фильтры/скоринг.",
-                        )
-                    print("[worker] telegram review status", status_out, flush=True)
-                    backlog_out = send_selected_backlog_for_review(limit=1)
-                    print("[worker] telegram review backlog", backlog_out, flush=True)
+                out = publish_scheduled_due(limit=20)
+                if out.get("processed", 0):
+                    print("[worker] scheduled publish", out, flush=True)
             except Exception as exc:
-                print(f"[worker] cycle failed: {exc}", flush=True)
-                _set_worker_kv("worker_last_cycle_error", str(exc)[:800])
-            _set_worker_kv("worker_last_cycle_finish_utc", datetime.now(timezone.utc).isoformat())
-            _set_worker_kv("worker_cycle_state", "idle")
-
-        try:
-            out = publish_scheduled_due(limit=20)
-            if out.get("processed", 0):
-                print("[worker] scheduled publish", out, flush=True)
-        except Exception as exc:
-            print(f"[worker] scheduled publish failed: {exc}", flush=True)
+                print(f"[worker] scheduled publish failed: {exc}", flush=True)
 
         try:
             bot_out = poll_review_updates(limit=50)
@@ -213,7 +241,8 @@ def main() -> None:
             if len(published_slots) > 64:
                 published_slots = set(sorted(published_slots)[-32:])
 
-        time.sleep(max(5, SCHEDULE_TICK_SECONDS))
+        # Poll Telegram frequently for fast inline кнопок реакцию.
+        time.sleep(max(0.5, TELEGRAM_POLL_INTERVAL_SECONDS))
 
 
 if __name__ == "__main__":
