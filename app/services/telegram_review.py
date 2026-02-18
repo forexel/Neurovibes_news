@@ -84,6 +84,39 @@ def _hour_slot_key() -> str:
         tz = ZoneInfo("Europe/Moscow")
     return datetime.now(tz=tz).strftime("%Y%m%d%H")
 
+def _hour_window_label_ru() -> str:
+    """
+    Human label for the current hour window in user's timezone.
+    Example: "Новость 18 февраля 2026 года с 18:00 до 19:00 (МСК)"
+    """
+    months = [
+        "января",
+        "февраля",
+        "марта",
+        "апреля",
+        "мая",
+        "июня",
+        "июля",
+        "августа",
+        "сентября",
+        "октября",
+        "ноября",
+        "декабря",
+    ]
+    try:
+        tz_name = telegram_timezone_name() or get_runtime_str("timezone_name") or "Europe/Moscow"
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz_name = "Europe/Moscow"
+        tz = ZoneInfo("Europe/Moscow")
+
+    now = datetime.now(tz=tz)
+    start = now.replace(minute=0, second=0, microsecond=0)
+    end = start + timedelta(hours=1)
+    m = months[start.month - 1] if 1 <= start.month <= 12 else str(start.month)
+    tz_label = "МСК" if tz_name == "Europe/Moscow" else tz_name
+    return f"Новость {start.day} {m} {start.year} года с {start:%H:%M} до {end:%H:%M} ({tz_label})"
+
 
 def send_review_status_once_per_hour(kind: str, text: str) -> dict:
     """
@@ -132,7 +165,8 @@ def _build_review_text(article: Article) -> str:
     url = escape((article.canonical_url or "").strip())
     signature = escape(telegram_signature() or get_runtime_str("telegram_signature") or settings.telegram_signature or "@neuro_vibes_future")
     return (
-        "Топ-1 за последний час. Публиковать?\n\n"
+        f"{escape(_hour_window_label_ru())}\n"
+        "Топ-1 за час. Публиковать?\n\n"
         f"<b>{escape(title)}</b>\n\n"
         f"{escape(summary)}\n"
         f"<a href=\"{url}\">Подробнее</a>\n\n"
