@@ -285,11 +285,8 @@ CRON_TZ=Europe/Moscow
 # every hour: ingest/dedup/score/pick/prepare
 0 * * * * cd /srv/apps/neurovibes_news && flock -n /tmp/neurovibes-cycle.lock docker compose exec -T api python -m app.tasks.full_cycle cycle --backfill-days 1 >> /var/log/neurovibes-cycle.log 2>&1
 
-# every hour: send top review message (if you are not using pipeline worker)
-5 * * * * cd /srv/apps/neurovibes_news && curl -fsS -X POST http://127.0.0.1:8001/telegram/review/send-latest >> /var/log/neurovibes-tg-send.log 2>&1
-
-# every minute: handle telegram callbacks/reasons
-* * * * * cd /srv/apps/neurovibes_news && curl -fsS -X POST http://127.0.0.1:8001/telegram/review/poll >/dev/null 2>&1
+# NOTE: Telegram review send/poll endpoints require authenticated session now.
+# Recommended approach: run the built-in `pipeline` worker container instead of cron.
 ```
 
 Use either worker scheduling (`pipeline`) or cron, not both for the same task.

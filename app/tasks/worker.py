@@ -48,7 +48,12 @@ def _load_default_user_context() -> None:
     with session_scope() as session:
         ws = session.scalars(
             select(UserWorkspace)
-            .where(UserWorkspace.telegram_bot_token_enc.is_not(None), UserWorkspace.telegram_bot_token_enc != "")
+            .where(
+                UserWorkspace.telegram_bot_token_enc.is_not(None),
+                UserWorkspace.telegram_bot_token_enc != "",
+                UserWorkspace.telegram_review_chat_id.is_not(None),
+                UserWorkspace.telegram_review_chat_id != "",
+            )
             .order_by(UserWorkspace.updated_at.desc())
             .limit(1)
         ).first()

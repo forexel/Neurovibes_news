@@ -343,15 +343,50 @@ def auto_select_by_profile(top_n: int = 5) -> dict:
 def run_hourly_cycle(backfill_days: int = 1) -> dict:
     # Fast ingestion: do not fetch full pages here.
     # Full text is handled by the explicit enrich step.
-    ingest = run_ingestion_fast(days_back=backfill_days, max_entries=200)
-    enrich = enrich_summary_only_articles(limit=300, days_back=30)
-    embedded = process_embeddings_and_dedup(limit=300)
-    scored = run_scoring(limit=300)
-    top_id = pick_hourly_top()
+    def _stage(name: str):
+        print("[cycle]", name, flush=True)
+
+    try:
+        _stage("ingestion_fast")
+        ingest = run_ingestion_fast(days_back=backfill_days, max_entries=200)
+    except Exception as exc:
+        raise RuntimeError(f"cycle_stage_failed: ingestion_fast: {exc}") from exc
+
+    try:
+        _stage("enrich_summary_only")
+        enrich = enrich_summary_only_articles(limit=300, days_back=30)
+    except Exception as exc:
+        raise RuntimeError(f"cycle_stage_failed: enrich_summary_only: {exc}") from exc
+
+    try:
+        _stage("dedup_embeddings")
+        embedded = process_embeddings_and_dedup(limit=300)
+    except Exception as exc:
+        raise RuntimeError(f"cycle_stage_failed: dedup_embeddings: {exc}") from exc
+
+    try:
+        _stage("scoring")
+        scored = run_scoring(limit=300)
+    except Exception as exc:
+        raise RuntimeError(f"cycle_stage_failed: scoring: {exc}") from exc
+
+    try:
+        _stage("pick_hourly_top")
+        top_id = pick_hourly_top()
+    except Exception as exc:
+        raise RuntimeError(f"cycle_stage_failed: pick_hourly_top: {exc}") from exc
 
     if top_id:
-        generate_ru_summary(top_id)
-        generate_image_card(top_id)
+        try:
+            _stage("prepare_ru_summary")
+            generate_ru_summary(top_id)
+        except Exception as exc:
+            raise RuntimeError(f"cycle_stage_failed: prepare_ru_summary: {exc}") from exc
+        try:
+            _stage("prepare_image_card")
+            generate_image_card(top_id)
+        except Exception as exc:
+            raise RuntimeError(f"cycle_stage_failed: prepare_image_card: {exc}") from exc
 
     return {
         "ingestion": ingest,
