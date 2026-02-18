@@ -408,19 +408,29 @@ def run_hourly_cycle(backfill_days: int = 1) -> dict:
 
     try:
         _stage("enrich_summary_only")
-        enrich = enrich_summary_only_articles(limit=300, days_back=30)
+        # Keep hourly cycle fast: do a small enrichment batch only.
+        # Full enrichment is available via the UI "Get Full Text" action.
+        def _enrich_progress(processed: int, total: int) -> None:
+            if total and (processed == total or processed % 10 == 0):
+                print("[cycle] enrich", {"processed": processed, "total": total}, flush=True)
+
+        enrich = enrich_summary_only_articles(limit=40, days_back=3, progress_cb=_enrich_progress)
     except Exception as exc:
         raise RuntimeError(f"cycle_stage_failed: enrich_summary_only: {exc}") from exc
 
     try:
         _stage("dedup_embeddings")
-        embedded = process_embeddings_and_dedup(limit=300)
+        embedded = process_embeddings_and_dedup(limit=250)
     except Exception as exc:
         raise RuntimeError(f"cycle_stage_failed: dedup_embeddings: {exc}") from exc
 
     try:
         _stage("scoring")
-        scored = run_scoring(limit=300)
+        def _score_progress(processed: int, total: int) -> None:
+            if total and (processed == total or processed % 25 == 0):
+                print("[cycle] scoring", {"processed": processed, "total": total}, flush=True)
+
+        scored = run_scoring(limit=200, progress_cb=_score_progress)
     except Exception as exc:
         raise RuntimeError(f"cycle_stage_failed: scoring: {exc}") from exc
 

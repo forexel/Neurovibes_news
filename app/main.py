@@ -1067,9 +1067,17 @@ def admin_data_articles(
     hide_double: bool = False,
 ) -> dict:
     _require_session_user(request)
+    user = _get_session_user(request)
     page = max(page, 1)
     page_size = min(max(page_size, 1), 100)
     with session_scope() as session:
+        tz_name = "Europe/Moscow"
+        try:
+            if user is not None:
+                ws = session.scalars(select(UserWorkspace).where(UserWorkspace.user_id == user.id)).first()
+                tz_name = (getattr(ws, "timezone_name", "") or "").strip() or tz_name
+        except Exception:
+            tz_name = "Europe/Moscow"
         result: list[dict] = []
         today = date.today()
         selected_day_map: dict[int, date] = {}
@@ -1163,9 +1171,19 @@ def admin_data_articles(
         def _dt(x: dict) -> datetime:
             return x.get("published_at") or x.get("created_at") or datetime.min
 
+        def _local_day(x: dict) -> date:
+            dt = _dt(x)
+            if not isinstance(dt, datetime):
+                return date.min
+            try:
+                tz = ZoneInfo(tz_name)
+            except Exception:
+                tz = ZoneInfo("Europe/Moscow")
+            return dt.replace(tzinfo=ZoneInfo("UTC")).astimezone(tz).date()
+
         result.sort(
             key=lambda x: (
-                _dt(x).date(),
+                _local_day(x),
                 float(x.get("final_score") or -1),
                 _dt(x),
             ),
@@ -3021,6 +3039,7 @@ def _render_admin_list_page(view: str) -> str:
     let scorePollTimer = null;
     let sortBy = null;
     let sortDir = null;
+    window.NV_TZ = 'Europe/Moscow';
 
     async function loadArticles() {
       const pageSize = document.getElementById('pageSizeInput').value || '25';
@@ -3052,7 +3071,7 @@ def _render_admin_list_page(view: str) -> str:
             <div class='muted' style='margin-top:6px;'><a href='${a.canonical_url}' target='_blank'>source</a></div>
           </td>
           <td>${escapeHtml(a.source_name || ('#' + a.source_id))}</td>
-          <td>${a.published_at ?? '-'}</td>
+          <td>${fmtUtcToTz(a.published_at, window.NV_TZ) || '-'}</td>
           <td>
             ${a.is_selected_day ? `<button onclick='unselectDay(${a.id})'>Remove Day</button>` : `<button onclick='selectDay(${a.id})'>Select Day</button>`}
             ${String(a.status || '').toUpperCase() === 'SELECTED_HOURLY' ? `<button onclick='unselectHour(${a.id})'>Remove Hour</button>` : `<button onclick='selectHour(${a.id})'>Select Hour</button>`}
@@ -3093,6 +3112,7 @@ def _render_admin_list_page(view: str) -> str:
         const el = document.getElementById('workerBadge');
         if (!el) return;
         const tz = (s.tz || 'Europe/Moscow').trim();
+        window.NV_TZ = tz || 'Europe/Moscow';
         const next = (s.worker_next_cycle_utc || '').trim();
         const last = (s.worker_last_cycle_finish_utc || '').trim();
         const start = (s.worker_last_cycle_start_utc || '').trim();
