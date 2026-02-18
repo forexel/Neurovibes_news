@@ -12,7 +12,12 @@ from app.services.bootstrap import seed_sources
 from app.services.pipeline import pick_hourly_top, run_hourly_cycle
 from app.services.telegram_publisher import publish_article
 from app.services.telegram_publisher import publish_scheduled_due
-from app.services.telegram_review import poll_review_updates, send_hourly_top_for_review, send_review_status_once_per_hour
+from app.services.telegram_review import (
+    poll_review_updates,
+    send_hourly_top_for_review,
+    send_review_status_once_per_hour,
+    send_selected_backlog_for_review,
+)
 from app.services.telegram_context import load_workspace_telegram_context
 from app.services.llm import get_workspace_api_key, set_user_api_key
 
@@ -111,6 +116,9 @@ def main() -> None:
                             "За последний час новый топ не появился: лучший кандидат не изменился.",
                         )
                         print("[worker] telegram review status", status_out, flush=True)
+                    # Also deliver any missed auto-selected hourly items (backlog) one-by-one.
+                    backlog_out = send_selected_backlog_for_review(limit=1)
+                    print("[worker] telegram review backlog", backlog_out, flush=True)
                 else:
                     # Always report to review chat once per hour if there is no selected hourly candidate.
                     if inserted_total <= 0:
@@ -124,6 +132,8 @@ def main() -> None:
                             f"За последний час новые статьи были (+{inserted_total}), но все не прошли фильтры/скоринг.",
                         )
                     print("[worker] telegram review status", status_out, flush=True)
+                    backlog_out = send_selected_backlog_for_review(limit=1)
+                    print("[worker] telegram review backlog", backlog_out, flush=True)
             except Exception as exc:
                 print(f"[worker] cycle failed: {exc}", flush=True)
             next_cycle_ts = now + INTERVAL_SECONDS
