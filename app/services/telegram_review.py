@@ -456,7 +456,7 @@ def send_selected_backlog_for_review(limit: int = 20) -> dict:
     }
 
 
-def send_hourly_backfill_for_review(hours_back: int = 24, limit: int = 24) -> dict:
+def send_hourly_backfill_for_review(hours_back: int = 24, limit: int = 24, force: bool = False) -> dict:
     """
     Ensure hourly selections exist for the last N hours (aligned to user's timezone),
     then send up to `limit` hourly-selected items that were not yet sent to the review chat.
@@ -504,9 +504,10 @@ def send_hourly_backfill_for_review(hours_back: int = 24, limit: int = 24) -> di
         considered += 1
         target_article_id = int(a.id)
 
+        existing_job: TelegramReviewJob | None = None
         with session_scope() as session:
-            exists = session.scalars(select(TelegramReviewJob).where(TelegramReviewJob.article_id == target_article_id)).first()
-            if exists is not None:
+            existing_job = session.scalars(select(TelegramReviewJob).where(TelegramReviewJob.article_id == target_article_id)).first()
+            if existing_job is not None and not force:
                 skipped_exists += 1
                 continue
             article = session.get(Article, target_article_id)
@@ -536,16 +537,25 @@ def send_hourly_backfill_for_review(hours_back: int = 24, limit: int = 24) -> di
             }
         message_id = str((out.get("result") or {}).get("message_id") or "")
         with session_scope() as session:
-            session.add(
-                TelegramReviewJob(
-                    article_id=target_article_id,
-                    chat_id=chat_id,
-                    review_message_id=message_id or None,
-                    status="sent",
-                    created_at=datetime.utcnow(),
-                    updated_at=datetime.utcnow(),
+            job = session.scalars(select(TelegramReviewJob).where(TelegramReviewJob.article_id == target_article_id)).first()
+            if job is None:
+                session.add(
+                    TelegramReviewJob(
+                        article_id=target_article_id,
+                        chat_id=chat_id,
+                        review_message_id=message_id or None,
+                        status="sent",
+                        created_at=datetime.utcnow(),
+                        updated_at=datetime.utcnow(),
+                    )
                 )
-            )
+            else:
+                # UniqueConstraint(article_id) prevents multiple jobs per article. On forced resend,
+                # update the job to point to the newest preview message.
+                job.chat_id = chat_id
+                job.review_message_id = message_id or None
+                job.status = "resent" if force else (job.status or "sent")
+                job.updated_at = datetime.utcnow()
         sent += 1
         last_article_id = target_article_id
 
@@ -558,6 +568,25 @@ def send_hourly_backfill_for_review(hours_back: int = 24, limit: int = 24) -> di
         "chat_id": chat_id,
         "backfill": backfill,
     }
+
+
+def _disable_webhook_once() -> None:
+    """
+    This project uses getUpdates polling. If webhook is set, Telegram will not deliver updates
+    via getUpdates (buttons will appear to "do nothing"). So we disable it once per bot token.
+    """
+    base = _bot_base_url()
+    if not base:
+        return
+    with session_scope() as session:
+        done = (_get_kv(session, "telegram_review_webhook_disabled", "0") or "0").strip()
+        if done == "1":
+            return
+        try:
+            httpx.post(f"{base}/deleteWebhook", json={"drop_pending_updates": False}, timeout=20)
+        except Exception:
+            return
+        _set_kv(session, "telegram_review_webhook_disabled", "1")
 
 
 def _handle_callback(update: dict) -> dict:
@@ -1038,6 +1067,9 @@ def poll_review_updates(limit: int = 50) -> dict:
     if not base:
         return {"ok": False, "error": "telegram_not_configured"}
 
+    # Ensure webhook is disabled; otherwise getUpdates will not receive callback queries.
+    _disable_webhook_once()
+
     with session_scope() as session:
         offset_raw = _get_kv(session, "telegram_review_offset", "0")
         try:
@@ -1051,6 +1083,15 @@ def poll_review_updates(limit: int = 50) -> dict:
             json={"offset": offset, "timeout": 0, "limit": limit, "allowed_updates": ["callback_query", "message"]},
             timeout=30,
         )
+        # If webhook was set, Telegram can respond with 409 Conflict in plain text.
+        # Try disabling webhook and retry once.
+        if resp.status_code == 409:
+            _disable_webhook_once()
+            resp = httpx.post(
+                f"{base}/getUpdates",
+                json={"offset": offset, "timeout": 0, "limit": limit, "allowed_updates": ["callback_query", "message"]},
+                timeout=30,
+            )
         data = resp.json()
     except Exception as exc:
         return {"ok": False, "error": str(exc)}

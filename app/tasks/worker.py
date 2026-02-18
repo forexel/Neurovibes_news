@@ -6,8 +6,10 @@ from datetime import datetime
 
 from app.db import init_db
 from app.db import session_scope
+from app.models import EditorFeedback
 from app.models import UserWorkspace
-from sqlalchemy import select
+from app.models import TelegramBotKV
+from sqlalchemy import func, select
 from app.services.bootstrap import seed_sources
 from app.services.pipeline import pick_hourly_top, run_hourly_cycle
 from app.services.telegram_publisher import publish_article
@@ -29,6 +31,20 @@ AUTO_PUBLISH_TIMES_UTC = os.getenv("AUTO_PUBLISH_TIMES_UTC", "").strip()
 
 _DEFAULT_USER_ID: int | None = None
 _DEFAULT_USER_LOADED_AT: float = 0.0
+
+
+def _set_worker_kv(key: str, value: str) -> None:
+    # Worker is single-process per deploy, KV is just for UI visibility.
+    try:
+        with session_scope() as session:
+            row = session.get(TelegramBotKV, key)  # reuse existing KV table
+            if row:
+                row.value = value
+                row.updated_at = datetime.utcnow()
+            else:
+                session.add(TelegramBotKV(key=key, value=value, updated_at=datetime.utcnow()))
+    except Exception:
+        pass
 
 
 def _load_default_user_context() -> None:
@@ -100,6 +116,7 @@ def main() -> None:
         now = time.time()
         if now >= next_cycle_ts:
             try:
+                _set_worker_kv("worker_last_cycle_start_utc", datetime.utcnow().isoformat())
                 print("[worker] cycle start", {"backfill_days": BACKFILL_DAYS}, flush=True)
                 result = run_hourly_cycle(backfill_days=BACKFILL_DAYS)
                 print("[worker] cycle done", result, flush=True)
@@ -111,8 +128,18 @@ def main() -> None:
                 except Exception:
                     inserted_total = 0
 
+                # Early stage: we want to collect feedback. If you have very few feedback items,
+                # allow re-sending the same candidate again (force resend).
+                feedback_count = 0
+                try:
+                    with session_scope() as session:
+                        feedback_count = int(session.execute(select(func.count(EditorFeedback.id))).scalar() or 0)
+                except Exception:
+                    feedback_count = 0
+                force_resend = feedback_count < 10
+
                 if top_article_id:
-                    review_out = send_hourly_top_for_review(int(top_article_id))
+                    review_out = send_hourly_top_for_review(int(top_article_id), force=force_resend)
                     print("[worker] telegram review send", review_out, flush=True)
                     # If the same top was already sent earlier, still send a status once per hour.
                     if review_out.get("skipped") == "already_sent":
@@ -142,6 +169,8 @@ def main() -> None:
             except Exception as exc:
                 print(f"[worker] cycle failed: {exc}", flush=True)
             next_cycle_ts = now + INTERVAL_SECONDS
+            _set_worker_kv("worker_last_cycle_finish_utc", datetime.utcnow().isoformat())
+            _set_worker_kv("worker_next_cycle_utc", datetime.utcfromtimestamp(next_cycle_ts).isoformat())
 
         try:
             out = publish_scheduled_due(limit=20)

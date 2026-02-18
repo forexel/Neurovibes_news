@@ -30,6 +30,7 @@ from app.models import (
     ScoreParameter,
     Source,
     LLMUsageLog,
+    TelegramBotKV,
     User,
     UserWorkspace,
 )
@@ -2033,9 +2034,10 @@ def telegram_review_send_backlog(request: Request, limit: int = 10) -> dict:
     return send_selected_backlog_for_review(limit=limit)
 
 @app.post("/telegram/review/send-hourly-backfill")
-def telegram_review_send_hourly_backfill(request: Request, hours: int = 24, limit: int = 24) -> dict:
-    _require_session_user(request)
-    return send_hourly_backfill_for_review(hours_back=hours, limit=limit)
+def telegram_review_send_hourly_backfill(request: Request, hours: int = 24, limit: int = 24, force: bool = False) -> dict:
+    user = _require_session_user(request)
+    load_workspace_telegram_context(user.id)
+    return send_hourly_backfill_for_review(hours_back=hours, limit=limit, force=bool(force))
 
 @app.get("/telegram/review/jobs")
 def telegram_review_jobs(request: Request, limit: int = 20) -> dict:
@@ -2672,6 +2674,12 @@ def bot_page(request: Request):
         channel_id = (getattr(ws, "telegram_channel_id", "") or "").strip()
         signature = (getattr(ws, "telegram_signature", "") or "").strip()
         tz = (getattr(ws, "timezone_name", "") or "").strip()
+        last_start = session.get(TelegramBotKV, "worker_last_cycle_start_utc")
+        last_finish = session.get(TelegramBotKV, "worker_last_cycle_finish_utc")
+        next_cycle = session.get(TelegramBotKV, "worker_next_cycle_utc")
+        last_start_s = (last_start.value if last_start else "").strip()
+        last_finish_s = (last_finish.value if last_finish else "").strip()
+        next_cycle_s = (next_cycle.value if next_cycle else "").strip()
 
     def _mask(v: str) -> str:
         if not v:
@@ -2704,13 +2712,17 @@ def bot_page(request: Request):
         Review chat: <b>{review_chat or '-'}</b><br>
         Channel: <b>{channel_id or '-'}</b><br>
         Signature: <b>{signature or '-'}</b><br>
-        Timezone: <b>{tz or '-'}</b>
+        Timezone: <b>{tz or '-'}</b><br>
+        Auto-send: <b>каждый час</b> (воркер в контейнере <code>pipeline</code>)<br>
+        Last cycle start (UTC): <b>{last_start_s or '-'}</b><br>
+        Last cycle finish (UTC): <b>{last_finish_s or '-'}</b><br>
+        Next cycle (UTC): <b>{next_cycle_s or '-'}</b>
       </p>
       <div style="display:flex;gap:8px;flex-wrap:wrap;">
         <button onclick="telegramTest()">Telegram Test</button>
-        <button onclick="telegramBacklog()">Send TG Backlog</button>
-        <button onclick="telegramHourlyBackfill()">Send Hourly Backfill (24h)</button>
         <button onclick="telegramPoll()">Poll TG Now</button>
+        <button onclick="telegramHourlyBackfill24()">Send 24h Backfill (24 msgs)</button>
+        <button onclick="telegramHourlyBackfillCustom()">Send Backfill (custom)</button>
       </div>
       <pre id="out" style="white-space:pre-wrap;background:#0b1428;border:1px solid #2a3b60;padding:12px;border-radius:8px;margin-top:12px;"></pre>
     </div>
@@ -2733,14 +2745,24 @@ def bot_page(request: Request):
       setOut(JSON.stringify(out, null, 2));
       if (!resp.ok) alert(out.detail || 'send backlog failed');
     }}
-    async function telegramHourlyBackfill() {{
+    async function telegramHourlyBackfill24() {{
+      const force = confirm('Force resend already-sent items for 24 hours? (OK = resend, Cancel = only new)');
+      setOut('Selecting per-hour + sending…');
+      const hours = 24;
+      const limit = 24;
+      const resp = await fetch(`/telegram/review/send-hourly-backfill?hours=${{hours}}&limit=${{limit}}&force=${{force ? 'true' : 'false'}}`, {{method:'POST'}});
+      const out = await resp.json();
+      setOut(JSON.stringify(out, null, 2));
+      if (!resp.ok) alert(out.detail || 'send hourly backfill failed');
+    }}
+    async function telegramHourlyBackfillCustom() {{
       const h = prompt('Backfill how many hours? (1..168)', '24');
       if (h === null) return;
-      setOut('Selecting per-hour + sending…');
       const hours = Math.max(1, Math.min(168, Number(h) || 24));
-      // Expected UX: N hours => N messages (capped by Telegram/job limits).
       const limit = Math.max(1, Math.min(100, hours));
-      const resp = await fetch(`/telegram/review/send-hourly-backfill?hours=${{hours}}&limit=${{limit}}`, {{method:'POST'}});
+      const force = confirm('Force resend already-sent items? (OK = resend, Cancel = only new)');
+      setOut('Selecting per-hour + sending…');
+      const resp = await fetch(`/telegram/review/send-hourly-backfill?hours=${{hours}}&limit=${{limit}}&force=${{force ? 'true' : 'false'}}`, {{method:'POST'}});
       const out = await resp.json();
       setOut(JSON.stringify(out, null, 2));
       if (!resp.ok) alert(out.detail || 'send hourly backfill failed');
