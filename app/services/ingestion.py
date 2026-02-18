@@ -489,6 +489,7 @@ def fetch_source_articles(
     hours_back: int | None = None,
     fetch_full_pages: bool = True,
     max_entries: int = 120,
+    progress_cb=None,
 ) -> int:
     parsed = _load_feed(source.rss_url)
     if parsed.bozo and not parsed.entries:
@@ -507,6 +508,14 @@ def fetch_source_articles(
     latest_published: datetime | None = None
     last_error: str | None = None
 
+    entries = list(getattr(parsed, "entries", []) or [])
+    total_entries = min(len(entries), max_entries)
+    if progress_cb:
+        try:
+            progress_cb("read", 0, total_entries, source.name)
+        except Exception:
+            pass
+
     with session_scope() as session:
         max_rank = int(session.scalar(select(func.max(Source.priority_rank))) or 22)
         score_fn = None
@@ -516,10 +525,15 @@ def fetch_source_articles(
 
             score_fn = _score_article_in_session
 
-        for entry in parsed.entries:
+        for entry in entries:
             processed += 1
             if processed > max_entries:
                 break
+            if progress_cb:
+                try:
+                    progress_cb("read", processed, total_entries, source.name)
+                except Exception:
+                    pass
             link = normalize_url(entry.get("link", ""))
             if not link:
                 continue
@@ -642,6 +656,11 @@ def fetch_source_articles(
                 )
 
             inserted += 1
+            if progress_cb:
+                try:
+                    progress_cb("save", inserted, total_entries, source.name)
+                except Exception:
+                    pass
             if published_at and (latest_published is None or published_at > latest_published):
                 latest_published = published_at
 
@@ -892,7 +911,7 @@ def check_source_health(source_id: int) -> dict:
     }
 
 
-def run_ingestion(days_back: int = 30, hours_back: int | None = None, status_cb=None) -> dict[str, int]:
+def run_ingestion(days_back: int = 30, hours_back: int | None = None, status_cb=None, progress_cb=None) -> dict[str, int]:
     results: dict[str, int] = {}
     with session_scope() as session:
         source_ids = [row[0] for row in session.execute(select(Source.id).where(Source.is_active.is_(True)).order_by(Source.priority_rank.asc())).all()]
@@ -913,12 +932,20 @@ def run_ingestion(days_back: int = 30, hours_back: int | None = None, status_cb=
         if source_kind == "html":
             results[source_name] = fetch_source_articles_html(source, days_back=days_back, hours_back=hours_back)
         else:
-            results[source_name] = fetch_source_articles(source, days_back=days_back, hours_back=hours_back)
+            results[source_name] = fetch_source_articles(
+                source, days_back=days_back, hours_back=hours_back, progress_cb=progress_cb
+            )
 
     return results
 
 
-def run_ingestion_fast(days_back: int = 30, hours_back: int | None = None, max_entries: int = 120, status_cb=None) -> dict[str, int]:
+def run_ingestion_fast(
+    days_back: int = 30,
+    hours_back: int | None = None,
+    max_entries: int = 120,
+    status_cb=None,
+    progress_cb=None,
+) -> dict[str, int]:
     """RSS-only ingestion that does not fetch full article pages (much faster)."""
     results: dict[str, int] = {}
     with session_scope() as session:
@@ -955,6 +982,7 @@ def run_ingestion_fast(days_back: int = 30, hours_back: int | None = None, max_e
             hours_back=hours_back,
             fetch_full_pages=False,
             max_entries=max_entries,
+            progress_cb=progress_cb,
         )
 
     return results
@@ -970,7 +998,7 @@ def run_backfill_batched(total_days: int = 30, batch_days: int = 3) -> list[dict
     return batches
 
 
-def enrich_summary_only_articles(limit: int = 200, days_back: int = 30) -> dict:
+def enrich_summary_only_articles(limit: int = 200, days_back: int = 30, progress_cb=None) -> dict:
     min_dt = datetime.utcnow() - timedelta(days=days_back)
     scanned = 0
     upgraded = 0
@@ -986,9 +1014,20 @@ def enrich_summary_only_articles(limit: int = 200, days_back: int = 30) -> dict:
             .order_by(Article.created_at.desc())
             .limit(limit)
         ).all()
+        total = len(rows)
+        if progress_cb:
+            try:
+                progress_cb(0, total)
+            except Exception:
+                pass
 
         for article in rows:
             scanned += 1
+            if progress_cb:
+                try:
+                    progress_cb(scanned, total)
+                except Exception:
+                    pass
             html, final_url, status_code, latency_ms = _fetch_page(article.canonical_url)
             full_text, quality = _extract_full_text(html)
             if full_text and (

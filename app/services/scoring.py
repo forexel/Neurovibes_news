@@ -1022,7 +1022,7 @@ def score_article_by_id(article_id: int) -> dict:
         return score_article_in_session(session, article, max_rank=max_rank, editor_style_profile=editor_style_profile)
 
 
-def run_scoring(limit: int = 300, progress_cb=None) -> int:
+def run_scoring(limit: int = 300, progress_cb=None, ru_progress_cb=None) -> int:
     processed = 0
     with session_scope() as session:
         max_rank = int(session.scalar(select(func.max(Source.priority_rank))) or 22)
@@ -1085,8 +1085,21 @@ def run_scoring(limit: int = 300, progress_cb=None) -> int:
                 .order_by(Article.updated_at.desc())
                 .limit(fill_limit)
             ).all()
+            ru_total = len(targets)
+            ru_done = 0
+            if ru_progress_cb:
+                try:
+                    ru_progress_cb(0, ru_total)
+                except Exception:
+                    pass
             for t in targets:
                 _ensure_ru_preview(session, t)
+                ru_done += 1
+                if ru_progress_cb:
+                    try:
+                        ru_progress_cb(ru_done, ru_total)
+                    except Exception:
+                        pass
 
     return processed
 

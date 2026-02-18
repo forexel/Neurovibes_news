@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import uuid
 from datetime import date, datetime, timedelta, timezone
@@ -338,44 +339,110 @@ def pipeline_start(body: RunPipelineIn, request: Request) -> dict:
             "job_id": job_id,
             "status": "running",
             "stage": "starting",
+            "stage_detail": None,
+            "processed": 0,
+            "total": 0,
             "started_at": datetime.utcnow().isoformat(),
             "finished_at": None,
             "error": None,
             "result": None,
         }
 
-    def _set_stage(stage: str) -> None:
+    def _set_state(stage: str, processed: int | None = None, total: int | None = None, detail: str | None = None) -> None:
         with PIPELINE_LOCK:
             job = PIPELINE_JOBS.get(job_id)
             if job:
                 job["stage"] = stage
+                if processed is not None:
+                    job["processed"] = int(processed)
+                if total is not None:
+                    job["total"] = int(total)
+                if detail is not None:
+                    job["stage_detail"] = detail
 
     def _run() -> None:
         try:
-            _set_stage("ingestion")
+            logger = logging.getLogger("nv.pipeline")
+
+            read_total = 0
+            read_done = 0
+            save_done = 0
+            last_read: dict[str, int] = {}
+            last_save: dict[str, int] = {}
+            last_log_read = 0
+            last_log_save = 0
+
+            def _ing_progress(phase: str, cur: int, total: int, source_name: str) -> None:
+                nonlocal read_total, read_done, save_done, last_log_read, last_log_save
+                if phase == "read":
+                    if cur == 0:
+                        read_total += int(total or 0)
+                    prev = last_read.get(source_name, 0)
+                    delta = max(0, int(cur) - int(prev))
+                    last_read[source_name] = int(cur)
+                    read_done += delta
+                    _set_state("ingestion/read", processed=read_done, total=max(read_total, 1), detail=source_name)
+                    if read_done == read_total or (read_done - last_log_read) >= 25:
+                        last_log_read = read_done
+                        logger.info("pipeline ingestion read %s/%s (%s)", read_done, read_total, source_name)
+                elif phase == "save":
+                    prev = last_save.get(source_name, 0)
+                    delta = max(0, int(cur) - int(prev))
+                    last_save[source_name] = int(cur)
+                    save_done += delta
+                    _set_state("ingestion/save", processed=save_done, total=max(read_total, 1), detail=source_name)
+                    if save_done == read_total or (save_done - last_log_save) >= 10:
+                        last_log_save = save_done
+                        logger.info("pipeline ingestion saved %s/%s (%s)", save_done, read_total, source_name)
+
+            logger.info("pipeline start backfill_days=%s", body.backfill_days)
             ingest = run_ingestion_fast(
                 days_back=body.backfill_days,
                 max_entries=200,
-                status_cb=lambda s: _set_stage(f"ingestion: {s}"),
+                status_cb=lambda s: _set_state("ingestion/source", detail=str(s)),
+                progress_cb=_ing_progress,
             )
 
-            _set_stage("enrich_summary_only")
-            enrich = enrich_summary_only_articles(limit=300, days_back=30)
+            logger.info("pipeline enrich start")
+            def _enrich_progress(processed: int, total: int) -> None:
+                _set_state("enrich/full_text", processed=processed, total=total)
+                if total and (processed == total or processed % 25 == 0):
+                    logger.info("pipeline enrich %s/%s", processed, total)
 
-            _set_stage("dedup_embeddings")
+            enrich = enrich_summary_only_articles(limit=300, days_back=30, progress_cb=_enrich_progress)
+
+            logger.info("pipeline dedup start")
+            _set_state("dedup/embeddings", processed=0, total=1)
             embedded = process_embeddings_and_dedup(limit=300)
+            _set_state("dedup/embeddings", processed=1, total=1)
 
-            _set_stage("scoring")
-            scored = run_scoring(limit=300)
+            logger.info("pipeline scoring start")
+            def _score_progress(processed: int, total: int) -> None:
+                _set_state("scoring", processed=processed, total=total)
+                if total and (processed == total or processed % 25 == 0):
+                    logger.info("pipeline scoring %s/%s", processed, total)
 
-            _set_stage("pick_hourly_top")
+            def _ru_progress(processed: int, total: int) -> None:
+                _set_state("translate/preview", processed=processed, total=total)
+                if total and (processed == total or processed % 10 == 0):
+                    logger.info("pipeline translate preview %s/%s", processed, total)
+
+            scored = run_scoring(limit=300, progress_cb=_score_progress, ru_progress_cb=_ru_progress)
+
+            logger.info("pipeline pick hourly top")
+            _set_state("pick/hourly_top", processed=0, total=1)
             top_id = pick_hourly_top()
+            _set_state("pick/hourly_top", processed=1, total=1)
 
             if top_id:
-                _set_stage("prepare_ru")
+                logger.info("pipeline prepare ru article_id=%s", top_id)
+                _set_state("prepare/ru_post", processed=0, total=1, detail=str(top_id))
                 generate_ru_summary(int(top_id))
-                _set_stage("prepare_image")
+                _set_state("prepare/ru_post", processed=1, total=1, detail=str(top_id))
+                logger.info("pipeline prepare image article_id=%s", top_id)
+                _set_state("prepare/image", processed=0, total=1, detail=str(top_id))
                 generate_image_card(int(top_id))
+                _set_state("prepare/image", processed=1, total=1, detail=str(top_id))
 
             result = {
                 "ingestion": ingest,
@@ -389,9 +456,14 @@ def pipeline_start(body: RunPipelineIn, request: Request) -> dict:
                 if job:
                     job["status"] = "done"
                     job["stage"] = "done"
+                    job["stage_detail"] = None
                     job["result"] = result
                     job["finished_at"] = datetime.utcnow().isoformat()
         except Exception as exc:
+            try:
+                logging.getLogger("nv.pipeline").exception("pipeline failed")
+            except Exception:
+                pass
             with PIPELINE_LOCK:
                 job = PIPELINE_JOBS.get(job_id)
                 if job:
@@ -2645,10 +2717,16 @@ def _render_admin_list_page(view: str) -> str:
         <div id="enrichProgressBar" style="height:100%;width:0%;background:#37c078;"></div>
       </div>
     </div>
-    <div id="pruneProgressWrap" style="display:none;min-width:420px;">
+  <div id="pruneProgressWrap" style="display:none;min-width:420px;">
       <div class="muted" id="pruneProgressText">Prune: 0/0</div>
       <div style="height:10px;background:#0c1a33;border:1px solid #355;border-radius:999px;overflow:hidden;">
         <div id="pruneProgressBar" style="height:100%;width:0%;background:#ffb020;"></div>
+      </div>
+    </div>
+    <div id="pipelineProgressWrap" style="display:none;min-width:420px;">
+      <div class="muted" id="pipelineProgressText">Pipeline: 0/0</div>
+      <div style="height:10px;background:#0c1a33;border:1px solid #355;border-radius:999px;overflow:hidden;">
+        <div id="pipelineProgressBar" style="height:100%;width:0%;background:#c084fc;"></div>
       </div>
     </div>
   </header>
@@ -2823,18 +2901,36 @@ def _render_admin_list_page(view: str) -> str:
     let pipelinePollTimer = null;
     function startPipelinePolling(jobId) {
       if (pipelinePollTimer) clearInterval(pipelinePollTimer);
+      const wrap = document.getElementById('pipelineProgressWrap');
+      const bar = document.getElementById('pipelineProgressBar');
+      const text = document.getElementById('pipelineProgressText');
+      if (wrap) wrap.style.display = 'block';
       pipelinePollTimer = setInterval(async () => {
         try {
           const resp = await fetch(`/pipeline/jobs/${jobId}`);
           const out = await resp.json();
           document.getElementById('result').textContent = JSON.stringify(out, null, 2);
           const stage = out.stage || out.status || '';
+          const detail = out.stage_detail ? ` (${out.stage_detail})` : '';
           const state = document.getElementById('action_state');
-          if (state) state.textContent = `Running: pipeline (${stage})...`;
+          if (state) state.textContent = `Running: pipeline (${stage})${detail}...`;
+
+          const processed = Number(out.processed || 0);
+          const total = Number(out.total || 0);
+          if (text) {
+            if (total > 0) text.textContent = `Pipeline: ${stage} ${processed}/${total}${detail}`;
+            else text.textContent = `Pipeline: ${stage}${detail}`;
+          }
+          if (bar) {
+            const pct = total > 0 ? Math.min(100, Math.max(0, (processed / total) * 100)) : 0;
+            bar.style.width = `${pct.toFixed(1)}%`;
+          }
+
           if (out.status === 'done' || out.status === 'error') {
             clearInterval(pipelinePollTimer);
             pipelinePollTimer = null;
             setBusy(false, 'pipeline');
+            if (wrap) wrap.style.display = 'none';
             if (out.status === 'done') loadArticles();
           }
         } catch (_) {}
