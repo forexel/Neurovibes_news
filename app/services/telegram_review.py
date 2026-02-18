@@ -77,14 +77,26 @@ def _review_chat_id() -> str:
     return (telegram_review_chat_id() or get_runtime_str("telegram_review_chat_id") or settings.telegram_review_chat_id or "").strip()
 
 def _hour_slot_key() -> str:
-    """Slot key for deduping hourly notifications (in user's configured timezone)."""
+    """
+    Slot key for deduping hourly notifications (in user's configured timezone).
+
+    IMPORTANT: This refers to the *previous completed* hour window.
+    Example: now=20:15 => slot is 19:00-20:00, key is "...20" (end hour).
+    """
     try:
         tz = ZoneInfo(telegram_timezone_name() or get_runtime_str("timezone_name") or "Europe/Moscow")
     except Exception:
         tz = ZoneInfo("Europe/Moscow")
-    return datetime.now(tz=tz).strftime("%Y%m%d%H")
 
-def _hour_window_label_ru() -> str:
+    now = datetime.now(tz=tz)
+    end = now.replace(minute=0, second=0, microsecond=0)
+    # If we are exactly at HH:00, still treat it as the previous hour window.
+    if now == end:
+        end = end - timedelta(hours=1)
+    end = end  # end is the end of previous window
+    return end.strftime("%Y%m%d%H")
+
+def _hour_window_label_ru(start: datetime, end: datetime, tz_label: str) -> str:
     """
     Human label for the current hour window in user's timezone.
     Example: "Новость 18 февраля 2026 года с 18:00 до 19:00 (МСК)"
@@ -103,19 +115,38 @@ def _hour_window_label_ru() -> str:
         "ноября",
         "декабря",
     ]
+    m = months[start.month - 1] if 1 <= start.month <= 12 else str(start.month)
+    return f"Новость {start.day} {m} {start.year} года с {start:%H:%M} до {end:%H:%M} ({tz_label})"
+
+def _current_window_local() -> tuple[datetime, datetime, str]:
+    """
+    Previous completed hour window in user's timezone.
+    Returns (start_local, end_local, tz_label).
+    """
     try:
         tz_name = telegram_timezone_name() or get_runtime_str("timezone_name") or "Europe/Moscow"
         tz = ZoneInfo(tz_name)
     except Exception:
         tz_name = "Europe/Moscow"
         tz = ZoneInfo("Europe/Moscow")
+    tz_label = "МСК" if tz_name == "Europe/Moscow" else tz_name
 
     now = datetime.now(tz=tz)
-    start = now.replace(minute=0, second=0, microsecond=0)
-    end = start + timedelta(hours=1)
-    m = months[start.month - 1] if 1 <= start.month <= 12 else str(start.month)
-    tz_label = "МСК" if tz_name == "Europe/Moscow" else tz_name
-    return f"Новость {start.day} {m} {start.year} года с {start:%H:%M} до {end:%H:%M} ({tz_label})"
+    end = now.replace(minute=0, second=0, microsecond=0)
+    if now == end:
+        end = end - timedelta(hours=1)
+    start = end - timedelta(hours=1)
+    return start, end, tz_label
+
+def _window_for_article_local(article: Article, tz: ZoneInfo) -> tuple[datetime, datetime, str]:
+    # If article already has an hourly bucket (UTC naive), use it.
+    if getattr(article, "selected_hour_bucket_utc", None):
+        bucket_start_utc = article.selected_hour_bucket_utc.replace(tzinfo=ZoneInfo("UTC"))
+        start_local = bucket_start_utc.astimezone(tz)
+        end_local = (bucket_start_utc + timedelta(hours=1)).astimezone(tz)
+        return start_local, end_local, ("МСК" if str(tz) == "Europe/Moscow" else str(tz))
+    start_local, end_local, tz_label = _current_window_local()
+    return start_local, end_local, tz_label
 
 def _format_dt_ru(dt_local: datetime) -> str:
     months = [
@@ -221,8 +252,11 @@ def _build_review_text(article: Article) -> str:
     if source_name:
         meta = meta + "\n" + escape("Источник: " + source_name)
 
+    start_local, end_local, tz_label = _window_for_article_local(article, tz)
+    window_label = _hour_window_label_ru(start_local, end_local, tz_label)
+
     return (
-        f"{escape(_hour_window_label_ru())}\n"
+        f"{escape(window_label)}\n"
         "Топ-1 за час. Публиковать?\n\n"
         f"{meta}\n\n"
         f"<b>{escape(title)}</b>\n\n"
@@ -379,6 +413,12 @@ def send_hourly_top_for_review(article_id: int | None = None, force: bool = Fals
             article = session.get(Article, article_id)
         if not article:
             return {"ok": False, "error": "no_selected_article"}
+
+        # One message per hour-window slot (unless forced/manual).
+        slot = _hour_slot_key()
+        last_slot = (_get_kv(session, "telegram_review_last_article_slot", "") or "").strip()
+        if last_slot == slot and not force:
+            return {"ok": True, "skipped": "already_sent_slot", "slot": slot, "article_id": article.id}
 
         existing = session.scalars(select(TelegramReviewJob).where(TelegramReviewJob.article_id == article.id)).first()
         if existing and not force:

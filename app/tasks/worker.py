@@ -19,7 +19,6 @@ from app.services.telegram_review import (
     poll_review_updates,
     send_hourly_top_for_review,
     send_review_status_once_per_hour,
-    send_selected_backlog_for_review,
 )
 from app.services.telegram_context import load_workspace_telegram_context
 from app.services.llm import get_workspace_api_key, set_user_api_key
@@ -131,25 +130,11 @@ def _run_cycle_thread(backfill_days: int) -> None:
         except Exception:
             inserted_total = 0
 
-        feedback_count = 0
-        try:
-            with session_scope() as session:
-                feedback_count = int(session.execute(select(func.count(EditorFeedback.id))).scalar() or 0)
-        except Exception:
-            feedback_count = 0
-        force_resend = feedback_count < 10
-
         if top_article_id:
-            review_out = send_hourly_top_for_review(int(top_article_id), force=force_resend)
+            # Auto-mode: never spam the same hour slot. Force resend is only for manual backfill endpoints.
+            review_out = send_hourly_top_for_review(int(top_article_id), force=False)
             print("[worker] telegram review send", review_out, flush=True)
-            if review_out.get("skipped") == "already_sent":
-                status_out = send_review_status_once_per_hour(
-                    "top_unchanged",
-                    "За последний час новый топ не появился: лучший кандидат не изменился.",
-                )
-                print("[worker] telegram review status", status_out, flush=True)
-            backlog_out = send_selected_backlog_for_review(limit=1)
-            print("[worker] telegram review backlog", backlog_out, flush=True)
+            # If already sent for this slot, do not send extra status messages.
         else:
             if inserted_total <= 0:
                 status_out = send_review_status_once_per_hour(
@@ -162,8 +147,6 @@ def _run_cycle_thread(backfill_days: int) -> None:
                     f"За последний час новые статьи были (+{inserted_total}), но все не прошли фильтры/скоринг.",
                 )
             print("[worker] telegram review status", status_out, flush=True)
-            backlog_out = send_selected_backlog_for_review(limit=1)
-            print("[worker] telegram review backlog", backlog_out, flush=True)
     except Exception as exc:
         print(f"[worker] cycle failed: {exc}", flush=True)
         _set_worker_kv("worker_last_cycle_error", str(exc)[:800])
