@@ -108,6 +108,8 @@ class Article(Base):
     short_hook: Mapped[str | None] = mapped_column(Text, nullable=True)
     generated_image_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     scheduled_publish_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Hour bucket (UTC, naive) for Selected Hour backfill/dedup.
+    selected_hour_bucket_utc: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     archived_kind: Mapped[str | None] = mapped_column(String(32), nullable=True)  # delete|hide|filter
     archived_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

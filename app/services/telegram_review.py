@@ -30,7 +30,7 @@ from app.services.telegram_context import (
     telegram_timezone_name,
 )
 from app.services.runtime_settings import get_runtime_str
-from app.services.pipeline import pick_hourly_top
+from app.services.pipeline import pick_hourly_backfill, pick_hourly_top
 from app.services.scoring import reclassify_all_articles
 
 _SQLI_PATTERNS = [
@@ -453,6 +453,110 @@ def send_selected_backlog_for_review(limit: int = 20) -> dict:
         "considered": considered,
         "skipped_exists": skipped_exists,
         "chat_id": chat_id,
+    }
+
+
+def send_hourly_backfill_for_review(hours_back: int = 24, limit: int = 24) -> dict:
+    """
+    Ensure hourly selections exist for the last N hours (aligned to user's timezone),
+    then send up to `limit` hourly-selected items that were not yet sent to the review chat.
+    """
+    configured_chat = _review_chat_id()
+    if not configured_chat:
+        return {"ok": False, "error": "telegram_review_chat_not_configured"}
+    with session_scope() as session:
+        runtime_chat = _get_kv(session, "telegram_review_runtime_chat_id", "").strip()
+    chat_id = runtime_chat or configured_chat
+
+    # 1) Backfill missing buckets.
+    backfill = pick_hourly_backfill(hours_back=hours_back, per_hour=1)
+
+    # 2) Send hourly backlog (only those not yet sent).
+    hours = max(1, min(int(hours_back or 24), 168))
+    now = datetime.utcnow()
+    cutoff = now - timedelta(hours=hours)
+
+    with session_scope() as session:
+        rows = session.scalars(
+            select(Article)
+            .where(
+                Article.status == ArticleStatus.SELECTED_HOURLY,
+                Article.selected_hour_bucket_utc.is_not(None),
+                Article.selected_hour_bucket_utc >= cutoff,
+                Article.status != ArticleStatus.PUBLISHED,
+                Article.status != ArticleStatus.ARCHIVED,
+                Article.status != ArticleStatus.DOUBLE,
+                Article.status != ArticleStatus.REJECTED,
+            )
+            .order_by(Article.selected_hour_bucket_utc.asc(), Article.updated_at.asc())
+            .limit(2000)
+        ).all()
+
+    sent = 0
+    skipped_exists = 0
+    considered = 0
+    last_article_id = None
+    max_send = max(1, min(int(limit or 24), 100))
+
+    for a in rows:
+        if sent >= max_send:
+            break
+        considered += 1
+        target_article_id = int(a.id)
+
+        with session_scope() as session:
+            exists = session.scalars(select(TelegramReviewJob).where(TelegramReviewJob.article_id == target_article_id)).first()
+            if exists is not None:
+                skipped_exists += 1
+                continue
+            article = session.get(Article, target_article_id)
+            if not article:
+                continue
+            text = _build_review_text(article)
+
+        markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "Опубликовать", "callback_data": f"rv:pub:{target_article_id}"},
+                    {"text": "Скрыть", "callback_data": f"rv:hide:{target_article_id}"},
+                    {"text": "Удалить", "callback_data": f"rv:del:{target_article_id}"},
+                ]
+            ]
+        }
+        out = _send_message(chat_id=chat_id, text=text, reply_markup=markup)
+        if not out.get("ok"):
+            return {
+                "ok": False,
+                "error": out.get("error"),
+                "sent": sent,
+                "considered": considered,
+                "skipped_exists": skipped_exists,
+                "chat_id": chat_id,
+                "backfill": backfill,
+            }
+        message_id = str((out.get("result") or {}).get("message_id") or "")
+        with session_scope() as session:
+            session.add(
+                TelegramReviewJob(
+                    article_id=target_article_id,
+                    chat_id=chat_id,
+                    review_message_id=message_id or None,
+                    status="sent",
+                    created_at=datetime.utcnow(),
+                    updated_at=datetime.utcnow(),
+                )
+            )
+        sent += 1
+        last_article_id = target_article_id
+
+    return {
+        "ok": True,
+        "sent": sent,
+        "last_article_id": last_article_id,
+        "considered": considered,
+        "skipped_exists": skipped_exists,
+        "chat_id": chat_id,
+        "backfill": backfill,
     }
 
 

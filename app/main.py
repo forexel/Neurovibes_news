@@ -56,7 +56,12 @@ from app.services.scoring import prune_bad_articles, prune_non_ai_articles, run_
 from app.services.topic_filter import passes_ai_topic_filter
 from app.services.preference import rebuild_preference_profile
 from app.services.telegram_publisher import publish_article, send_test_message
-from app.services.telegram_review import poll_review_updates, send_hourly_top_for_review, send_selected_backlog_for_review
+from app.services.telegram_review import (
+    poll_review_updates,
+    send_hourly_backfill_for_review,
+    send_hourly_top_for_review,
+    send_selected_backlog_for_review,
+)
 from app.services.audit import audit
 from app.services.auth import create_access_token, decode_token, hash_password, verify_password
 from app.services.llm import get_client, get_workspace_api_key, set_user_api_key, track_usage_from_response
@@ -1486,10 +1491,13 @@ def setup_step1(body: SetupStep1In, request: Request) -> dict:
         ws.channel_name = body.channel_name.strip()
         ws.channel_theme = body.channel_theme.strip()
         ws.sources_text = body.sources_text.strip()
-        # Optional: store per-user OpenRouter key (encrypted). Empty string means "unset".
+        # Optional: store per-user OpenRouter key (encrypted).
+        # IMPORTANT: empty string MUST NOT clear an existing key; the UI keeps the field empty
+        # when the secret is already set. Provide a dedicated "clear" action later if needed.
         if body.openrouter_api_key is not None:
             raw_key = (body.openrouter_api_key or "").strip()
-            ws.openrouter_api_key_enc = encrypt_secret(raw_key) if raw_key else None
+            if raw_key:
+                ws.openrouter_api_key_enc = encrypt_secret(raw_key)
         ws.onboarding_step = max(2, int(ws.onboarding_step or 1))
         ws.updated_at = datetime.utcnow()
         # Optional convenience: auto-add provided urls as sources if they are not present yet.
@@ -1525,14 +1533,30 @@ def setup_telegram(body: SetupTelegramIn, request: Request) -> dict:
         if ws is None:
             ws = UserWorkspace(user_id=user.id)
             session.add(ws)
-        # Empty token means "unset"
+        # IMPORTANT: empty string MUST NOT clear an existing token; the UI keeps the field empty
+        # when the secret is already set. Provide a dedicated "clear" action later if needed.
         if body.telegram_bot_token is not None:
             raw = (body.telegram_bot_token or "").strip()
-            ws.telegram_bot_token_enc = encrypt_secret(raw) if raw else None
+            if raw:
+                ws.telegram_bot_token_enc = encrypt_secret(raw)
         ws.telegram_review_chat_id = (body.telegram_review_chat_id or "").strip()
         ws.telegram_channel_id = (body.telegram_channel_id or "").strip()
         ws.telegram_signature = (body.telegram_signature or "").strip()
         ws.timezone_name = (body.timezone_name or "Europe/Moscow").strip() or "Europe/Moscow"
+        ws.updated_at = datetime.utcnow()
+    return {"ok": True}
+
+@app.post("/setup/step2/save")
+def setup_step2_save(body: SetupStep2In, request: Request) -> dict:
+    """Save audience description without running LLM analyze (cheap)."""
+    user = _require_session_user(request)
+    with session_scope() as session:
+        ws = session.scalars(select(UserWorkspace).where(UserWorkspace.user_id == user.id)).first()
+        if ws is None:
+            ws = UserWorkspace(user_id=user.id)
+            session.add(ws)
+        ws.audience_description = body.audience_description.strip()
+        ws.onboarding_step = max(3, int(ws.onboarding_step or 1))
         ws.updated_at = datetime.utcnow()
     return {"ok": True}
 
@@ -2001,6 +2025,11 @@ def telegram_review_send_latest(force: bool = False) -> dict:
 def telegram_review_send_backlog(limit: int = 10) -> dict:
     return send_selected_backlog_for_review(limit=limit)
 
+@app.post("/telegram/review/send-hourly-backfill")
+def telegram_review_send_hourly_backfill(request: Request, hours: int = 24, limit: int = 24) -> dict:
+    _require_session_user(request)
+    return send_hourly_backfill_for_review(hours_back=hours, limit=limit)
+
 @app.get("/telegram/review/jobs")
 def telegram_review_jobs(request: Request, limit: int = 20) -> dict:
     _require_session_user(request)
@@ -2208,7 +2237,7 @@ def admin_setup_page(request: Request):
   <meta charset='utf-8'>
   <meta name='viewport' content='width=device-width, initial-scale=1'>
   <title>Setup Wizard</title>
-  <link rel="stylesheet" href="/static/app.css?v=1">
+  <link rel="stylesheet" href="/static/app.css?v=2">
 </head>
 <body>
   <header>
@@ -2230,7 +2259,7 @@ def admin_setup_page(request: Request):
           <button type="button" onclick="toggleOpenrouterEdit(true)">✎ Edit</button>
         </div>
         <div id="openrouterEditRow" style="display:block;margin-top:10px;">
-          <input id="openrouter_api_key" type="password" placeholder="OpenRouter API key (sk-or-v1-...)" />
+          <input id="openrouter_api_key" type="password" placeholder="OpenRouter API key (sk-or-v1-...)" style="width:100%;" />
           <div class="muted" style="margin-top:6px;">Ключ хранится в базе зашифрованно и не отображается обратно. Чтобы заменить, вставь новый ключ и нажми Save.</div>
         </div>
       </div>
@@ -2240,7 +2269,10 @@ def admin_setup_page(request: Request):
       <h3>Step 2: Audience + Scoring</h3>
       <p class="muted">Опиши аудиторию канала. ИИ предложит параметры скоринга и заполнит раздел Score.</p>
       <p><textarea id="audience_description" placeholder="Для кого канал, что им важно, какие темы нежелательны"></textarea></p>
-      <p><button onclick="analyzeStep2()">Analyze Scoring</button></p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button onclick="saveStep2()">Save Audience</button>
+        <button onclick="analyzeStep2()">Analyze Scoring</button>
+      </div>
       <pre id="analysis_out"></pre>
     </div>
     <div class="card">
@@ -2252,7 +2284,7 @@ def admin_setup_page(request: Request):
         <button type="button" onclick="toggleTelegramTokenEdit(true)">✎ Edit</button>
       </div>
       <div id="telegramTokenEditRow" style="display:block;margin-top:10px;">
-        <input id="telegram_bot_token" type="password" placeholder="Bot token (123:AA...)" />
+        <input id="telegram_bot_token" type="password" placeholder="Bot token (123:AA...)" style="width:100%;" />
       </div>
       <p class="muted" style="margin-top:10px;">Review chat: куда бот шлет превью для ревью (например <code>@Yudin_Finance</code> или chat_id).</p>
       <p><input id="telegram_review_chat_id" placeholder="Review chat id (например @Yudin_Finance)" /></p>
@@ -2337,6 +2369,14 @@ def admin_setup_page(request: Request):
       document.getElementById('analysis_out').textContent = JSON.stringify(out, null, 2);
       if (!resp.ok) return alert(out.detail || 'analyze failed');
       setStatus('Scoring params updated');
+      loadState();
+    }
+    async function saveStep2(){
+      const body = { audience_description: (document.getElementById('audience_description').value || '').trim() };
+      const resp = await fetch('/setup/step2/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+      const out = await resp.json();
+      if (!resp.ok) return alert(out.detail || 'save audience failed');
+      setStatus('Audience saved');
       loadState();
     }
     async function saveTelegram(){
@@ -2660,6 +2700,7 @@ def bot_page(request: Request):
       <div style="display:flex;gap:8px;flex-wrap:wrap;">
         <button onclick="telegramTest()">Telegram Test</button>
         <button onclick="telegramBacklog()">Send TG Backlog</button>
+        <button onclick="telegramHourlyBackfill()">Send Hourly Backfill (24h)</button>
       </div>
       <pre id="out" style="white-space:pre-wrap;background:#0b1428;border:1px solid #2a3b60;padding:12px;border-radius:8px;margin-top:12px;"></pre>
     </div>
@@ -2681,6 +2722,19 @@ def bot_page(request: Request):
       const out = await resp.json();
       setOut(JSON.stringify(out, null, 2));
       if (!resp.ok) alert(out.detail || 'send backlog failed');
+    }}
+    async function telegramHourlyBackfill() {{
+      const h = prompt('Backfill how many hours? (1..168)', '24');
+      if (h === null) return;
+      const n = prompt('How many messages to send? (1..100)', '24');
+      if (n === null) return;
+      setOut('Selecting per-hour + sending…');
+      const hours = Math.max(1, Math.min(168, Number(h) || 24));
+      const limit = Math.max(1, Math.min(100, Number(n) || 24));
+      const resp = await fetch(`/telegram/review/send-hourly-backfill?hours=${hours}&limit=${limit}`, {{method:'POST'}});
+      const out = await resp.json();
+      setOut(JSON.stringify(out, null, 2));
+      if (!resp.ok) alert(out.detail || 'send hourly backfill failed');
     }}
   </script>
 </body>

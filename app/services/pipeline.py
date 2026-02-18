@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.orm import joinedload
@@ -15,6 +16,8 @@ from app.services.ingestion import enrich_summary_only_articles, run_ingestion_f
 from app.services.llm import get_client, track_usage_from_response
 from app.services.preference import get_active_profile, save_selection_decision
 from app.services.scoring import run_scoring
+from app.services.telegram_context import telegram_timezone_name
+from app.services.runtime_settings import get_runtime_str
 
 
 def _audience_adjusted_score(article: Article, score: Score) -> float:
@@ -32,6 +35,25 @@ def _audience_adjusted_score(article: Article, score: Score) -> float:
     if article.content_mode == "summary_only":
         mult *= 0.85
     return raw * mult
+
+
+def _get_tz_name() -> str:
+    return (telegram_timezone_name() or get_runtime_str("timezone_name") or "Europe/Moscow").strip()
+
+
+def _hour_bucket_utc(dt_utc: datetime, tz_name: str) -> datetime:
+    """
+    Compute "hour bucket start" in UTC (naive) aligned to the user's timezone hour.
+    dt_utc must be naive UTC datetime.
+    """
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = ZoneInfo("Europe/Moscow")
+    local = dt_utc.replace(tzinfo=ZoneInfo("UTC")).astimezone(tz)
+    local_bucket = local.replace(minute=0, second=0, microsecond=0)
+    bucket_utc = local_bucket.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+    return bucket_utc
 
 
 def _hourly_candidates(limit: int = 50) -> list[tuple[Article, Score]]:
@@ -157,6 +179,9 @@ def pick_hourly_top() -> int | None:
         if not article:
             return None
         article.status = ArticleStatus.SELECTED_HOURLY
+        # Save the hour-bucket so we can backfill 24h later and avoid duplicates per hour.
+        tz_name = _get_tz_name()
+        article.selected_hour_bucket_utc = _hour_bucket_utc(datetime.utcnow(), tz_name)
         article.updated_at = datetime.utcnow()
 
     rejected = [a.id for a, _ in top3 if a.id != selected_id]
@@ -177,6 +202,134 @@ def pick_hourly_top() -> int | None:
     )
 
     return selected_id
+
+
+def pick_hourly_backfill(hours_back: int = 24, per_hour: int = 1) -> dict:
+    """
+    Backfill Selected Hour for the last N hours: pick up to `per_hour` articles for each
+    hour bucket (aligned to user's timezone), skipping already-filled buckets.
+
+    Returns: {"ok": True, "hours": int, "selected": int, "filled_buckets": int, "selected_ids": [...]}
+    """
+    hours = max(1, min(int(hours_back or 24), 168))  # cap at 7 days
+    per_hour_n = max(1, min(int(per_hour or 1), 3))
+    tz_name = _get_tz_name()
+    now_utc = datetime.utcnow()
+    current_bucket = _hour_bucket_utc(now_utc, tz_name)
+
+    selected_ids: list[int] = []
+    filled_buckets = 0
+
+    # Start from the oldest hour so review chat receives messages in chronological order.
+    buckets = [current_bucket - timedelta(hours=i) for i in range(hours - 1, -1, -1)]
+
+    # Backward-compat: older rows may have status=selected_hourly but bucket is NULL.
+    # Assign a bucket from updated_at so they can participate in backlog sending and dedup.
+    cutoff = now_utc - timedelta(hours=hours)
+    with session_scope() as session:
+        old_rows = session.scalars(
+            select(Article).where(
+                Article.status == ArticleStatus.SELECTED_HOURLY,
+                Article.selected_hour_bucket_utc.is_(None),
+                Article.updated_at >= cutoff,
+            )
+        ).all()
+        for a in old_rows:
+            a.selected_hour_bucket_utc = _hour_bucket_utc(a.updated_at or now_utc, tz_name)
+            a.updated_at = datetime.utcnow()
+
+    # Track clusters already selected/published in last 24h + during this run.
+    day_ago = now_utc - timedelta(hours=24)
+    selected_clusters: set[str] = set()
+    with session_scope() as session:
+        selected_clusters.update(
+            row[0]
+            for row in session.execute(
+                select(Article.cluster_key).where(
+                    Article.status.in_([ArticleStatus.SELECTED_HOURLY, ArticleStatus.PUBLISHED]),
+                    Article.updated_at >= day_ago,
+                    Article.cluster_key.is_not(None),
+                )
+            ).all()
+        )
+
+    for bucket_start in buckets:
+        bucket_end = bucket_start + timedelta(hours=1)
+        with session_scope() as session:
+            exists = session.scalars(
+                select(Article.id).where(
+                    Article.status == ArticleStatus.SELECTED_HOURLY,
+                    Article.selected_hour_bucket_utc == bucket_start,
+                )
+            ).first()
+            if exists:
+                filled_buckets += 1
+                continue
+
+            base = (
+                select(Article, Score)
+                .join(Score, Score.article_id == Article.id)
+                .where(
+                    Article.status.in_([ArticleStatus.SCORED, ArticleStatus.REVIEW, ArticleStatus.READY]),
+                    Article.status != ArticleStatus.DOUBLE,
+                    Article.status != ArticleStatus.ARCHIVED,
+                    Article.status != ArticleStatus.REJECTED,
+                    Article.status != ArticleStatus.PUBLISHED,
+                    Article.status != ArticleStatus.SELECTED_HOURLY,
+                    ((Article.created_at >= bucket_start) & (Article.created_at < bucket_end))
+                    | ((Article.published_at >= bucket_start) & (Article.published_at < bucket_end)),
+                )
+                .options(joinedload(Article.source))
+                .order_by(Score.final_score.desc())
+                .limit(200)
+            )
+            rows = session.execute(base).all()
+
+            # If that hour has no candidates, just skip (no forced fallback across hours).
+            if not rows:
+                continue
+
+        # Filter by cluster_key dedup against existing selections/publishes.
+        filtered = [(a, s) for a, s in rows if (a.cluster_key not in selected_clusters)]
+        if not filtered:
+            continue
+        filtered.sort(key=lambda x: _audience_adjusted_score(x[0], x[1]), reverse=True)
+
+        picked_batch = filtered[:per_hour_n]
+        for a, _s in picked_batch:
+            with session_scope() as session:
+                art = session.get(Article, int(a.id))
+                if not art:
+                    continue
+                # Double-check bucket isn't filled by a parallel request.
+                exists2 = session.scalars(
+                    select(Article.id).where(
+                        Article.status == ArticleStatus.SELECTED_HOURLY,
+                        Article.selected_hour_bucket_utc == bucket_start,
+                    )
+                ).first()
+                if exists2:
+                    break
+                art.status = ArticleStatus.SELECTED_HOURLY
+                art.selected_hour_bucket_utc = bucket_start
+                art.updated_at = datetime.utcnow()
+                selected_ids.append(int(art.id))
+                if art.cluster_key:
+                    selected_clusters.add(str(art.cluster_key))
+                filled_buckets += 1
+                # Only 1 per bucket by default; if per_hour>1 we'll fill more.
+                if per_hour_n == 1:
+                    break
+
+    return {
+        "ok": True,
+        "hours": hours,
+        "per_hour": per_hour_n,
+        "selected": len(selected_ids),
+        "filled_buckets": filled_buckets,
+        "selected_ids": selected_ids,
+        "tz": tz_name,
+    }
 
 
 def auto_select_by_profile(top_n: int = 5) -> dict:
