@@ -2710,6 +2710,7 @@ def bot_page(request: Request):
         <button onclick="telegramTest()">Telegram Test</button>
         <button onclick="telegramBacklog()">Send TG Backlog</button>
         <button onclick="telegramHourlyBackfill()">Send Hourly Backfill (24h)</button>
+        <button onclick="telegramPoll()">Poll TG Now</button>
       </div>
       <pre id="out" style="white-space:pre-wrap;background:#0b1428;border:1px solid #2a3b60;padding:12px;border-radius:8px;margin-top:12px;"></pre>
     </div>
@@ -2735,15 +2736,21 @@ def bot_page(request: Request):
     async function telegramHourlyBackfill() {{
       const h = prompt('Backfill how many hours? (1..168)', '24');
       if (h === null) return;
-      const n = prompt('How many messages to send? (1..100)', '24');
-      if (n === null) return;
       setOut('Selecting per-hour + sending…');
       const hours = Math.max(1, Math.min(168, Number(h) || 24));
-      const limit = Math.max(1, Math.min(100, Number(n) || 24));
+      // Expected UX: N hours => N messages (capped by Telegram/job limits).
+      const limit = Math.max(1, Math.min(100, hours));
       const resp = await fetch(`/telegram/review/send-hourly-backfill?hours=${{hours}}&limit=${{limit}}`, {{method:'POST'}});
       const out = await resp.json();
       setOut(JSON.stringify(out, null, 2));
       if (!resp.ok) alert(out.detail || 'send hourly backfill failed');
+    }}
+    async function telegramPoll() {{
+      setOut('Polling Telegram updates…');
+      const resp = await fetch('/telegram/review/poll', {{method:'POST'}});
+      const out = await resp.json();
+      setOut(JSON.stringify(out, null, 2));
+      if (!resp.ok) alert(out.detail || 'poll failed');
     }}
   </script>
 </body>

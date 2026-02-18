@@ -219,6 +219,7 @@ def pick_hourly_backfill(hours_back: int = 24, per_hour: int = 1) -> dict:
 
     selected_ids: list[int] = []
     filled_buckets = 0
+    missing_buckets: list[datetime] = []
 
     # Start from the oldest hour so review chat receives messages in chronological order.
     buckets = [current_bucket - timedelta(hours=i) for i in range(hours - 1, -1, -1)]
@@ -287,11 +288,13 @@ def pick_hourly_backfill(hours_back: int = 24, per_hour: int = 1) -> dict:
 
             # If that hour has no candidates, just skip (no forced fallback across hours).
             if not rows:
+                missing_buckets.append(bucket_start)
                 continue
 
         # Filter by cluster_key dedup against existing selections/publishes.
         filtered = [(a, s) for a, s in rows if (a.cluster_key not in selected_clusters)]
         if not filtered:
+            missing_buckets.append(bucket_start)
             continue
         filtered.sort(key=lambda x: _audience_adjusted_score(x[0], x[1]), reverse=True)
 
@@ -321,12 +324,63 @@ def pick_hourly_backfill(hours_back: int = 24, per_hour: int = 1) -> dict:
                 if per_hour_n == 1:
                     break
 
+    # If we couldn't fill some hour buckets (low-news hours), top up using best candidates
+    # from the whole window so user can still receive ~N messages for N hours.
+    if missing_buckets:
+        window_start = now_utc - timedelta(hours=hours)
+        with session_scope() as session:
+            rows2 = session.execute(
+                select(Article, Score)
+                .join(Score, Score.article_id == Article.id)
+                .where(
+                    Article.status.in_([ArticleStatus.SCORED, ArticleStatus.REVIEW, ArticleStatus.READY]),
+                    Article.status != ArticleStatus.DOUBLE,
+                    Article.status != ArticleStatus.ARCHIVED,
+                    Article.status != ArticleStatus.REJECTED,
+                    Article.status != ArticleStatus.PUBLISHED,
+                    Article.status != ArticleStatus.SELECTED_HOURLY,
+                    (Article.created_at >= window_start) | (Article.published_at >= window_start),
+                )
+                .options(joinedload(Article.source))
+                .order_by(Score.final_score.desc())
+                .limit(500)
+            ).all()
+        pool = [(a, s) for a, s in rows2 if (a.cluster_key not in selected_clusters)]
+        pool.sort(key=lambda x: _audience_adjusted_score(x[0], x[1]), reverse=True)
+
+        # Fill oldest missing buckets first.
+        missing_buckets.sort()
+        for bucket_start in list(missing_buckets):
+            if not pool:
+                break
+            a, _s = pool.pop(0)
+            with session_scope() as session:
+                exists2 = session.scalars(
+                    select(Article.id).where(
+                        Article.status == ArticleStatus.SELECTED_HOURLY,
+                        Article.selected_hour_bucket_utc == bucket_start,
+                    )
+                ).first()
+                if exists2:
+                    continue
+                art = session.get(Article, int(a.id))
+                if not art:
+                    continue
+                art.status = ArticleStatus.SELECTED_HOURLY
+                art.selected_hour_bucket_utc = bucket_start
+                art.updated_at = datetime.utcnow()
+                selected_ids.append(int(art.id))
+                filled_buckets += 1
+                if art.cluster_key:
+                    selected_clusters.add(str(art.cluster_key))
+
     return {
         "ok": True,
         "hours": hours,
         "per_hour": per_hour_n,
         "selected": len(selected_ids),
         "filled_buckets": filled_buckets,
+        "missing_buckets": max(0, hours - filled_buckets),
         "selected_ids": selected_ids,
         "tz": tz_name,
     }
