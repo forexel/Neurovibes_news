@@ -44,7 +44,13 @@ from app.services.content_generation import (
 )
 from app.services.object_storage import upload_generated_image
 from app.services.pipeline import auto_select_by_profile, pick_hourly_top, run_hourly_cycle
-from app.services.ingestion import enrich_article_from_source, enrich_summary_only_articles, run_ingestion, run_ingestion_fast
+from app.services.ingestion import (
+    enrich_article_from_source,
+    enrich_summary_only_articles,
+    geo_check_sources,
+    run_ingestion,
+    run_ingestion_fast,
+)
 from app.services.embedding_dedup import process_embeddings_and_dedup
 from app.services.scoring import prune_bad_articles, prune_non_ai_articles, run_scoring, score_article_by_id
 from app.services.topic_filter import passes_ai_topic_filter
@@ -364,6 +370,14 @@ def pipeline_start(body: RunPipelineIn, request: Request) -> dict:
         try:
             logger = logging.getLogger("nv.pipeline")
 
+            logger.info("pipeline geo check start")
+            def _geo_progress(i: int, total: int, name: str) -> None:
+                _set_state("geo/check", processed=i, total=total, detail=name)
+                if total and (i == total or i % 5 == 0):
+                    logger.info("pipeline geo check %s/%s (%s)", i, total, name)
+
+            geo = geo_check_sources(timeout_s=12, progress_cb=_geo_progress)
+
             read_total = 0
             read_done = 0
             save_done = 0
@@ -445,6 +459,7 @@ def pipeline_start(body: RunPipelineIn, request: Request) -> dict:
                 _set_state("prepare/image", processed=1, total=1, detail=str(top_id))
 
             result = {
+                "geo_check": geo,
                 "ingestion": ingest,
                 "enrich_summary_only": enrich,
                 "embedded": embedded,
@@ -1075,6 +1090,24 @@ def admin_data_articles(
             ids = list(selected_day_map.keys())
             base_query = base_query.where(Article.status != ArticleStatus.ARCHIVED)
             articles = session.scalars(base_query.where(Article.id.in_(ids))).all() if ids else []
+        elif view == "unsorted":
+            # Unsorted = editor inbox excluding anything that was already "sent somewhere":
+            # - published
+            # - selected_hourly
+            # - selected_day (any active date)
+            # - archived/rejected
+            selected_any_day_ids = session.scalars(
+                select(DailySelection.article_id).where(DailySelection.active.is_(True))
+            ).all()
+            base_query = base_query.where(
+                Article.status != ArticleStatus.ARCHIVED,
+                Article.status != ArticleStatus.PUBLISHED,
+                Article.status != ArticleStatus.SELECTED_HOURLY,
+                Article.status != ArticleStatus.REJECTED,
+            )
+            if selected_any_day_ids:
+                base_query = base_query.where(Article.id.not_in(list(set(int(x) for x in selected_any_day_ids))))
+            articles = session.scalars(base_query).all()
         elif view == "no_double":
             base_query = base_query.where(Article.status != ArticleStatus.ARCHIVED)
             articles = session.scalars(base_query.where(Article.status != ArticleStatus.DOUBLE)).all()
@@ -2361,6 +2394,17 @@ def admin_selected_hour_page(request: Request):
 def selected_hour_page(request: Request):
     return admin_selected_hour_page(request)
 
+@app.get("/admin/unsorted", response_class=HTMLResponse)
+def admin_unsorted_page(request: Request):
+    if _get_session_user(request) is None:
+        return RedirectResponse(url="/login", status_code=303)
+    return _render_admin_list_page("unsorted")
+
+
+@app.get("/unsorted", response_class=HTMLResponse)
+def unsorted_page(request: Request):
+    return admin_unsorted_page(request)
+
 
 @app.get("/admin/no-double", response_class=HTMLResponse)
 def admin_no_double_page(request: Request):
@@ -2657,6 +2701,7 @@ def _render_admin_list_page(view: str) -> str:
       <div class="menu-trigger">Articles ▾</div>
       <div class="menu-panel">
         <a href="/"><button>All</button></a>
+        <a href="/unsorted"><button>Unsorted</button></a>
         <a href="/published"><button>Published</button></a>
         <a href="/selected-day"><button>Selected Day</button></a>
         <a href="/selected-hour"><button>Selected Hour</button></a>

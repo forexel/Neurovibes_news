@@ -427,6 +427,12 @@ def _handle_callback(update: dict) -> dict:
     chat_id = str(chat.get("id") or "")
     message_id = str(msg.get("message_id") or "")
 
+    # Log callback data for diagnostics (helps catch wrong button mappings).
+    try:
+        print("[tg] callback", {"data": data, "chat_id": chat_id, "message_id": message_id, "user_id": user_id}, flush=True)
+    except Exception:
+        pass
+
     if callback_id:
         _answer_callback(callback_id, "Принято")
 
@@ -457,13 +463,8 @@ def _handle_callback(update: dict) -> dict:
 
     if action == "pubnow":
         _edit_message_reply_markup(chat_id, message_id)
-        out = publish_article(article_id)
-        with session_scope() as session:
-            job = session.scalars(select(TelegramReviewJob).where(TelegramReviewJob.article_id == article_id)).first()
-            if job and out.get("ok"):
-                job.status = "published"
-                job.updated_at = datetime.utcnow()
-        prompt = _send_message(chat_id, "Ок. Почему публикуем сейчас? Ответь реплаем на это сообщение.", force_reply=True)
+        # Safety: do NOT publish immediately. Ask for reason first, then publish in message handler.
+        prompt = _send_message(chat_id, "Почему публикуем сейчас? Ответь реплаем на это сообщение.", force_reply=True)
         if prompt.get("ok"):
             prompt_id = str((prompt.get("result") or {}).get("message_id") or "")
             if prompt_id:
@@ -473,12 +474,12 @@ def _handle_callback(update: dict) -> dict:
                             chat_id=chat_id,
                             user_id=user_id or "0",
                             article_id=article_id,
-                            action="publish",
+                            action="publish_now",
                             prompt_message_id=prompt_id,
                             created_at=datetime.utcnow(),
                         )
                     )
-        return {"ok": True, "action": "publish_now", "article_id": article_id, "publish": out}
+        return {"ok": True, "action": "publish_now_pending_reason", "article_id": article_id}
 
     if action == "pub1h":
         _edit_message_reply_markup(chat_id, message_id)
@@ -655,6 +656,34 @@ def _handle_message(update: dict) -> dict:
                 _delete_message(chat_id, str(job.review_message_id))
         _post_decision_recalc()
         return {"ok": True, "action": "publish_reason_saved", "article_id": article_id}
+
+    if action == "publish_now":
+        out = publish_article(article_id)
+        with session_scope() as session:
+            pending = session.scalars(
+                select(TelegramPendingReason).where(
+                    TelegramPendingReason.prompt_message_id == prompt_id,
+                    TelegramPendingReason.chat_id == chat_id,
+                )
+            ).first()
+            if pending:
+                session.delete(pending)
+            session.add(EditorFeedback(article_id=article_id, explanation_text=safe_text))
+            job = session.scalars(select(TelegramReviewJob).where(TelegramReviewJob.article_id == article_id)).first()
+            if job:
+                job.status = "published" if out.get("ok") else "failed"
+                job.decision_reason = safe_text
+                job.updated_at = datetime.utcnow()
+        # Keep chat clean: remove bot prompt + user's reply + original preview message.
+        _delete_message(chat_id, prompt_id)
+        if msg_id:
+            _delete_message(chat_id, msg_id)
+        with session_scope() as session:
+            job = session.scalars(select(TelegramReviewJob).where(TelegramReviewJob.article_id == article_id)).first()
+            if job and (job.review_message_id or "").strip():
+                _delete_message(chat_id, str(job.review_message_id))
+        _post_decision_recalc()
+        return {"ok": True, "action": "publish_now_done", "article_id": article_id, "publish": out}
 
     if action == "schedule_1h":
         with session_scope() as session:

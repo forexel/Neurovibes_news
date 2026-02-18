@@ -483,6 +483,89 @@ def _load_feed(rss_url: str):
     return feedparser.parse(rss_url)
 
 
+def geo_check_sources(limit: int | None = None, timeout_s: int = 15, progress_cb=None) -> dict:
+    """
+    Quick diagnostic: fetch each source.rss_url and classify common blocks.
+    Intended to detect Geo/IP restrictions vs anti-bot vs generic failures.
+    """
+    def _classify(status_code: int | None, text: str) -> str:
+        t = (text or "").lower()
+        if status_code == 451:
+            return "geo_block"
+        if status_code in {401, 402, 403, 406}:
+            if any(x in t for x in ["not available", "your region", "your country", "unavailable in", "restricted", "санкц", "росси", "region blocked"]):
+                return "geo_block"
+            if any(x in t for x in ["captcha", "not a robot", "cloudflare", "perimeterx", "akamai", "verify you are human", "attention required"]):
+                return "anti_bot"
+            return "forbidden"
+        if status_code == 429:
+            return "rate_limited"
+        if status_code and status_code >= 500:
+            return "server_error"
+        if status_code and 200 <= status_code < 400:
+            return "ok"
+        if status_code:
+            return "http_error"
+        return "network_error"
+
+    with session_scope() as session:
+        q = select(Source).where(Source.is_active.is_(True)).order_by(Source.priority_rank.asc())
+        if limit is not None:
+            q = q.limit(max(1, int(limit)))
+        sources = session.scalars(q).all()
+
+    total = len(sources)
+    out: list[dict] = []
+    ok = 0
+    geo = 0
+    antibot = 0
+    other = 0
+    with httpx.Client(follow_redirects=True, timeout=timeout_s, headers=RSS_HEADERS) as client:
+        for idx, s in enumerate(sources, start=1):
+            if progress_cb:
+                try:
+                    progress_cb(idx, total, s.name)
+                except Exception:
+                    pass
+            status_code = None
+            body = ""
+            err = None
+            try:
+                resp = client.get(s.rss_url)
+                status_code = int(resp.status_code)
+                body = (resp.text or "")[:20_000]
+            except Exception as exc:
+                err = str(exc)
+            cls = _classify(status_code, body)
+            if cls == "ok":
+                ok += 1
+            elif cls == "geo_block":
+                geo += 1
+            elif cls in {"anti_bot", "rate_limited"}:
+                antibot += 1
+            else:
+                other += 1
+            out.append(
+                {
+                    "source_id": int(s.id),
+                    "name": s.name,
+                    "url": s.rss_url,
+                    "status_code": status_code,
+                    "class": cls,
+                    "error": err,
+                }
+            )
+
+    return {
+        "total": total,
+        "ok": ok,
+        "geo_block": geo,
+        "anti_bot_or_rate_limited": antibot,
+        "other_errors": other,
+        "results": out,
+    }
+
+
 def fetch_source_articles(
     source: Source,
     days_back: int = 30,
