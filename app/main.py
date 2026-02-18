@@ -2012,17 +2012,24 @@ def unschedule_publish(article_id: int, request: Request) -> dict:
 
 
 @app.post("/telegram/test")
-def telegram_test() -> dict:
+def telegram_test(request: Request) -> dict:
+    # Use the logged-in user's Telegram secret (multi-tenant).
+    user = _require_session_user(request)
+    load_workspace_telegram_context(user.id)
     return send_test_message()
 
 
 @app.post("/telegram/review/send-latest")
-def telegram_review_send_latest(force: bool = False) -> dict:
+def telegram_review_send_latest(request: Request, force: bool = False) -> dict:
+    user = _require_session_user(request)
+    load_workspace_telegram_context(user.id)
     return send_hourly_top_for_review(article_id=None, force=bool(force))
 
 
 @app.post("/telegram/review/send-backlog")
-def telegram_review_send_backlog(limit: int = 10) -> dict:
+def telegram_review_send_backlog(request: Request, limit: int = 10) -> dict:
+    user = _require_session_user(request)
+    load_workspace_telegram_context(user.id)
     return send_selected_backlog_for_review(limit=limit)
 
 @app.post("/telegram/review/send-hourly-backfill")
@@ -2056,7 +2063,9 @@ def telegram_review_jobs(request: Request, limit: int = 20) -> dict:
 
 
 @app.post("/telegram/review/poll")
-def telegram_review_poll() -> dict:
+def telegram_review_poll(request: Request) -> dict:
+    user = _require_session_user(request)
+    load_workspace_telegram_context(user.id)
     return poll_review_updates(limit=100)
 
 
@@ -2731,7 +2740,7 @@ def bot_page(request: Request):
       setOut('Selecting per-hour + sending…');
       const hours = Math.max(1, Math.min(168, Number(h) || 24));
       const limit = Math.max(1, Math.min(100, Number(n) || 24));
-      const resp = await fetch(`/telegram/review/send-hourly-backfill?hours=${hours}&limit=${limit}`, {{method:'POST'}});
+      const resp = await fetch(`/telegram/review/send-hourly-backfill?hours=${{hours}}&limit=${{limit}}`, {{method:'POST'}});
       const out = await resp.json();
       setOut(JSON.stringify(out, null, 2));
       if (!resp.ok) alert(out.detail || 'send hourly backfill failed');
@@ -3701,7 +3710,7 @@ function toLocalDisplay(v) {{
   const d = new Date(v);
   if (Number.isNaN(d.getTime())) return String(v);
   const p = (n) => String(n).padStart(2, '0');
-  return `${{p(d.getDate())}}.${{p(d.getMonth()+1)}}.${{d.getFullYear()}} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  return `${{p(d.getDate())}}.${{p(d.getMonth()+1)}}.${{d.getFullYear()}} ${{p(d.getHours())}}:${{p(d.getMinutes())}}`;
 }}
 function renderMeta(d) {{
   const sched = d.scheduled_publish_at ? ` | scheduled_at: ${{toLocalDisplay(d.scheduled_publish_at)}}` : '';
