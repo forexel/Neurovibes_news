@@ -208,7 +208,8 @@ class RuntimeSettingUpsertIn(BaseModel):
 class SetupStep1In(BaseModel):
     channel_name: str = Field(min_length=2, max_length=255)
     channel_theme: str = Field(min_length=10, max_length=6000)
-    sources_text: str = Field(min_length=3, max_length=20000)
+    # Sources are managed in /sources. Keep this optional for backward compatibility.
+    sources_text: str = Field(default="", max_length=20000)
     openrouter_api_key: str | None = Field(default=None, max_length=400)
 
 
@@ -1573,7 +1574,8 @@ def setup_step2_analyze(body: SetupStep2In, request: Request) -> dict:
     ]
 
     params = fallback_params
-    if settings.openrouter_api_key:
+    # Use per-user key (loaded by middleware) first; fall back to server env key if present.
+    if (get_workspace_api_key(user.id) or settings.openrouter_api_key):
         try:
             client = get_client()
             prompt = (
@@ -2218,12 +2220,20 @@ def admin_setup_page(request: Request):
   <main class="nv-container-sm">
     <div class="card">
       <h3>Step 1: Channel</h3>
-      <p class="muted">Название канала, тематика, OpenRouter API key (твой), и список источников (по одному в строке).</p>
+      <p class="muted">Название канала, тематика, OpenRouter API key (твой). Источники добавляются отдельно в разделе <code>Sources</code>.</p>
       <p><input id="channel_name" placeholder="Название канала" /></p>
       <p><textarea id="channel_theme" placeholder="Тематика канала"></textarea></p>
-      <p><input id="openrouter_api_key" type="password" placeholder="OpenRouter API key (sk-or-v1-...)" /></p>
-      <p class="muted" id="openrouter_hint"></p>
-      <p><textarea id="sources_text" placeholder="Добавьте источники (rss/html urls), по одному в строке"></textarea></p>
+      <div class="card" style="padding:12px;margin:10px 0;background:#0f1a33;">
+        <div class="muted" id="openrouter_hint"></div>
+        <div id="openrouterSavedRow" style="display:none;gap:10px;align-items:center;flex-wrap:wrap;">
+          <span>OpenRouter key: <b id="openrouterMask">********</b></span>
+          <button type="button" onclick="toggleOpenrouterEdit(true)">✎ Edit</button>
+        </div>
+        <div id="openrouterEditRow" style="display:block;margin-top:10px;">
+          <input id="openrouter_api_key" type="password" placeholder="OpenRouter API key (sk-or-v1-...)" />
+          <div class="muted" style="margin-top:6px;">Ключ хранится в базе зашифрованно и не отображается обратно. Чтобы заменить, вставь новый ключ и нажми Save.</div>
+        </div>
+      </div>
       <p><button onclick="saveStep1()">Save Step 1</button></p>
     </div>
     <div class="card">
@@ -2236,10 +2246,18 @@ def admin_setup_page(request: Request):
     <div class="card">
       <h3>Step 3: Telegram</h3>
       <p class="muted">Куда слать превью на review и куда публиковать. Bot token хранится как secret у пользователя (в базе, зашифрованно) и не отображается обратно.</p>
-      <p><input id="telegram_bot_token" type="password" placeholder="Bot token (123:AA...)" /></p>
       <p class="muted" id="telegram_token_hint"></p>
-      <p><input id="telegram_review_chat_id" placeholder="Review chat id (например @username или -100...)" /></p>
-      <p><input id="telegram_channel_id" placeholder="Channel id (например -100...)" /></p>
+      <div id="telegramSavedRow" style="display:none;gap:10px;align-items:center;flex-wrap:wrap;">
+        <span>Bot token: <b id="telegramTokenMask">********</b></span>
+        <button type="button" onclick="toggleTelegramTokenEdit(true)">✎ Edit</button>
+      </div>
+      <div id="telegramTokenEditRow" style="display:block;margin-top:10px;">
+        <input id="telegram_bot_token" type="password" placeholder="Bot token (123:AA...)" />
+      </div>
+      <p class="muted" style="margin-top:10px;">Review chat: куда бот шлет превью для ревью (например <code>@Yudin_Finance</code> или chat_id).</p>
+      <p><input id="telegram_review_chat_id" placeholder="Review chat id (например @Yudin_Finance)" /></p>
+      <p class="muted">Channel id: куда бот публикует посты (обычно <code>-100…</code>).</p>
+      <p><input id="telegram_channel_id" placeholder="Channel id (например -1002340845297)" /></p>
       <p><input id="telegram_signature" placeholder="Signature (например @neuro_vibes_future)" /></p>
       <p><input id="timezone_name" placeholder="Timezone (например Europe/Moscow)" /></p>
       <p><button onclick="saveTelegram()">Save Telegram</button></p>
@@ -2254,30 +2272,57 @@ def admin_setup_page(request: Request):
   </main>
   <script>
     function setStatus(v){ document.getElementById('status').textContent = v; }
+    function toggleTelegramTokenEdit(on){
+      const edit = document.getElementById('telegramTokenEditRow');
+      const saved = document.getElementById('telegramSavedRow');
+      if (edit) edit.style.display = on ? 'block' : 'none';
+      if (saved) saved.style.display = on ? 'none' : 'flex';
+      if (on) { const el = document.getElementById('telegram_bot_token'); if (el) el.focus(); }
+    }
+    function toggleOpenrouterEdit(on){
+      const edit = document.getElementById('openrouterEditRow');
+      const saved = document.getElementById('openrouterSavedRow');
+      if (edit) edit.style.display = on ? 'block' : 'none';
+      if (saved) saved.style.display = on ? 'none' : 'flex';
+      if (on) { const el = document.getElementById('openrouter_api_key'); if (el) el.focus(); }
+    }
     async function loadState(){
       const resp = await fetch('/setup/state');
       if (!resp.ok) { if (resp.status === 401) location.href='/login'; return; }
       const s = await resp.json();
       document.getElementById('channel_name').value = s.channel_name || '';
       document.getElementById('channel_theme').value = s.channel_theme || '';
-      document.getElementById('sources_text').value = s.sources_text || '';
       document.getElementById('audience_description').value = s.audience_description || '';
       document.getElementById('telegram_review_chat_id').value = s.telegram_review_chat_id || '';
       document.getElementById('telegram_channel_id').value = s.telegram_channel_id || '';
       document.getElementById('telegram_signature').value = s.telegram_signature || '';
       document.getElementById('timezone_name').value = s.timezone_name || 'Europe/Moscow';
-      document.getElementById('openrouter_hint').textContent = s.openrouter_api_key_set ? 'OpenRouter key: set (hidden). To change it, paste a new key and Save Step 1.' : 'OpenRouter key: not set. You must set it to use LLM features for your account.';
-      document.getElementById('telegram_token_hint').textContent = s.telegram_bot_token_set ? 'Bot token: set (hidden). To change it, paste a new token and Save Telegram.' : 'Bot token: not set. Review/publish will not work until you set it.';
-      document.getElementById('telegram_hint').textContent = (s.telegram_review_chat_id && s.telegram_channel_id) ? 'Telegram: chat + channel configured.' : 'Telegram: chat/channel not configured yet.';
+      document.getElementById('openrouter_hint').textContent = s.openrouter_api_key_set ? 'OpenRouter key: set (hidden).' : 'OpenRouter key: not set. You must set it to use LLM features for your account.';
+      document.getElementById('telegram_token_hint').textContent = s.telegram_bot_token_set ? 'Bot token: set (hidden).' : 'Bot token: not set. Review/publish will not work until you set it.';
+      // Show masked saved rows for secrets (token/key) and hide edit fields until user clicks pencil.
+      const orMask = document.getElementById('openrouterMask');
+      if (orMask) orMask.textContent = s.openrouter_api_key_set ? '******** (saved)' : 'not set';
+      toggleOpenrouterEdit(!s.openrouter_api_key_set);
+      const tgMask = document.getElementById('telegramTokenMask');
+      if (tgMask) tgMask.textContent = s.telegram_bot_token_set ? '******** (saved)' : 'not set';
+      toggleTelegramTokenEdit(!s.telegram_bot_token_set);
+
+      const missing = [];
+      if (!s.telegram_bot_token_set) missing.push('bot token');
+      if (!s.telegram_review_chat_id) missing.push('review chat');
+      if (!s.telegram_channel_id) missing.push('channel id');
+      const hint = missing.length ? ('Telegram: missing ' + missing.join(', ') + '.') : 'Telegram: chat + channel configured.';
+      const warn = (String(s.telegram_review_chat_id||'').startsWith('-100') && !String(s.telegram_channel_id||'').startsWith('-100')) ? ' (Похоже, ты вставил channel id в review chat.)' : '';
+      document.getElementById('telegram_hint').textContent = hint + warn;
       setStatus(`User: ${s.email} | step: ${s.onboarding_step} | completed: ${s.onboarding_completed ? 'yes':'no'}`);
     }
     async function saveStep1(){
       const body = {
         channel_name: (document.getElementById('channel_name').value || '').trim(),
         channel_theme: (document.getElementById('channel_theme').value || '').trim(),
-        sources_text: (document.getElementById('sources_text').value || '').trim(),
         openrouter_api_key: (document.getElementById('openrouter_api_key').value || '').trim(),
       };
+      body.sources_text = ''; // sources are managed in /sources
       const resp = await fetch('/setup/step1', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
       const out = await resp.json();
       if (!resp.ok) return alert(out.detail || 'save step1 failed');
