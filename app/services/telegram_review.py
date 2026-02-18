@@ -117,6 +117,39 @@ def _hour_window_label_ru() -> str:
     tz_label = "МСК" if tz_name == "Europe/Moscow" else tz_name
     return f"Новость {start.day} {m} {start.year} года с {start:%H:%M} до {end:%H:%M} ({tz_label})"
 
+def _format_dt_ru(dt_local: datetime) -> str:
+    months = [
+        "января",
+        "февраля",
+        "марта",
+        "апреля",
+        "мая",
+        "июня",
+        "июля",
+        "августа",
+        "сентября",
+        "октября",
+        "ноября",
+        "декабря",
+    ]
+    m = months[dt_local.month - 1] if 1 <= dt_local.month <= 12 else str(dt_local.month)
+    return f"{dt_local.day} {m} {dt_local.year}, {dt_local:%H:%M}"
+
+
+def _age_ru(now_local: datetime, published_local: datetime) -> str:
+    delta = now_local - published_local
+    secs = int(max(0, delta.total_seconds()))
+    mins = secs // 60
+    hours = mins // 60
+    days = hours // 24
+    if days > 0:
+        h = hours % 24
+        return f"{days}д {h}ч назад"
+    if hours > 0:
+        m = mins % 60
+        return f"{hours}ч {m}м назад"
+    return f"{mins}м назад"
+
 
 def send_review_status_once_per_hour(kind: str, text: str) -> dict:
     """
@@ -164,9 +197,34 @@ def _build_review_text(article: Article) -> str:
         summary = ((article.subtitle or "")[:900]).strip() or "Короткий текст пока не готов."
     url = escape((article.canonical_url or "").strip())
     signature = escape(telegram_signature() or get_runtime_str("telegram_signature") or settings.telegram_signature or "@neuro_vibes_future")
+    source_name = ""
+    try:
+        source_name = (article.source.name or "").strip()
+    except Exception:
+        source_name = ""
+
+    try:
+        tz_name = telegram_timezone_name() or get_runtime_str("timezone_name") or "Europe/Moscow"
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz_name = "Europe/Moscow"
+        tz = ZoneInfo("Europe/Moscow")
+    now_local = datetime.now(tz=tz)
+    published_base = article.published_at or article.created_at
+    published_utc = published_base.replace(tzinfo=ZoneInfo("UTC"))
+    published_local = published_utc.astimezone(tz)
+    pub_line = f"Опубликовано: {_format_dt_ru(published_local)} ({_age_ru(now_local, published_local)})"
+    if (now_local - published_local) > timedelta(hours=24):
+        pub_line = "⚠️ " + pub_line
+
+    meta = escape(pub_line)
+    if source_name:
+        meta = meta + "\n" + escape("Источник: " + source_name)
+
     return (
         f"{escape(_hour_window_label_ru())}\n"
         "Топ-1 за час. Публиковать?\n\n"
+        f"{meta}\n\n"
         f"<b>{escape(title)}</b>\n\n"
         f"{escape(summary)}\n"
         f"<a href=\"{url}\">Подробнее</a>\n\n"
