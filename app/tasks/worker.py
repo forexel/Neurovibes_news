@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.db import init_db
 from app.db import session_scope
@@ -40,9 +40,9 @@ def _set_worker_kv(key: str, value: str) -> None:
             row = session.get(TelegramBotKV, key)  # reuse existing KV table
             if row:
                 row.value = value
-                row.updated_at = datetime.utcnow()
+                row.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
             else:
-                session.add(TelegramBotKV(key=key, value=value, updated_at=datetime.utcnow()))
+                session.add(TelegramBotKV(key=key, value=value, updated_at=datetime.now(timezone.utc).replace(tzinfo=None)))
     except Exception:
         pass
 
@@ -115,8 +115,13 @@ def main() -> None:
         _load_default_user_context()
         now = time.time()
         if now >= next_cycle_ts:
+            # Compute next run immediately so UI can show it even while the cycle is running/hanging.
+            next_cycle_ts = now + INTERVAL_SECONDS
+            _set_worker_kv("worker_next_cycle_utc", datetime.fromtimestamp(next_cycle_ts, tz=timezone.utc).isoformat())
+            _set_worker_kv("worker_cycle_state", "running")
+            _set_worker_kv("worker_last_cycle_error", "")
             try:
-                _set_worker_kv("worker_last_cycle_start_utc", datetime.utcnow().isoformat())
+                _set_worker_kv("worker_last_cycle_start_utc", datetime.now(timezone.utc).isoformat())
                 print("[worker] cycle start", {"backfill_days": BACKFILL_DAYS}, flush=True)
                 result = run_hourly_cycle(backfill_days=BACKFILL_DAYS)
                 print("[worker] cycle done", result, flush=True)
@@ -168,9 +173,9 @@ def main() -> None:
                     print("[worker] telegram review backlog", backlog_out, flush=True)
             except Exception as exc:
                 print(f"[worker] cycle failed: {exc}", flush=True)
-            next_cycle_ts = now + INTERVAL_SECONDS
-            _set_worker_kv("worker_last_cycle_finish_utc", datetime.utcnow().isoformat())
-            _set_worker_kv("worker_next_cycle_utc", datetime.utcfromtimestamp(next_cycle_ts).isoformat())
+                _set_worker_kv("worker_last_cycle_error", str(exc)[:800])
+            _set_worker_kv("worker_last_cycle_finish_utc", datetime.now(timezone.utc).isoformat())
+            _set_worker_kv("worker_cycle_state", "idle")
 
         try:
             out = publish_scheduled_due(limit=20)
@@ -188,7 +193,7 @@ def main() -> None:
 
         # Optional fixed times auto-publish (UTC), e.g. "09:00,18:00".
         if publish_minutes:
-            now_utc = datetime.utcnow()
+            now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
             minute_of_day = now_utc.hour * 60 + now_utc.minute
             if minute_of_day in publish_minutes:
                 slot_key = f"{now_utc.date().isoformat()}-{minute_of_day}"

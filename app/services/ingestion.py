@@ -468,19 +468,37 @@ def _save_health_metric(source_id: int, success_rate: float, avg_latency_ms: flo
 
 
 def _load_feed(rss_url: str):
+    """
+    Fetch RSS/Atom feed content with explicit timeouts.
+
+    Important: never fall back to `feedparser.parse(url)` because it may perform its own network
+    request without our timeouts and hang the whole ingestion cycle.
+    """
+    text = ""
+    status_code: int | None = None
     try:
         with httpx.Client(follow_redirects=True, timeout=20, headers=RSS_HEADERS) as client:
             resp = client.get(rss_url)
-            if 200 <= resp.status_code < 400 and resp.text.strip():
-                return feedparser.parse(resp.text)
-            # Some feeds block non-browser clients (403/429/etc). Try Playwright fallback.
-            if _should_use_browser_fetch(rss_url, resp.status_code, resp.text):
-                browser_text, _, browser_status, _ = _fetch_page_browser(rss_url)
-                if browser_status and 200 <= browser_status < 400 and browser_text and browser_text.strip():
-                    return feedparser.parse(browser_text)
+            status_code = int(resp.status_code)
+            if 200 <= resp.status_code < 400 and (resp.text or "").strip():
+                text = resp.text
+            else:
+                # Some feeds block non-browser clients (403/429/etc). Try Playwright fallback.
+                if _should_use_browser_fetch(rss_url, resp.status_code, resp.text):
+                    browser_text, _, browser_status, _ = _fetch_page_browser(rss_url)
+                    if browser_status and 200 <= browser_status < 400 and browser_text and browser_text.strip():
+                        text = browser_text
+    except Exception:
+        text = ""
+
+    parsed = feedparser.parse(text or "")
+    # Attach minimal diagnostics for downstream metrics (best-effort).
+    try:
+        parsed["nv_status_code"] = status_code
+        parsed["nv_url"] = rss_url
     except Exception:
         pass
-    return feedparser.parse(rss_url)
+    return parsed
 
 
 def geo_check_sources(limit: int | None = None, timeout_s: int = 15, progress_cb=None) -> dict:

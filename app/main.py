@@ -250,7 +250,7 @@ def login_page() -> str:
   <meta charset='utf-8'>
   <meta name='viewport' content='width=device-width, initial-scale=1'>
   <title>Login</title>
-  <link rel="stylesheet" href="/static/app.css?v=2">
+  <link rel="stylesheet" href="/static/app.css?v=3">
 </head>
 <body class="auth">
   <form class='card' method='post' action='/login'>
@@ -287,7 +287,7 @@ def register_page() -> str:
   <meta charset='utf-8'>
   <meta name='viewport' content='width=device-width, initial-scale=1'>
   <title>Create User</title>
-  <link rel="stylesheet" href="/static/app.css?v=2">
+  <link rel="stylesheet" href="/static/app.css?v=3">
 </head>
 <body class="auth">
   <form class='card' method='post' action='/register'>
@@ -1310,6 +1310,33 @@ def admin_data_costs(request: Request) -> dict:
     }
 
 
+@app.get("/admin-data/worker-status")
+def admin_data_worker_status(request: Request) -> dict:
+    """
+    UI helper: show whether the hourly worker is alive and when the next cycle is planned.
+    The worker runs in the `pipeline` container (app/tasks/worker.py).
+    """
+    _require_session_user(request)
+    user = _require_session_user(request)
+    keys = [
+        "worker_last_cycle_start_utc",
+        "worker_last_cycle_finish_utc",
+        "worker_next_cycle_utc",
+        "worker_cycle_state",
+        "worker_last_cycle_error",
+    ]
+    with session_scope() as session:
+        out: dict[str, str] = {}
+        for k in keys:
+            row = session.get(TelegramBotKV, k)
+            out[k] = (row.value if row else "") or ""
+        ws = session.scalars(select(UserWorkspace).where(UserWorkspace.user_id == user.id)).first()
+        out["tz"] = (getattr(ws, "timezone_name", "") or "").strip() or "Europe/Moscow"
+    out["now_utc"] = datetime.utcnow().isoformat()
+    out["ok"] = True
+    return out
+
+
 @app.post("/sources/{source_id}/active")
 def set_source_active(source_id: int, body: SourceActiveIn, request: Request) -> dict:
     _require_session_user(request)
@@ -2082,7 +2109,7 @@ def admin_score_page(request: Request):
   <meta charset='utf-8'>
   <meta name='viewport' content='width=device-width, initial-scale=1'>
   <title>Score Parameters</title>
-  <link rel="stylesheet" href="/static/app.css?v=2">
+  <link rel="stylesheet" href="/static/app.css?v=3">
 </head>
 <body>
   <header>
@@ -2248,7 +2275,7 @@ def admin_setup_page(request: Request):
   <meta charset='utf-8'>
   <meta name='viewport' content='width=device-width, initial-scale=1'>
   <title>Setup Wizard</title>
-  <link rel="stylesheet" href="/static/app.css?v=2">
+  <link rel="stylesheet" href="/static/app.css?v=3">
 </head>
 <body>
   <header>
@@ -2538,7 +2565,7 @@ def admin_sources_page(request: Request):
   <meta charset='utf-8'>
   <meta name='viewport' content='width=device-width, initial-scale=1'>
   <title>Sources</title>
-  <link rel="stylesheet" href="/static/app.css?v=2">
+  <link rel="stylesheet" href="/static/app.css?v=3">
 </head>
 <body>
   <header>
@@ -2677,9 +2704,13 @@ def bot_page(request: Request):
         last_start = session.get(TelegramBotKV, "worker_last_cycle_start_utc")
         last_finish = session.get(TelegramBotKV, "worker_last_cycle_finish_utc")
         next_cycle = session.get(TelegramBotKV, "worker_next_cycle_utc")
+        cycle_state = session.get(TelegramBotKV, "worker_cycle_state")
+        last_err = session.get(TelegramBotKV, "worker_last_cycle_error")
         last_start_s = (last_start.value if last_start else "").strip()
         last_finish_s = (last_finish.value if last_finish else "").strip()
         next_cycle_s = (next_cycle.value if next_cycle else "").strip()
+        cycle_state_s = (cycle_state.value if cycle_state else "").strip()
+        last_err_s = (last_err.value if last_err else "").strip()
 
     def _mask(v: str) -> str:
         if not v:
@@ -2695,7 +2726,7 @@ def bot_page(request: Request):
   <meta charset='utf-8'>
   <meta name='viewport' content='width=device-width, initial-scale=1'>
   <title>Bot</title>
-  <link rel="stylesheet" href="/static/app.css?v=2">
+  <link rel="stylesheet" href="/static/app.css?v=3">
 </head>
 <body>
   <header>
@@ -2714,9 +2745,12 @@ def bot_page(request: Request):
         Signature: <b>{signature or '-'}</b><br>
         Timezone: <b>{tz or '-'}</b><br>
         Auto-send: <b>каждый час</b> (воркер в контейнере <code>pipeline</code>)<br>
-        Last cycle start (UTC): <b>{last_start_s or '-'}</b><br>
-        Last cycle finish (UTC): <b>{last_finish_s or '-'}</b><br>
-        Next cycle (UTC): <b>{next_cycle_s or '-'}</b>
+        Worker state: <b>{cycle_state_s or '-'}</b><br>
+        Last error: <b>{escape(last_err_s[:180]) if last_err_s else '-'}</b><br>
+        Last cycle start: <b id="ws_last_start">{last_start_s or '-'}</b><br>
+        Last cycle finish: <b id="ws_last_finish">{last_finish_s or '-'}</b><br>
+        Next cycle: <b id="ws_next">{next_cycle_s or '-'}</b><br>
+        <span class="muted">Время отображается в таймзоне: <code id="ws_tz">{tz or 'Europe/Moscow'}</code></span>
       </p>
       <div style="display:flex;gap:8px;flex-wrap:wrap;">
         <button onclick="telegramTest()">Telegram Test</button>
@@ -2728,6 +2762,23 @@ def bot_page(request: Request):
     </div>
   </main>
   <script>
+    function fmtUtcToTz(iso, tz) {{
+      const s = String(iso || '').trim();
+      if (!s || s === '-') return s;
+      const hasOffset = /[zZ]|[+-]\\d\\d:\\d\\d$/.test(s);
+      const d = new Date(hasOffset ? s : (s + 'Z'));
+      if (isNaN(d.getTime())) return s;
+      return d.toLocaleString('ru-RU', {{ timeZone: tz || 'Europe/Moscow' }});
+    }}
+    (function(){{ 
+      const tz = (document.getElementById('ws_tz')?.textContent || 'Europe/Moscow').trim();
+      const s1 = document.getElementById('ws_last_start');
+      const s2 = document.getElementById('ws_last_finish');
+      const s3 = document.getElementById('ws_next');
+      if (s1) s1.textContent = fmtUtcToTz(s1.textContent, tz) || '-';
+      if (s2) s2.textContent = fmtUtcToTz(s2.textContent, tz) || '-';
+      if (s3) s3.textContent = fmtUtcToTz(s3.textContent, tz) || '-';
+    }})();
     function setOut(v) {{ document.getElementById('out').textContent = v; }}
     async function telegramTest() {{
       setOut('Sending test…');
@@ -2790,7 +2841,7 @@ def publish_settings_page(request: Request):
   <meta charset='utf-8'>
   <meta name='viewport' content='width=device-width, initial-scale=1'>
   <title>Publish</title>
-  <link rel="stylesheet" href="/static/app.css?v=2">
+  <link rel="stylesheet" href="/static/app.css?v=3">
 </head>
 <body>
   <header>
@@ -2821,7 +2872,7 @@ def _render_admin_list_page(view: str) -> str:
   <meta charset='utf-8'>
   <meta name='viewport' content='width=device-width, initial-scale=1'>
   <title>Neurovibes Admin</title>
-  <link rel="stylesheet" href="/static/app.css?v=2">
+  <link rel="stylesheet" href="/static/app.css?v=3">
 </head>
 <body>
   <div id="navOverlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9998;align-items:center;justify-content:center;">
@@ -2891,6 +2942,7 @@ def _render_admin_list_page(view: str) -> str:
       <label>Page size: <input id="pageSizeInput" type="number" value="25" min="5" max="100" onchange="onPageSizeChange()"></label>
       <span class="muted">Generate Post: RU заголовок + 2 абзаца (без Translate Full)</span>
       <span id="costBadge" class="muted">Cost: ...</span>
+      <span id="workerBadge" class="muted">Worker: ...</span>
       <span id="action_state" class="muted">Ready</span>
       <span id="result" class="muted"></span>
     </div>
@@ -3020,6 +3072,40 @@ def _render_admin_list_page(view: str) -> str:
         const el = document.getElementById('costBadge');
         if (!el) return;
         el.textContent = `Cost est: $${Number(c.estimated_cost_usd_total || 0).toFixed(3)} | 24h: $${Number(c.estimated_cost_usd_24h || 0).toFixed(3)}`;
+      } catch (_) {}
+    }
+    function fmtUtcToTz(iso, tz) {
+      const s = String(iso || '').trim();
+      if (!s) return '';
+      // Stored values may be naive ("2026-02-18T13:44:17.29") or tz-aware ("...+00:00").
+      // Force UTC if no offset is present.
+      const hasOffset = /[zZ]|[+-]\\d\\d:\\d\\d$/.test(s);
+      const d = new Date(hasOffset ? s : (s + 'Z'));
+      if (isNaN(d.getTime())) return s;
+      return d.toLocaleString('ru-RU', { timeZone: tz || 'Europe/Moscow' });
+    }
+
+    async function refreshWorker() {
+      try {
+        const resp = await fetch('/admin-data/worker-status');
+        if (!resp.ok) return;
+        const s = await resp.json();
+        const el = document.getElementById('workerBadge');
+        if (!el) return;
+        const tz = (s.tz || 'Europe/Moscow').trim();
+        const next = (s.worker_next_cycle_utc || '').trim();
+        const last = (s.worker_last_cycle_finish_utc || '').trim();
+        const start = (s.worker_last_cycle_start_utc || '').trim();
+        const state = (s.worker_cycle_state || '').trim() || 'unknown';
+        const err = (s.worker_last_cycle_error || '').trim();
+        if (!next && !last) {
+          el.textContent = 'Worker: no heartbeat yet (check pipeline container logs)';
+          return;
+        }
+        const lastLocal = fmtUtcToTz(last, tz);
+        const nextLocal = fmtUtcToTz(next, tz);
+        const startLocal = fmtUtcToTz(start, tz);
+        el.textContent = `Worker(${tz}): state=${state} · last=${lastLocal || '-'} · next=${nextLocal || '-'} · start=${startLocal || '-'}` + (err ? ` · err=${err.slice(0,120)}` : '');
       } catch (_) {}
     }
 
@@ -3541,6 +3627,8 @@ def _render_admin_list_page(view: str) -> str:
 
     loadArticles();
     refreshCosts();
+    refreshWorker();
+    setInterval(refreshWorker, 10000);
   </script>
 </body>
 </html>
@@ -3618,7 +3706,7 @@ def admin_article_page(article_id: int, request: Request):
 <meta charset='utf-8'>
 <meta name='viewport' content='width=device-width, initial-scale=1'>
 <title>Article {article_id}</title>
-<link rel="stylesheet" href="/static/app.css?v=2">
+<link rel="stylesheet" href="/static/app.css?v=3">
 </head>
 <body>
   <main class="nv-container">

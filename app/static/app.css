@@ -209,5 +209,19 @@ body.auth button { background: var(--input); }
 }
 .statusbar input[type="number"] { height: 28px; padding: 4px 10px; }
 .statusbar input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--hover); }
-.statusbar #result { max-width: 520px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.statusbar #result {
+  /* Show full JSON/job output: full width + multiline + scroll when long. */
+  flex: 1 1 100%;
+  width: 100%;
+  height: auto;
+  min-height: 44px;
+  padding: 10px 12px;
+  align-items: flex-start;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow: auto;
+  max-height: 220px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  line-height: 1.35;
+}
 .spacer { flex: 1 1 auto; min-width: 20px; }
