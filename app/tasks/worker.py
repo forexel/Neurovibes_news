@@ -134,7 +134,14 @@ def _run_cycle_thread(backfill_days: int) -> None:
             # Auto-mode: never spam the same hour slot. Force resend is only for manual backfill endpoints.
             review_out = send_hourly_top_for_review(int(top_article_id), force=False)
             print("[worker] telegram review send", review_out, flush=True)
-            # If already sent for this slot, do not send extra status messages.
+            # If the top did not change (article already sent previously), still send 1 status per hour window.
+            if review_out.get("skipped") == "already_sent":
+                status_out = send_review_status_once_per_hour(
+                    "top_unchanged",
+                    "За последний час новый топ не появился: лучший кандидат не изменился.",
+                )
+                print("[worker] telegram review status", status_out, flush=True)
+            # If already sent for this slot, do nothing (we already produced 1 message for the window).
         else:
             if inserted_total <= 0:
                 status_out = send_review_status_once_per_hour(

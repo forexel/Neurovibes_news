@@ -138,6 +138,26 @@ def _current_window_local() -> tuple[datetime, datetime, str]:
     start = end - timedelta(hours=1)
     return start, end, tz_label
 
+def _slot_window_local(slot_key: str) -> tuple[datetime, datetime, str]:
+    """
+    Convert slot key (YYYYMMDDHH) to a local hour window in user's timezone.
+    Slot key represents the END of the previous hour window in local time.
+    """
+    try:
+        tz_name = telegram_timezone_name() or get_runtime_str("timezone_name") or "Europe/Moscow"
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz_name = "Europe/Moscow"
+        tz = ZoneInfo("Europe/Moscow")
+    tz_label = "МСК" if tz_name == "Europe/Moscow" else tz_name
+
+    try:
+        end_local = datetime.strptime(slot_key, "%Y%m%d%H").replace(tzinfo=tz)
+    except Exception:
+        return _current_window_local()
+    start_local = end_local - timedelta(hours=1)
+    return start_local, end_local, tz_label
+
 def _window_for_article_local(article: Article, tz: ZoneInfo) -> tuple[datetime, datetime, str]:
     # If article already has an hourly bucket (UTC naive), use it.
     if getattr(article, "selected_hour_bucket_utc", None):
@@ -201,7 +221,13 @@ def send_review_status_once_per_hour(kind: str, text: str) -> dict:
         prev = _get_kv(session, kv_key, "")
         if prev == slot:
             return {"ok": True, "skipped": "already_sent_this_hour", "slot": slot, "kind": kind}
-        sent = _send_message(chat_id=chat_id, text=text)
+        # Prefix with the hour window label so it's obvious if this is a fresh hour or "old".
+        if (text or "").strip().startswith("Новость "):
+            payload_text = text
+        else:
+            w = _slot_window_local(slot)
+            payload_text = f"{_hour_window_label_ru(*w)}\n{text}"
+        sent = _send_message(chat_id=chat_id, text=payload_text)
         if sent.get("ok"):
             _set_kv(session, kv_key, slot)
             _set_kv(session, "telegram_review_status_kind", kind[:64])
@@ -212,7 +238,7 @@ def send_review_status_once_per_hour(kind: str, text: str) -> dict:
 _send_review_status_once_per_hour = send_review_status_once_per_hour
 
 
-def _build_review_text(article: Article) -> str:
+def _build_review_text(article: Article, window: tuple[datetime, datetime, str] | None = None) -> str:
     title = (article.ru_title or "").strip()
     summary = (article.ru_summary or "").strip()
     if not title or not summary:
@@ -252,7 +278,10 @@ def _build_review_text(article: Article) -> str:
     if source_name:
         meta = meta + "\n" + escape("Источник: " + source_name)
 
-    start_local, end_local, tz_label = _window_for_article_local(article, tz)
+    if window is None:
+        start_local, end_local, tz_label = _window_for_article_local(article, tz)
+    else:
+        start_local, end_local, tz_label = window
     window_label = _hour_window_label_ru(start_local, end_local, tz_label)
 
     return (
@@ -437,7 +466,10 @@ def send_hourly_top_for_review(article_id: int | None = None, force: bool = Fals
         article = session.get(Article, target_article_id)
         if not article:
             return {"ok": False, "error": "article_not_found"}
-        text = _build_review_text(article)
+        # For hourly auto-send, show the window we are processing (previous completed hour slot).
+        # This avoids "20:00-21:00" at 20:15 confusion.
+        window = _slot_window_local(slot)
+        text = _build_review_text(article, window=window)
 
     markup = {
         "inline_keyboard": [
