@@ -99,8 +99,13 @@ th.sortable { cursor: pointer; user-select: none; }
 th.sortable:hover { color: #cfe2ff; }
 .sort-indicator { display: inline-block; width: 12px; margin-left: 4px; color: var(--link); }
 
-.nv-container { max-width: 1100px; margin: 0 auto; }
-.nv-container-sm { max-width: 1000px; margin: 0 auto; }
+.nv-container { max-width: 1200px; margin: 0 auto; }
+.nv-container-sm { max-width: 1400px; margin: 0 auto; }
+.nv-container-sm input,
+.nv-container-sm select,
+.nv-container-sm textarea {
+  width: 100%;
+}
 
 /* Auth pages */
 body.auth {

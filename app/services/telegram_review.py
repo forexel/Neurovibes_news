@@ -76,6 +76,44 @@ def _bot_base_url() -> str | None:
 def _review_chat_id() -> str:
     return (telegram_review_chat_id() or get_runtime_str("telegram_review_chat_id") or settings.telegram_review_chat_id or "").strip()
 
+def _hour_slot_key() -> str:
+    """Slot key for deduping hourly notifications (in user's configured timezone)."""
+    try:
+        tz = ZoneInfo(telegram_timezone_name() or get_runtime_str("timezone_name") or "Europe/Moscow")
+    except Exception:
+        tz = ZoneInfo("Europe/Moscow")
+    return datetime.now(tz=tz).strftime("%Y%m%d%H")
+
+
+def send_review_status_once_per_hour(kind: str, text: str) -> dict:
+    """
+    Send a status message to review chat at most once per hour.
+    Used when there is no new top article or everything was filtered out.
+    """
+    configured_chat = _review_chat_id()
+    if not configured_chat:
+        return {"ok": False, "error": "telegram_review_chat_not_configured"}
+
+    with session_scope() as session:
+        runtime_chat = _get_kv(session, "telegram_review_runtime_chat_id", "").strip()
+    chat_id = runtime_chat or configured_chat
+
+    slot = _hour_slot_key()
+    kv_key = "telegram_review_status_slot"
+    with session_scope() as session:
+        prev = _get_kv(session, kv_key, "")
+        if prev == slot:
+            return {"ok": True, "skipped": "already_sent_this_hour", "slot": slot, "kind": kind}
+        sent = _send_message(chat_id=chat_id, text=text)
+        if sent.get("ok"):
+            _set_kv(session, kv_key, slot)
+            _set_kv(session, "telegram_review_status_kind", kind[:64])
+    return {"ok": True, "slot": slot, "kind": kind}
+
+
+# Backward-compatible alias (internal name used by older worker code).
+_send_review_status_once_per_hour = send_review_status_once_per_hour
+
 
 def _build_review_text(article: Article) -> str:
     title = (article.ru_title or "").strip()
@@ -301,6 +339,8 @@ def send_hourly_top_for_review(article_id: int | None = None, force: bool = Fals
                     updated_at=datetime.utcnow(),
                 )
             )
+        # Mark that we sent an article message this hour (so worker can avoid spamming).
+        _set_kv(session, "telegram_review_last_article_slot", _hour_slot_key())
     return {"ok": True, "article_id": target_article_id, "chat_id": chat_id, "message_id": message_id, "forced": bool(force)}
 
 

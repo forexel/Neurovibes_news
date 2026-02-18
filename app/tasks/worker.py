@@ -12,7 +12,7 @@ from app.services.bootstrap import seed_sources
 from app.services.pipeline import pick_hourly_top, run_hourly_cycle
 from app.services.telegram_publisher import publish_article
 from app.services.telegram_publisher import publish_scheduled_due
-from app.services.telegram_review import poll_review_updates, send_hourly_top_for_review
+from app.services.telegram_review import poll_review_updates, send_hourly_top_for_review, send_review_status_once_per_hour
 from app.services.telegram_context import load_workspace_telegram_context
 from app.services.llm import get_workspace_api_key, set_user_api_key
 
@@ -94,9 +94,36 @@ def main() -> None:
                 result = run_hourly_cycle(backfill_days=BACKFILL_DAYS)
                 print("[worker] cycle done", result, flush=True)
                 top_article_id = result.get("top_article_id")
+                ingest = result.get("ingestion") or {}
+                inserted_total = 0
+                try:
+                    inserted_total = int(sum(int(v or 0) for v in ingest.values()))
+                except Exception:
+                    inserted_total = 0
+
                 if top_article_id:
                     review_out = send_hourly_top_for_review(int(top_article_id))
                     print("[worker] telegram review send", review_out, flush=True)
+                    # If the same top was already sent earlier, still send a status once per hour.
+                    if review_out.get("skipped") == "already_sent":
+                        status_out = send_review_status_once_per_hour(
+                            "top_unchanged",
+                            "За последний час новый топ не появился: лучший кандидат не изменился.",
+                        )
+                        print("[worker] telegram review status", status_out, flush=True)
+                else:
+                    # Always report to review chat once per hour if there is no selected hourly candidate.
+                    if inserted_total <= 0:
+                        status_out = send_review_status_once_per_hour(
+                            "no_new_articles",
+                            "За последний час новых статей нет (по источникам пришло 0 новых ссылок).",
+                        )
+                    else:
+                        status_out = send_review_status_once_per_hour(
+                            "all_filtered",
+                            f"За последний час новые статьи были (+{inserted_total}), но все не прошли фильтры/скоринг.",
+                        )
+                    print("[worker] telegram review status", status_out, flush=True)
             except Exception as exc:
                 print(f"[worker] cycle failed: {exc}", flush=True)
             next_cycle_ts = now + INTERVAL_SECONDS
