@@ -249,7 +249,7 @@ def login_page() -> str:
   <meta charset='utf-8'>
   <meta name='viewport' content='width=device-width, initial-scale=1'>
   <title>Login</title>
-  <link rel="stylesheet" href="/static/app.css?v=1">
+  <link rel="stylesheet" href="/static/app.css?v=2">
 </head>
 <body class="auth">
   <form class='card' method='post' action='/login'>
@@ -286,7 +286,7 @@ def register_page() -> str:
   <meta charset='utf-8'>
   <meta name='viewport' content='width=device-width, initial-scale=1'>
   <title>Create User</title>
-  <link rel="stylesheet" href="/static/app.css?v=1">
+  <link rel="stylesheet" href="/static/app.css?v=2">
 </head>
 <body class="auth">
   <form class='card' method='post' action='/register'>
@@ -2071,7 +2071,7 @@ def admin_score_page(request: Request):
   <meta charset='utf-8'>
   <meta name='viewport' content='width=device-width, initial-scale=1'>
   <title>Score Parameters</title>
-  <link rel="stylesheet" href="/static/app.css?v=1">
+  <link rel="stylesheet" href="/static/app.css?v=2">
 </head>
 <body>
   <header>
@@ -2527,7 +2527,7 @@ def admin_sources_page(request: Request):
   <meta charset='utf-8'>
   <meta name='viewport' content='width=device-width, initial-scale=1'>
   <title>Sources</title>
-  <link rel="stylesheet" href="/static/app.css?v=1">
+  <link rel="stylesheet" href="/static/app.css?v=2">
 </head>
 <body>
   <header>
@@ -2678,7 +2678,7 @@ def bot_page(request: Request):
   <meta charset='utf-8'>
   <meta name='viewport' content='width=device-width, initial-scale=1'>
   <title>Bot</title>
-  <link rel="stylesheet" href="/static/app.css?v=1">
+  <link rel="stylesheet" href="/static/app.css?v=2">
 </head>
 <body>
   <header>
@@ -2752,7 +2752,7 @@ def publish_settings_page(request: Request):
   <meta charset='utf-8'>
   <meta name='viewport' content='width=device-width, initial-scale=1'>
   <title>Publish</title>
-  <link rel="stylesheet" href="/static/app.css?v=1">
+  <link rel="stylesheet" href="/static/app.css?v=2">
 </head>
 <body>
   <header>
@@ -2783,28 +2783,36 @@ def _render_admin_list_page(view: str) -> str:
   <meta charset='utf-8'>
   <meta name='viewport' content='width=device-width, initial-scale=1'>
   <title>Neurovibes Admin</title>
-  <link rel="stylesheet" href="/static/app.css?v=1">
+  <link rel="stylesheet" href="/static/app.css?v=2">
 </head>
 <body>
+  <div id="navOverlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9998;align-items:center;justify-content:center;">
+    <div style="background:#0f1a33;border:1px solid #345;border-radius:12px;padding:14px 16px;min-width:240px;max-width:90vw;">
+      <div class="muted">Загружаю…</div>
+      <div style="margin-top:10px;height:10px;background:#0c1a33;border:1px solid #355;border-radius:999px;overflow:hidden;">
+        <div style="height:100%;width:40%;background:#3f8cff;animation:nvload 1.1s ease-in-out infinite;"></div>
+      </div>
+    </div>
+  </div>
   <header>
     <div class="menu" tabindex="0">
       <div class="menu-trigger">Account ▾</div>
       <div class="menu-panel">
-        <a href="/setup"><button>Setup</button></a>
-        <a href="/sources"><button>Sources</button></a>
-        <a href="/logout"><button>Logout</button></a>
+        <a class="menu-item" href="/setup">Setup</a>
+        <a class="menu-item" href="/sources">Sources</a>
+        <a class="menu-item" href="/logout">Logout</a>
       </div>
     </div>
 
     <div class="menu" tabindex="0">
       <div class="menu-trigger">Articles ▾</div>
       <div class="menu-panel">
-        <a href="/"><button>All</button></a>
-        <a href="/unsorted"><button>Unsorted</button></a>
-        <a href="/published"><button>Published</button></a>
-        <a href="/selected-day"><button>Selected Day</button></a>
-        <a href="/selected-hour"><button>Selected Hour</button></a>
-        <a href="/deleted"><button>Deleted</button></a>
+        <a class="menu-item" href="/">All</a>
+        <a class="menu-item" href="/unsorted">Unsorted</a>
+        <a class="menu-item" href="/published">Published</a>
+        <a class="menu-item" href="/selected-day">Selected Day</a>
+        <a class="menu-item" href="/selected-hour">Selected Hour</a>
+        <a class="menu-item" href="/deleted">Deleted</a>
         <button onclick="autoSelect()" title="Pick best candidate using preference profile (no publish)">Auto Select</button>
       </div>
     </div>
@@ -2832,9 +2840,9 @@ def _render_admin_list_page(view: str) -> str:
     <div class="menu" tabindex="0">
       <div class="menu-trigger">Tools ▾</div>
       <div class="menu-panel">
-        <a href="/bot"><button>Bot</button></a>
-        <a href="/publish"><button>Publish</button></a>
-        <a href="/score"><button>Score</button></a>
+        <a class="menu-item" href="/bot">Bot</a>
+        <a class="menu-item" href="/publish">Publish</a>
+        <a class="menu-item" href="/score">Score</a>
       </div>
     </div>
 
@@ -2907,6 +2915,16 @@ def _render_admin_list_page(view: str) -> str:
     </div>
   </div>
   <script>
+    // Loader overlay on menu navigation: immediate feedback even if the server is slow.
+    document.addEventListener('click', (e) => {
+      const a = e.target && e.target.closest ? e.target.closest('a.menu-item') : null;
+      if (!a) return;
+      const href = a.getAttribute('href') || '';
+      if (!href || !href.startsWith('/')) return;
+      const ov = document.getElementById('navOverlay');
+      if (ov) ov.style.display = 'flex';
+    });
+
     const CURRENT_VIEW = "__VIEW__";
     let currentPage = 1;
     let totalPages = 1;
@@ -3562,7 +3580,7 @@ def admin_article_page(article_id: int, request: Request):
 <meta charset='utf-8'>
 <meta name='viewport' content='width=device-width, initial-scale=1'>
 <title>Article {article_id}</title>
-<link rel="stylesheet" href="/static/app.css?v=1">
+<link rel="stylesheet" href="/static/app.css?v=2">
 </head>
 <body>
   <main class="nv-container">

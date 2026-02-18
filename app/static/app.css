@@ -100,7 +100,7 @@ th.sortable:hover { color: #cfe2ff; }
 .sort-indicator { display: inline-block; width: 12px; margin-left: 4px; color: var(--link); }
 
 .nv-container { max-width: 1200px; margin: 0 auto; }
-.nv-container-sm { max-width: 1400px; margin: 0 auto; }
+.nv-container-sm { max-width: 1600px; width: min(1600px, 96vw); margin: 0 auto; }
 .nv-container-sm input,
 .nv-container-sm select,
 .nv-container-sm textarea {
@@ -131,7 +131,7 @@ body.auth button { background: var(--input); }
   border: 1px solid var(--border);
   background: var(--panel);
   color: var(--text);
-  cursor: default;
+  cursor: pointer;
   height: 38px;
   display: flex;
   align-items: center;
@@ -157,10 +157,33 @@ body.auth button { background: var(--input); }
 }
 .menu:hover .menu-panel,
 .menu:focus-within .menu-panel { display: flex; }
+.menu-panel:hover { display: flex; }
 .menu-panel a { text-decoration: none; }
 .menu-panel button { width: 100%; text-align: left; }
 .menu-panel label { width: 100%; justify-content: space-between; }
 .menu-panel select { width: 140px; }
+
+.menu-item {
+  display: block;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border2);
+  background: var(--input);
+  color: var(--text);
+  cursor: pointer;
+  width: 100%;
+}
+.menu-item:hover {
+  border-color: var(--hover);
+  color: #cfe2ff;
+  text-decoration: underline;
+}
+
+@keyframes nvload {
+  0% { transform: translateX(-60%); width: 40%; opacity: .75; }
+  50% { transform: translateX(70%); width: 55%; opacity: 1; }
+  100% { transform: translateX(-60%); width: 40%; opacity: .75; }
+}
 
 .statusbar {
   border: 1px solid var(--border);
