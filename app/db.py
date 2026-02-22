@@ -39,6 +39,7 @@ def init_db() -> None:
         conn.execute(text("ALTER TABLE IF EXISTS user_workspaces ADD COLUMN IF NOT EXISTS telegram_channel_id VARCHAR(255) NULL"))
         conn.execute(text("ALTER TABLE IF EXISTS user_workspaces ADD COLUMN IF NOT EXISTS telegram_signature VARCHAR(255) NULL"))
         conn.execute(text("ALTER TABLE IF EXISTS user_workspaces ADD COLUMN IF NOT EXISTS timezone_name VARCHAR(64) NULL"))
+        conn.execute(text("ALTER TABLE IF EXISTS user_workspaces ADD COLUMN IF NOT EXISTS audience_tags JSON NULL"))
 
         # Only backfill content_mode when the column is added for the first time.
         col_exists = bool(

@@ -370,6 +370,7 @@ class UserWorkspace(Base):
     channel_theme: Mapped[str | None] = mapped_column(Text, nullable=True)
     sources_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     audience_description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    audience_tags: Mapped[list | None] = mapped_column(JSON, nullable=True)
     scoring_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     openrouter_api_key_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
     telegram_bot_token_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -393,6 +394,20 @@ class ScoreParameter(Base):
     weight: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     influence_rule: Mapped[str] = mapped_column(Text, nullable=False, default="")
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class ReasonTagCatalog(Base):
+    __tablename__ = "reason_tag_catalog"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    slug: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    title_ru: Mapped[str] = mapped_column(String(128), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    is_system: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 

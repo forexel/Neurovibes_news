@@ -18,6 +18,8 @@ from app.services.preference import (
     build_editor_choice_dataset,
     build_ranking_dataset,
     detect_preference_drift,
+    infer_audience_tags_for_workspaces,
+    reclassify_training_reasons_llm,
     reretag_training_event_reasons,
     rebuild_preference_profile,
     train_editor_choice_model,
@@ -112,6 +114,14 @@ def cmd_rereview_reasons(limit: int, overwrite: bool) -> None:
     print(reretag_training_event_reasons(limit=limit, overwrite=overwrite))
 
 
+def cmd_reclassify_reasons_llm(limit: int, only_null: bool, allow_new_tags: bool) -> None:
+    print(reclassify_training_reasons_llm(limit=limit, only_null=only_null, allow_new_tags=allow_new_tags))
+
+
+def cmd_infer_audience_tags(limit: int, overwrite: bool) -> None:
+    print(infer_audience_tags_for_workspaces(limit=limit, overwrite=overwrite))
+
+
 def cmd_drift() -> None:
     print(detect_preference_drift())
 
@@ -168,6 +178,13 @@ def build_parser() -> argparse.ArgumentParser:
     rr = sub.add_parser("rereview-reasons", help="re-tag reason_text into reason_tags for training_events")
     rr.add_argument("--limit", type=int, default=50000)
     rr.add_argument("--overwrite", action="store_true")
+    rrllm = sub.add_parser("reclassify-reasons-llm", help="LLM multi-tag classification for reason_text")
+    rrllm.add_argument("--limit", type=int, default=300)
+    rrllm.add_argument("--all", action="store_true", help="process all rows, not only reason_tags IS NULL")
+    rrllm.add_argument("--no-new-tags", action="store_true", help="do not create new tags suggested by LLM")
+    at = sub.add_parser("infer-audience-tags", help="derive audience tags from workspace audience_description")
+    at.add_argument("--limit", type=int, default=100)
+    at.add_argument("--overwrite", action="store_true")
 
     sub.add_parser("drift", help="detect preference drift")
     sub.add_parser("auto-decision", help="decide publish candidate using trained model")
@@ -210,6 +227,10 @@ def main() -> None:
         cmd_recover_manual_week()
     elif args.command == "rereview-reasons":
         cmd_rereview_reasons(limit=args.limit, overwrite=args.overwrite)
+    elif args.command == "reclassify-reasons-llm":
+        cmd_reclassify_reasons_llm(limit=args.limit, only_null=not args.all, allow_new_tags=not args.no_new_tags)
+    elif args.command == "infer-audience-tags":
+        cmd_infer_audience_tags(limit=args.limit, overwrite=args.overwrite)
     elif args.command == "drift":
         cmd_drift()
     elif args.command == "auto-decision":

@@ -20,11 +20,13 @@ from app.models import (
     EditorFeedback,
     ModelArtifact,
     PreferenceProfile,
+    ReasonTagCatalog,
     RankingExample,
     Score,
     SelectionDecision,
     TelegramReviewJob,
     TrainingEvent,
+    UserWorkspace,
 )
 from app.services.runtime_settings import get_runtime_float
 from app.services.llm import get_client, track_usage_from_response
@@ -65,6 +67,11 @@ EDITOR_CHOICE_FEATURES = [
     "hours_since_published_norm",
     "published_so_far_today_norm",
     "hours_left_today_norm",
+    "aud_mass_audience",
+    "aud_business",
+    "aud_future",
+    "aud_hype",
+    "aud_ru_relevance",
     # reason tags (one-hot)
     "tag_breakthrough",
     "tag_funding",
@@ -89,6 +96,28 @@ _TAGS = [
     "too_local",
     "duplicate",
 ]
+_BASE_REASON_TAGS_RU: dict[str, str] = {
+    "breakthrough": "Потенциальный прорыв",
+    "funding": "Инвестиции / сделка",
+    "product_release": "Релиз / новая версия",
+    "benchmark": "Бенчмарк / цифры / сравнение",
+    "regulation": "Безопасность / регулирование / риски",
+    "practical_tool": "Понятная практическая польза",
+    "global_shift": "Сильный сигнал рынку / крупным игрокам",
+    "hype": "Хайп / короткая значимость / шум",
+    "too_local": "Слишком локально / не для РФ",
+    "duplicate": "Повтор темы / дубль",
+    # richer custom tags (can be added by user / llm)
+    "too_technical": "Слишком техническая / гиковская",
+    "not_mass_audience": "Не для массовой аудитории",
+    "short_lived": "Короткоживущая новость",
+    "low_significance": "Низкая значимость",
+    "no_business_use": "Непонятна польза для бизнеса",
+    "security_risk": "Безопасность / мошенничество / риск",
+    "market_signal": "Сигнал рынку / стратегия",
+    "future_trend": "Будущее / стратегический тренд",
+}
+_AUDIENCE_BASE_TAGS = ["mass_audience", "business", "future", "hype", "technology", "security", "practical", "ru_relevance"]
 
 
 def _sigmoid(z: float) -> float:
@@ -148,7 +177,80 @@ def _guess_reason_tags(reason_text: str | None) -> list[str]:
     return sorted(set(tags))
 
 
-def _feature_snapshot(article: Article, score: Score | None, reason_tags: list[str] | None = None) -> dict:
+def _normalize_reason_text(reason_text: str | None) -> str:
+    text = str(reason_text or "").strip()
+    if not text:
+        return ""
+    # Remove pipeline prefixes used in historical data.
+    prefixes = [
+        "HIDE:",
+        "DELETE:",
+        "LATER:",
+        "SCHEDULE(custom):",
+        "SCHEDULE(+1h):",
+    ]
+    changed = True
+    while changed:
+        changed = False
+        for p in prefixes:
+            if text.upper().startswith(p.upper()):
+                text = text[len(p):].strip()
+                changed = True
+    return text
+
+
+def _ensure_reason_tag_catalog(session) -> int:
+    inserted = 0
+    existing = {str(x.slug or "").strip() for x in session.scalars(select(ReasonTagCatalog)).all()}
+    for slug, title_ru in _BASE_REASON_TAGS_RU.items():
+        if slug in existing:
+            continue
+        session.add(
+            ReasonTagCatalog(
+                slug=slug,
+                title_ru=title_ru,
+                description="system tag",
+                is_active=True,
+                is_system=True,
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow(),
+            )
+        )
+        inserted += 1
+    return inserted
+
+
+def _get_active_reason_tag_slugs(session) -> list[str]:
+    _ensure_reason_tag_catalog(session)
+    rows = session.scalars(select(ReasonTagCatalog).where(ReasonTagCatalog.is_active.is_(True))).all()
+    slugs = [str(r.slug or "").strip() for r in rows if (r.slug or "").strip()]
+    return sorted(set(slugs))
+
+
+def _latest_workspace_audience(session, user_id: int | None = None) -> tuple[str, list[str]]:
+    q = select(UserWorkspace)
+    if user_id:
+        q = q.where(UserWorkspace.user_id == int(user_id))
+    ws = session.scalars(q.order_by(UserWorkspace.updated_at.desc()).limit(1)).first()
+    if not ws:
+        return "", []
+    desc = str(ws.audience_description or "").strip()
+    tags = [str(x).strip() for x in (ws.audience_tags or []) if str(x).strip()]
+    return desc, sorted(set(tags))
+
+
+def _audience_pref_features_from_tags(tags: list[str] | None) -> dict[str, float]:
+    s = set(tags or [])
+    return {
+        "aud_mass_audience": 1.0 if "mass_audience" in s else 0.0,
+        "aud_business": 1.0 if "business" in s else 0.0,
+        "aud_future": 1.0 if "future" in s else 0.0,
+        "aud_hype": 1.0 if "hype" in s else 0.0,
+        "aud_ru_relevance": 1.0 if "ru_relevance" in s else 0.0,
+    }
+
+
+def _feature_snapshot(article: Article, score: Score | None, reason_tags: list[str] | None = None, audience_tags: list[str] | None = None) -> dict:
     f = (score.features or {}) if score and isinstance(score.features, dict) else {}
     now = datetime.utcnow()
     published = article.published_at or article.created_at or now
@@ -192,6 +294,7 @@ def _feature_snapshot(article: Article, score: Score | None, reason_tags: list[s
         "published_so_far_today_norm": 0.0,
         "hours_left_today_norm": float(max(0.0, min(1.0, hours_left / 23.0 if 23 else 0.0))),
     }
+    out.update(_audience_pref_features_from_tags(audience_tags))
     tags = set(reason_tags or [])
     for tag in _TAGS:
         out[f"tag_{tag}"] = 1.0 if tag in tags else 0.0
@@ -231,11 +334,14 @@ def log_training_event(
         tags = _guess_reason_tags(reason_text)
 
     with session_scope() as session:
+        _ensure_reason_tag_catalog(session)
         article = session.get(Article, int(article_id))
         if not article:
             return {"ok": False, "error": "article_not_found"}
         score = session.get(Score, int(article_id))
-        features = _feature_snapshot(article, score, tags)
+        audience_desc, audience_tags = _latest_workspace_audience(session, user_id=user_id)
+        _ = audience_desc  # reserved for future use in feature engineering
+        features = _feature_snapshot(article, score, tags, audience_tags=audience_tags)
         candidate_ids = _candidate_ids_for_article(session, article)
 
         # enrich context-dependent fields using current candidate set
@@ -804,7 +910,8 @@ def backfill_training_and_restore_unreasoned_archived(
                     continue
                 try:
                     score = session.get(Score, int(a.id))
-                    features = _feature_snapshot(a, score, _guess_reason_tags(reason))
+                    _aud_desc, aud_tags = _latest_workspace_audience(session, user_id=None)
+                    features = _feature_snapshot(a, score, _guess_reason_tags(reason), audience_tags=aud_tags)
                     ml_meta = predict_editor_choice_prob(features)
                     published_time = a.published_at or a.created_at
                     event_time = a.archived_at or a.updated_at or datetime.utcnow()
@@ -894,7 +1001,8 @@ def backfill_training_and_restore_unreasoned_archived(
             try:
                 score = session.get(Score, int(a.id))
                 tags = _guess_reason_tags(reason)
-                features = _feature_snapshot(a, score, tags)
+                _aud_desc, aud_tags = _latest_workspace_audience(session, user_id=None)
+                features = _feature_snapshot(a, score, tags, audience_tags=aud_tags)
                 ml_meta = predict_editor_choice_prob(features)
                 published_time = a.published_at or a.created_at
                 event_time = a.updated_at or published_time or datetime.utcnow()
@@ -981,3 +1089,187 @@ def reretag_training_event_reasons(limit: int = 50000, overwrite: bool = False) 
         "skipped_no_text": skipped_no_text,
         "overwrite": bool(overwrite),
     }
+
+
+def infer_audience_tags_for_workspaces(limit: int = 100, overwrite: bool = False) -> dict:
+    with session_scope() as session:
+        _ensure_reason_tag_catalog(session)
+        rows = session.scalars(select(UserWorkspace).order_by(UserWorkspace.updated_at.desc()).limit(max(1, int(limit)))).all()
+        updated = 0
+        scanned = 0
+        skipped = 0
+        for ws in rows:
+            scanned += 1
+            desc = _normalize_reason_text(ws.audience_description)
+            if not desc:
+                skipped += 1
+                continue
+            if ws.audience_tags and not overwrite:
+                continue
+            tags = []
+            low = desc.lower()
+            if any(x in low for x in ["массов", "обывател", "широк", "для всех"]):
+                tags.append("mass_audience")
+            if any(x in low for x in ["бизнес", "предприним", "компан", "рынок", "проект"]):
+                tags.append("business")
+            if any(x in low for x in ["будущ", "тренд", "что происходит", "стратег"]):
+                tags.append("future")
+            if any(x in low for x in ["хайп", "вау", "резонанс", "горяч"]):
+                tags.append("hype")
+            if any(x in low for x in ["безопас", "мошен", "риск"]):
+                tags.append("security")
+            if any(x in low for x in ["практич", "инструмент", "как использовать", "польза"]):
+                tags.append("practical")
+            if any(x in low for x in ["рф", "росси", "русск", "нашей аудитории"]):
+                tags.append("ru_relevance")
+            if any(x in low for x in ["технолог", "ии", "ai"]):
+                tags.append("technology")
+
+            # LLM enrich if available (optional)
+            try:
+                if settings.openrouter_api_key or get_active_profile() is not None:
+                    client = get_client()
+                    resp = client.chat.completions.create(
+                        model=settings.llm_text_model,
+                        response_format={"type": "json_object"},
+                        messages=[
+                            {"role": "system", "content": "Classify channel audience description into tags. Return JSON only."},
+                            {
+                                "role": "user",
+                                "content": (
+                                    "Allowed tags: " + ", ".join(_AUDIENCE_BASE_TAGS) + "\n"
+                                    "Return JSON: {\"tags\": [..]}\n"
+                                    f"Description: {desc}"
+                                ),
+                            },
+                        ],
+                        temperature=0.1,
+                    )
+                    track_usage_from_response(resp, operation="preference.infer_audience_tags", model=settings.llm_text_model, kind="chat")
+                    data = json.loads(resp.choices[0].message.content or "{}")
+                    llm_tags = [str(x).strip() for x in (data.get("tags") or []) if str(x).strip() in _AUDIENCE_BASE_TAGS]
+                    tags.extend(llm_tags)
+            except Exception:
+                pass
+
+            new_tags = sorted(set(tags))
+            if new_tags != sorted(set(ws.audience_tags or [])):
+                ws.audience_tags = new_tags or None
+                ws.updated_at = datetime.utcnow()
+                updated += 1
+        return {"ok": True, "scanned": scanned, "updated": updated, "skipped": skipped}
+
+
+def reclassify_training_reasons_llm(limit: int = 300, only_null: bool = True, allow_new_tags: bool = True) -> dict:
+    # Uses free-text reason + optional audience context and returns multi-tags.
+    with session_scope() as session:
+        _ensure_reason_tag_catalog(session)
+        tag_slugs = _get_active_reason_tag_slugs(session)
+        audience_desc, audience_tags = _latest_workspace_audience(session)
+        q = select(TrainingEvent).where(TrainingEvent.reason_text.is_not(None))
+        if only_null:
+            q = q.where(TrainingEvent.reason_tags.is_(None))
+        rows = session.scalars(q.order_by(TrainingEvent.id.asc()).limit(max(1, int(limit)))).all()
+
+        if not rows:
+            return {"ok": True, "processed": 0, "updated": 0, "created_tags": 0}
+
+        if not settings.openrouter_api_key:
+            # Fallback to improved heuristic if no LLM key.
+            updated = 0
+            created_tags = 0
+            for r in rows:
+                reason = _normalize_reason_text(r.reason_text)
+                tags = _guess_reason_tags(reason)
+                if tags != list(r.reason_tags or []):
+                    r.reason_tags = tags or None
+                    updated += 1
+            return {"ok": True, "processed": len(rows), "updated": updated, "created_tags": created_tags, "mode": "heuristic_fallback"}
+
+        client = get_client()
+        processed = 0
+        updated = 0
+        created_tags = 0
+        for r in rows:
+            processed += 1
+            reason = _normalize_reason_text(r.reason_text)
+            if not reason:
+                continue
+            article = session.get(Article, int(r.article_id))
+            title = str((article.ru_title or article.title) if article else "").strip()
+            subtitle = str((article.ru_summary or article.subtitle) if article else "").strip()[:500]
+            try:
+                resp = client.chat.completions.create(
+                    model=settings.llm_text_model,
+                    response_format={"type": "json_object"},
+                    messages=[
+                        {"role": "system", "content": "Extract editorial rejection/publish reason tags. Multi-label. Return compact JSON only."},
+                        {
+                            "role": "user",
+                            "content": json.dumps(
+                                {
+                                    "allowed_tags": tag_slugs,
+                                    "audience_tags": audience_tags,
+                                    "audience_description": audience_desc[:800],
+                                    "decision": r.decision,
+                                    "title": title[:300],
+                                    "summary": subtitle,
+                                    "reason_text": reason[:1000],
+                                    "instructions": {
+                                        "multi_label": True,
+                                        "can_suggest_new_tags": bool(allow_new_tags),
+                                        "output": {
+                                            "tags": ["slug1", "slug2"],
+                                            "new_tags": [{"slug": "new_slug", "title_ru": "Русское название"}],
+                                            "confidence": 0.0,
+                                        },
+                                    },
+                                },
+                                ensure_ascii=False,
+                            ),
+                        },
+                    ],
+                    temperature=0.1,
+                )
+                track_usage_from_response(resp, operation="preference.reclassify_reasons_llm", model=settings.llm_text_model, kind="chat")
+                data = json.loads(resp.choices[0].message.content or "{}")
+            except Exception:
+                data = {}
+
+            tags = [str(x).strip() for x in (data.get("tags") or []) if str(x).strip()]
+            tags = sorted(set(tags + _guess_reason_tags(reason)))
+
+            if allow_new_tags:
+                for item in (data.get("new_tags") or []):
+                    slug = str((item or {}).get("slug") or "").strip().lower()
+                    title_ru = str((item or {}).get("title_ru") or slug).strip()
+                    if not slug:
+                        continue
+                    if slug not in tag_slugs:
+                        session.add(
+                            ReasonTagCatalog(
+                                slug=slug[:64],
+                                title_ru=title_ru[:128] or slug[:64],
+                                description="llm/user discovered tag",
+                                is_active=True,
+                                is_system=False,
+                                created_at=datetime.utcnow(),
+                                updated_at=datetime.utcnow(),
+                            )
+                        )
+                        tag_slugs.append(slug)
+                        created_tags += 1
+
+            tags = [t for t in tags if t in set(tag_slugs)]
+            new_val = tags or None
+            if new_val != (r.reason_tags or None):
+                r.reason_tags = new_val
+                updated += 1
+
+        return {
+            "ok": True,
+            "processed": processed,
+            "updated": updated,
+            "created_tags": created_tags,
+            "only_null": bool(only_null),
+        }
