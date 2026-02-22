@@ -111,6 +111,21 @@ def _norm01(v: float | int | None, denom: float = 10.0) -> float:
 def _guess_reason_tags(reason_text: str | None) -> list[str]:
     text = (reason_text or "").lower()
     tags: list[str] = []
+    # Direct mappings from internal gate names used in archived_reason / filters.
+    gate_map = {
+        "personnel_move_gate": ["hype", "too_local"],
+        "geek_gate": ["hype"],
+        "deep_technical_gate": ["hype"],
+        "technical_gate": ["hype"],
+        "low_relevance": ["hype"],
+        "local_practical_gate": ["too_local"],
+        "summary_boring_gate": ["hype"],
+        "investing_gate": ["funding"],
+    }
+    for key, mapped in gate_map.items():
+        if key in text:
+            tags.extend(mapped)
+
     rules = {
         "breakthrough": ["прорыв", "breakthrough", "революц", "first", "впервые"],
         "funding": ["инвест", "funding", "m&a", "сделк", "acquire", "раунд", "финанс", "valuation", "оценк"],
@@ -119,7 +134,11 @@ def _guess_reason_tags(reason_text: str | None) -> list[str]:
         "regulation": ["регуля", "закон", "policy", "compliance", "безопас", "fraud", "мошенн", "privacy", "данных", "security"],
         "practical_tool": ["практич", "tool", "инструмент", "для бизнеса", "workflow", "use case", "полезн", "применим", "можно использовать"],
         "global_shift": ["рынок", "global", "стратег", "монопол", "platform shift", "сигнал", "крупный игрок", "google", "openai", "meta", "nvidia"],
-        "hype": ["хайп", "скучн", "мнение", "opinion", "noise", "неважно", "не очень интересно", "массе не интересно", "гиковск", "слишком техническ", "нудн"],
+        "hype": [
+            "хайп", "скучн", "мнение", "opinion", "noise", "неважно", "не очень интересно",
+            "массе не интересно", "массовому сегменту не интересно", "гиковск", "слишком техническ",
+            "узконише", "нудн", "завтра никто не вспомнит", "короткоигра", "точечная новость"
+        ],
         "too_local": ["локал", "india", "индия", "узко", "too local", "не для нашей", "для рф не", "не актуален для рф", "далеко от нас"],
         "duplicate": ["дубл", "повтор", "duplicate", "already"],
     }
