@@ -95,6 +95,16 @@ _TAGS = [
     "hype",
     "too_local",
     "duplicate",
+    "too_technical",
+    "not_mass_audience",
+    "short_lived",
+    "low_significance",
+    "no_business_use",
+    "market_signal",
+    "future_trend",
+    "mass_audience",
+    "business_impact",
+    "ru_relevance",
 ]
 _BASE_REASON_TAGS_RU: dict[str, str] = {
     "breakthrough": "Потенциальный прорыв",
@@ -116,6 +126,9 @@ _BASE_REASON_TAGS_RU: dict[str, str] = {
     "security_risk": "Безопасность / мошенничество / риск",
     "market_signal": "Сигнал рынку / стратегия",
     "future_trend": "Будущее / стратегический тренд",
+    "mass_audience": "Массовый сегмент / широкая аудитория",
+    "business_impact": "Важна для бизнеса / экономики проектов",
+    "ru_relevance": "Релевантно для РФ / русскоязычной аудитории",
 }
 _AUDIENCE_BASE_TAGS = ["mass_audience", "business", "future", "hype", "technology", "security", "practical", "ru_relevance"]
 
@@ -170,6 +183,16 @@ def _guess_reason_tags(reason_text: str | None) -> list[str]:
         ],
         "too_local": ["локал", "india", "индия", "узко", "too local", "не для нашей", "для рф не", "не актуален для рф", "далеко от нас"],
         "duplicate": ["дубл", "повтор", "duplicate", "already"],
+        "too_technical": ["техническ", "гиков", "узконише", "инженерн", "алгоритм", "benchmark only"],
+        "not_mass_audience": ["массовому сегменту не интересно", "массе не интересно", "не для широкой", "обывател"],
+        "short_lived": ["завтра никто не вспомнит", "короткоигра", "быстро забудут", "точечная новость"],
+        "low_significance": ["низкая значимость", "неважно", "слабая новость", "мелкая новость"],
+        "no_business_use": ["не понятно как использовать бизнесу", "непонятна польза бизнесу", "нет пользы для бизнеса"],
+        "market_signal": ["сигнал рынку", "рынку важно", "стратегический сигнал", "крупная сумма"],
+        "future_trend": ["будущее", "тренд", "куда идет рынок", "что происходит в мире ии"],
+        "mass_audience": ["массовый сегмент", "широкой аудитории", "обычным людям", "много кому интересно", "пользователям интересно"],
+        "business_impact": ["бизнесу важно", "повлияет на бизнес", "повлияет на экономику разработки", "расходы на проекты", "для предпринимателей"],
+        "ru_relevance": ["для рф", "русскому рынку", "нашей аудитории", "для россии"],
     }
     for tag, keywords in rules.items():
         if any(k in text for k in keywords):
@@ -1166,13 +1189,28 @@ def reclassify_training_reasons_llm(limit: int = 300, only_null: bool = True, al
         _ensure_reason_tag_catalog(session)
         tag_slugs = _get_active_reason_tag_slugs(session)
         audience_desc, audience_tags = _latest_workspace_audience(session)
+        # JSON columns may contain JSON null (not SQL NULL), so we fetch a wider set and
+        # filter "missing tags" in Python.
+        scan_limit = max(1, int(limit)) if not only_null else max(1000, int(limit) * 5)
         q = select(TrainingEvent).where(TrainingEvent.reason_text.is_not(None))
-        if only_null:
-            q = q.where(TrainingEvent.reason_tags.is_(None))
-        rows = session.scalars(q.order_by(TrainingEvent.id.asc()).limit(max(1, int(limit)))).all()
+        rows_all = session.scalars(q.order_by(TrainingEvent.id.asc()).limit(scan_limit)).all()
+        rows: list[TrainingEvent] = []
+        for r in rows_all:
+            if only_null:
+                rv = r.reason_tags
+                missing = (
+                    rv is None
+                    or (isinstance(rv, list) and len(rv) == 0)
+                    or (isinstance(rv, str) and rv.strip().lower() in {"", "null", "none"})
+                )
+                if not missing:
+                    continue
+            rows.append(r)
+            if len(rows) >= max(1, int(limit)):
+                break
 
         if not rows:
-            return {"ok": True, "processed": 0, "updated": 0, "created_tags": 0}
+            return {"ok": True, "processed": 0, "updated": 0, "created_tags": 0, "scanned": len(rows_all)}
 
         if not settings.openrouter_api_key:
             # Fallback to improved heuristic if no LLM key.
@@ -1184,7 +1222,14 @@ def reclassify_training_reasons_llm(limit: int = 300, only_null: bool = True, al
                 if tags != list(r.reason_tags or []):
                     r.reason_tags = tags or None
                     updated += 1
-            return {"ok": True, "processed": len(rows), "updated": updated, "created_tags": created_tags, "mode": "heuristic_fallback"}
+            return {
+                "ok": True,
+                "processed": len(rows),
+                "updated": updated,
+                "created_tags": created_tags,
+                "mode": "heuristic_fallback",
+                "scanned": len(rows_all),
+            }
 
         client = get_client()
         processed = 0
@@ -1192,6 +1237,11 @@ def reclassify_training_reasons_llm(limit: int = 300, only_null: bool = True, al
         created_tags = 0
         for r in rows:
             processed += 1
+            if processed % 25 == 0:
+                try:
+                    print("[reclassify-reasons-llm]", {"processed": processed, "limit": len(rows)}, flush=True)
+                except Exception:
+                    pass
             reason = _normalize_reason_text(r.reason_text)
             if not reason:
                 continue
@@ -1272,4 +1322,5 @@ def reclassify_training_reasons_llm(limit: int = 300, only_null: bool = True, al
             "updated": updated,
             "created_tags": created_tags,
             "only_null": bool(only_null),
+            "scanned": len(rows_all),
         }
