@@ -8,6 +8,8 @@ from app.services.runtime_settings import seed_runtime_settings
 from app.services.user_secrets import encrypt_secret
 from app.sources import SOURCES
 
+DISABLED_DEFAULT_SOURCES = {"Synced Review"}
+
 
 def seed_sources() -> int:
     inserted = 0
@@ -42,6 +44,18 @@ def seed_sources() -> int:
                 source.trust_score = trust_score if trust_score is not None else settings.source_trust_default
                 if source.is_active is None:
                     source.is_active = True
+            if source.name in DISABLED_DEFAULT_SOURCES:
+                source.is_active = False
+                if hasattr(source, "is_deleted"):
+                    source.is_deleted = True
+
+        # Disable known-stale defaults even if they were removed from SOURCES.
+        for stale_name in DISABLED_DEFAULT_SOURCES:
+            stale = existing_by_name.get(stale_name)
+            if stale is not None:
+                stale.is_active = False
+                if hasattr(stale, "is_deleted"):
+                    stale.is_deleted = True
 
     _seed_score_parameters()
     seed_runtime_settings()

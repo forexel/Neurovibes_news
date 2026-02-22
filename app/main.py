@@ -1312,6 +1312,7 @@ def admin_data_sources(request: Request) -> list[dict]:
                 func.max(Article.published_at).label("latest_published_at"),
             )
             .select_from(Source)
+            .where(Source.is_deleted.is_(False))
             .join(Article, Article.source_id == Source.id, isouter=True)
             .group_by(Source.id, Source.name, Source.rss_url, Source.kind, Source.priority_rank, Source.is_active)
             .order_by(Source.priority_rank.asc())
@@ -1422,6 +1423,7 @@ def add_source(body: SourceAddIn, request: Request) -> dict:
             priority_rank=int(body.priority_rank),
             trust_score=0.0,
             is_active=True,
+            is_deleted=False,
         )
         session.add(src)
         session.flush()
@@ -1447,6 +1449,7 @@ def update_source(source_id: int, body: SourceUpdateIn, request: Request) -> dic
         src.rss_url = body.rss_url.strip()
         src.kind = (body.kind or "rss").strip().lower()
         src.priority_rank = int(body.priority_rank)
+        src.is_deleted = False
         if body.is_active is not None:
             src.is_active = bool(body.is_active)
     return {"ok": True, "source_id": source_id}
@@ -1470,9 +1473,11 @@ def delete_source(source_id: int, request: Request) -> dict:
             raise HTTPException(status_code=404, detail="source_not_found")
         cnt = int(session.scalar(select(func.count(Article.id)).where(Article.source_id == source_id)) or 0)
         if cnt > 0:
-            raise HTTPException(status_code=409, detail="source_has_articles_use_disable")
+            src.is_active = False
+            src.is_deleted = True
+            return {"ok": True, "deleted_source_id": source_id, "soft_deleted": True}
         session.delete(src)
-    return {"ok": True, "deleted_source_id": source_id}
+    return {"ok": True, "deleted_source_id": source_id, "soft_deleted": False}
 
 
 @app.get("/admin-data/score-params")

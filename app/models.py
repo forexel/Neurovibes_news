@@ -61,6 +61,7 @@ class Source(Base):
     priority_rank: Mapped[int] = mapped_column(Integer, nullable=False)
     trust_score: Mapped[float] = mapped_column(Float, nullable=False, default=7.0)
     is_active: Mapped[bool] = mapped_column(default=True)
+    is_deleted: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
 

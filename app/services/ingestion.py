@@ -200,6 +200,10 @@ def _should_use_browser_fetch(url: str, status_code: int | None, html: str | Non
     force_browser_hosts = {
         "ai.meta.com",
         "lastweekin.ai",
+        "aboutamazon.com",
+        "venturebeat.com",
+        "reuters.com",
+        "tesla.com",
     }
     host_allowed = any(d in host for d in domains) or any(h == host or host.endswith("." + h) for h in force_browser_hosts)
     if not host_allowed:
@@ -209,6 +213,15 @@ def _should_use_browser_fetch(url: str, status_code: int | None, html: str | Non
     if _looks_paywalled_or_thin(html):
         return True
     return False
+
+
+def _resolve_source_url_template(url: str) -> str:
+    out = (url or "").strip()
+    if not out:
+        return out
+    if "{date}" in out:
+        out = out.replace("{date}", datetime.utcnow().strftime("%Y-%m-%d"))
+    return out
 
 
 def _fetch_page_browser(url: str) -> tuple[str | None, str, int | None, float]:
@@ -532,7 +545,7 @@ def geo_check_sources(limit: int | None = None, timeout_s: int = 15, progress_cb
         return "network_error"
 
     with session_scope() as session:
-        q = select(Source).where(Source.is_active.is_(True)).order_by(Source.priority_rank.asc())
+        q = select(Source).where(Source.is_active.is_(True), Source.is_deleted.is_(False)).order_by(Source.priority_rank.asc())
         if limit is not None:
             q = q.limit(max(1, int(limit)))
         sources = session.scalars(q).all()
@@ -597,7 +610,7 @@ def fetch_source_articles(
     max_entries: int = 120,
     progress_cb=None,
 ) -> int:
-    parsed = _load_feed(source.rss_url)
+    parsed = _load_feed(_resolve_source_url_template(source.rss_url))
     if parsed.bozo and not parsed.entries:
         _save_health_metric(source.id, 0.0, 0.0, 0.0, 0.0, str(parsed.bozo_exception) if parsed.bozo_exception else "bozo")
         return 0
@@ -696,12 +709,15 @@ def fetch_source_articles(
             if entry.get("media_content"):
                 image_url = entry["media_content"][0].get("url")
 
+            fetched_at = datetime.utcnow()
+            effective_published_at = published_at or fetched_at
+
             raw_feed = RawFeedEntry(
                 source_id=source.id,
                 external_id=external_id,
                 entry_url=link,
                 payload=json.loads(json.dumps(dict(entry), default=str)),
-                parsed_article={"title": title, "subtitle": subtitle, "tags": tags, "published_at": str(published_at)},
+                parsed_article={"title": title, "subtitle": subtitle, "tags": tags, "published_at": str(effective_published_at)},
                 content_hash=content_hash,
             )
             session.add(raw_feed)
@@ -733,7 +749,7 @@ def fetch_source_articles(
                 text=final_text or subtitle or "",
                 content_mode=content_mode,
                 image_url=image_url,
-                published_at=published_at,
+                published_at=effective_published_at,
                 canonical_url=canonical_url,
                 status=ArticleStatus.INBOX,
             )
@@ -767,8 +783,8 @@ def fetch_source_articles(
                     progress_cb("save", inserted, total_entries, source.name)
                 except Exception:
                     pass
-            if published_at and (latest_published is None or published_at > latest_published):
-                latest_published = published_at
+            if effective_published_at and (latest_published is None or effective_published_at > latest_published):
+                latest_published = effective_published_at
 
     stale_minutes = 0.0
     if latest_published:
@@ -845,6 +861,25 @@ def _extract_section_links(section_url: str, html: str) -> list[str]:
                     continue
                 if low.rstrip("/") == "https://www.anthropic.com/news":
                     continue
+            elif "aboutamazon.com" in host:
+                if "/news/" not in low or "/news/tag/" in low:
+                    continue
+            elif "arstechnica.com" in host:
+                if "/20" not in low:
+                    continue
+            elif "businessinsider.com" in host:
+                if any(x in low for x in ["/subscription", "/newsletter", "/account", "/search"]):
+                    continue
+                if low.rstrip("/") == "https://www.businessinsider.com/artificial-intelligence":
+                    continue
+                if not any(x in low for x in ["/artificial-intelligence", "/ai-", "-20"]):
+                    continue
+            elif "huggingface.co" in host:
+                if "/papers/" not in low or "/papers/date/" in low:
+                    continue
+            elif "venturebeat.com" in host:
+                if "/ai/" not in low and "/category/ai/" not in low:
+                    continue
             elif "therundown.ai" in host or "superhuman.ai" in host or "mindstream.news" in host:
                 # Beehiiv-style posts usually live under /p/<slug>.
                 if "/p/" not in low:
@@ -869,7 +904,7 @@ def fetch_source_articles_html(
     hours_back: int | None = None,
     fetch_full_pages: bool = True,
 ) -> int:
-    section_url = source.rss_url
+    section_url = _resolve_source_url_template(source.rss_url)
     if hours_back is not None:
         min_dt = datetime.utcnow() - timedelta(hours=hours_back)
     else:
@@ -947,12 +982,15 @@ def fetch_source_articles_html(
             external_id = stable_hash(canonical_url)[:64]
             content_hash = stable_hash(title + "|" + (subtitle or "") + "|" + canonical_url)[:64]
 
+            fetched_at = datetime.utcnow()
+            effective_published_at = published_at or fetched_at
+
             raw_feed = RawFeedEntry(
                 source_id=source.id,
                 external_id=external_id,
                 entry_url=canonical_url,
                 payload={"kind": "html", "section_url": section_url, "url": canonical_url},
-                parsed_article={"title": title, "subtitle": subtitle, "tags": [], "published_at": str(published_at)},
+                parsed_article={"title": title, "subtitle": subtitle, "tags": [], "published_at": str(effective_published_at)},
                 content_hash=content_hash,
             )
             session.add(raw_feed)
@@ -969,7 +1007,7 @@ def fetch_source_articles_html(
                 text=final_text,
                 content_mode=content_mode,
                 image_url=None,
-                published_at=published_at,
+                published_at=effective_published_at,
                 canonical_url=canonical_url,
                 status=ArticleStatus.INBOX,
             )
@@ -995,8 +1033,8 @@ def fetch_source_articles_html(
                 )
             )
             inserted += 1
-            if published_at and (latest_published is None or published_at > latest_published):
-                latest_published = published_at
+            if effective_published_at and (latest_published is None or effective_published_at > latest_published):
+                latest_published = effective_published_at
 
             if inserted >= 40:
                 break
@@ -1017,7 +1055,7 @@ def check_source_health(source_id: int) -> dict:
         if not src:
             return {"ok": False, "error": "source_not_found"}
         kind = (src.kind or "rss").lower()
-        url = src.rss_url
+        url = _resolve_source_url_template(src.rss_url)
 
     if kind == "html":
         html, final_url, status_code, latency_ms = _fetch_page(url)
@@ -1048,7 +1086,12 @@ def check_source_health(source_id: int) -> dict:
 def run_ingestion(days_back: int = 30, hours_back: int | None = None, status_cb=None, progress_cb=None) -> dict[str, int]:
     results: dict[str, int] = {}
     with session_scope() as session:
-        source_ids = [row[0] for row in session.execute(select(Source.id).where(Source.is_active.is_(True)).order_by(Source.priority_rank.asc())).all()]
+        source_ids = [
+            row[0]
+            for row in session.execute(
+                select(Source.id).where(Source.is_active.is_(True), Source.is_deleted.is_(False)).order_by(Source.priority_rank.asc())
+            ).all()
+        ]
 
     total = len(source_ids)
     for idx, source_id in enumerate(source_ids, start=1):
@@ -1091,7 +1134,7 @@ def run_ingestion_fast(
             row[0]
             for row in session.execute(
                 select(Source.id)
-                .where(Source.is_active.is_(True))
+                .where(Source.is_active.is_(True), Source.is_deleted.is_(False))
                 .order_by(Source.priority_rank.asc())
             ).all()
         ]
