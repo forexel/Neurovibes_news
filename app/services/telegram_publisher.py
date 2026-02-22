@@ -9,7 +9,7 @@ from sqlalchemy import select
 
 from app.core.config import settings
 from app.db import session_scope
-from app.models import Article, ArticleStatus, PublishJob, PublishStatus
+from app.models import Article, ArticleStatus, PublishJob, PublishStatus, TelegramReviewJob
 from app.services.content_generation import generate_ru_summary
 from app.services.telegram_context import telegram_bot_token, telegram_channel_id, telegram_signature
 
@@ -35,7 +35,20 @@ def send_test_message(text: str = "Neurovibes bot test message") -> dict:
         return {"ok": False, "error": str(exc)}
 
 
-def publish_article(article_id: int) -> dict:
+def _has_pending_review(session, article_id: int) -> bool:
+    job = session.scalars(
+        select(TelegramReviewJob)
+        .where(TelegramReviewJob.article_id == int(article_id))
+        .order_by(TelegramReviewJob.id.desc())
+        .limit(1)
+    ).first()
+    if not job:
+        return False
+    status = str(job.status or "").strip().lower()
+    return status in {"sent", "resent"}
+
+
+def publish_article(article_id: int, *, manual: bool = True) -> dict:
     # Hard rule: publish only RU posts. If RU content is missing, try to prepare it automatically.
     with session_scope() as session:
         article = session.get(Article, article_id)
@@ -43,6 +56,8 @@ def publish_article(article_id: int) -> dict:
             return {"ok": False, "error": "article_not_found"}
         if article.status in {ArticleStatus.ARCHIVED, ArticleStatus.REJECTED, ArticleStatus.DOUBLE}:
             return {"ok": False, "error": f"publish_blocked_status:{str(article.status)}"}
+        if (not manual) and _has_pending_review(session, article_id):
+            return {"ok": False, "error": "publish_blocked_pending_review"}
         has_ru = bool((article.ru_title or "").strip()) and bool((article.ru_summary or "").strip())
     if not has_ru:
         try:
@@ -56,6 +71,8 @@ def publish_article(article_id: int) -> dict:
             return {"ok": False, "error": "article_not_found"}
         if article.status in {ArticleStatus.ARCHIVED, ArticleStatus.REJECTED, ArticleStatus.DOUBLE}:
             return {"ok": False, "error": f"publish_blocked_status:{str(article.status)}"}
+        if (not manual) and _has_pending_review(session, article_id):
+            return {"ok": False, "error": "publish_blocked_pending_review"}
         if not (article.ru_title or "").strip() or not (article.ru_summary or "").strip():
             return {"ok": False, "error": "ru_content_required", "hint": "Нажми Generate Post и/или Translate Full, затем сохрани RU текст"}
 
@@ -177,7 +194,7 @@ def publish_scheduled_due(limit: int = 20) -> dict:
     failed = 0
     for article_id in rows:
         processed += 1
-        out = publish_article(int(article_id))
+        out = publish_article(int(article_id), manual=False)
         if out.get("ok"):
             published += 1
         else:

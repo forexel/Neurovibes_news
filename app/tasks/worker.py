@@ -256,7 +256,7 @@ def main() -> None:
                     try:
                         target = pick_hourly_top()
                         if target:
-                            out = publish_article(int(target))
+                            out = publish_article(int(target), manual=False)
                             print("[worker] timed publish", {"slot": slot_key, "article_id": target, **out}, flush=True)
                         else:
                             print("[worker] timed publish skipped: no candidate", {"slot": slot_key}, flush=True)
