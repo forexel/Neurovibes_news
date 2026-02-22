@@ -1065,6 +1065,7 @@ def admin_data_articles(
     sort_by: str = "created_at",
     sort_dir: str = "desc",
     hide_double: bool = False,
+    q: str = "",
 ) -> dict:
     _require_session_user(request)
     user = _get_session_user(request)
@@ -1127,7 +1128,9 @@ def admin_data_articles(
             base_query = base_query.where(Article.status != ArticleStatus.ARCHIVED)
             articles = session.scalars(base_query.where(Article.status != ArticleStatus.DOUBLE)).all()
         else:
-            # "All" should be an editor inbox: exclude published and explicit selections.
+            # "All" = broad working list for manual review/history passes.
+            # Keep archived/rejected here too so editor can revisit old deletions and refine reasons.
+            # We still exclude already-published and explicit selections to reduce noise.
             selected_day_ids = session.scalars(
                 select(DailySelection.article_id).where(
                     DailySelection.selected_date == today,
@@ -1135,10 +1138,8 @@ def admin_data_articles(
                 )
             ).all()
             base_query = base_query.where(
-                Article.status != ArticleStatus.ARCHIVED,
                 Article.status != ArticleStatus.PUBLISHED,
                 Article.status != ArticleStatus.SELECTED_HOURLY,
-                Article.status != ArticleStatus.REJECTED,
             )
             if selected_day_ids:
                 base_query = base_query.where(Article.id.not_in(selected_day_ids))
@@ -1163,6 +1164,28 @@ def admin_data_articles(
 
     if hide_double:
         result = [x for x in result if str(x.get("status") or "").upper() != "DOUBLE"]
+
+    query_text = str(q or "").strip()
+    if query_text:
+        q_norm = query_text.casefold()
+        words = [w for w in re.split(r"\s+", q_norm) if w]
+
+        def _search_blob(x: dict) -> str:
+            parts = [
+                str(x.get("title") or ""),
+                str(x.get("ru_title") or ""),
+                str(x.get("subtitle") or ""),
+                str(x.get("short_hook") or ""),
+                str(x.get("text") or ""),
+                str(x.get("ru_summary") or ""),
+            ]
+            return "\n".join(parts).casefold()
+
+        exact_matches = [x for x in result if q_norm in _search_blob(x)]
+        if exact_matches:
+            result = exact_matches
+        elif words:
+            result = [x for x in result if all(w in _search_blob(x) for w in words)]
 
     reverse = sort_dir.lower() != "asc"
     # Default sort for ALL: newest day first, and within the day show the highest-scored items on top.
@@ -1209,6 +1232,7 @@ def admin_data_articles(
         "page_size": page_size,
         "total_pages": total_pages,
         "view": view,
+        "q": query_text,
     }
 
 
@@ -2958,6 +2982,12 @@ def _render_admin_list_page(view: str) -> str:
     <div class="statusbar">
       <label><input id="hideDoubleToggle" type="checkbox" onchange="onHideDoubleChange()"> No Double</label>
       <label>Page size: <input id="pageSizeInput" type="number" value="25" min="5" max="100" onchange="onPageSizeChange()"></label>
+      <label style="display:flex;align-items:center;gap:6px;">
+        Search:
+        <input id="searchInput" type="text" placeholder="Заголовок или текст..." style="min-width:260px;">
+        <button type="button" onclick="applySearch()">Search</button>
+        <button type="button" onclick="clearSearch()">Clear</button>
+      </label>
       <span class="muted">Generate Post: RU заголовок + 2 абзаца (без Translate Full)</span>
       <span id="costBadge" class="muted">Cost: ...</span>
       <span id="workerBadge" class="muted">Worker: ...</span>
@@ -3039,6 +3069,7 @@ def _render_admin_list_page(view: str) -> str:
     let scorePollTimer = null;
     let sortBy = null;
     let sortDir = null;
+    let searchQuery = '';
     window.NV_TZ = 'Europe/Moscow';
 
     async function loadArticles() {
@@ -3049,6 +3080,7 @@ def _render_admin_list_page(view: str) -> str:
       qs.set('page_size', String(pageSize));
       const hideDouble = document.getElementById('hideDoubleToggle')?.checked;
       if (hideDouble) qs.set('hide_double', '1');
+      if (searchQuery && searchQuery.trim()) qs.set('q', searchQuery.trim());
       if (sortBy && sortDir) {
         qs.set('sort_by', sortBy);
         qs.set('sort_dir', sortDir);
@@ -3082,6 +3114,18 @@ def _render_admin_list_page(view: str) -> str:
         </tr>
       `).join('');
       renderSortIndicators();
+    }
+    function applySearch() {
+      searchQuery = (document.getElementById('searchInput')?.value || '').trim();
+      currentPage = 1;
+      loadArticles();
+    }
+    function clearSearch() {
+      searchQuery = '';
+      const el = document.getElementById('searchInput');
+      if (el) el.value = '';
+      currentPage = 1;
+      loadArticles();
     }
     async function refreshCosts() {
       try {
@@ -3645,6 +3689,17 @@ def _render_admin_list_page(view: str) -> str:
       document.getElementById('result').textContent = v;
     }
 
+    document.addEventListener('DOMContentLoaded', () => {
+      const s = document.getElementById('searchInput');
+      if (s) {
+        s.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            applySearch();
+          }
+        });
+      }
+    });
     loadArticles();
     refreshCosts();
     refreshWorker();

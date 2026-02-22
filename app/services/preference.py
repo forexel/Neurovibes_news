@@ -707,3 +707,126 @@ def detect_preference_drift(window: int = 200, threshold: float = 0.22) -> dict:
         )
 
     return {"ok": True, "drifted": drifted, "delta": delta, "old_avg": old_avg, "new_avg": new_avg}
+
+
+def backfill_training_and_restore_unreasoned_archived(
+    *,
+    restore_status: ArticleStatus = ArticleStatus.INBOX,
+    max_articles: int = 50000,
+) -> dict:
+    """
+    1) Backfill historical delete/hide reasons from archived articles (+ audit logs fallback) into training_events.
+    2) Restore archived/rejected articles that have no deletion/hide reason.
+    """
+    scanned = 0
+    backfilled = 0
+    restored = 0
+    already_present = 0
+    errors = 0
+
+    with session_scope() as session:
+        articles = session.scalars(
+            select(Article)
+            .where(Article.status.in_([ArticleStatus.ARCHIVED, ArticleStatus.REJECTED]))
+            .order_by(Article.updated_at.desc())
+            .limit(max_articles)
+        ).all()
+
+        # Build audit fallback map for delete reasons (latest wins).
+        audit_reason_by_article: dict[int, str] = {}
+        logs = session.scalars(
+            select(AuditLog)
+            .where(AuditLog.action == "article_delete_feedback")
+            .order_by(AuditLog.created_at.desc())
+            .limit(max_articles * 2)
+        ).all()
+        for log in logs:
+            try:
+                aid = int(str(log.entity_id or "0"))
+            except Exception:
+                continue
+            if aid <= 0 or aid in audit_reason_by_article:
+                continue
+            payload = log.payload or {}
+            reason = str(payload.get("reason") or "").strip()
+            if reason:
+                audit_reason_by_article[aid] = reason
+
+        for a in articles:
+            scanned += 1
+            kind = str(a.archived_kind or "").strip().lower()
+            reason = str(a.archived_reason or "").strip()
+            if not reason and kind == "delete":
+                reason = audit_reason_by_article.get(int(a.id), "").strip()
+
+            # Keep archived with reason; backfill into training_events.
+            if reason:
+                decision = "delete" if kind == "delete" else "hide"
+                exists = session.scalars(
+                    select(TrainingEvent.id)
+                    .where(
+                        TrainingEvent.article_id == int(a.id),
+                        TrainingEvent.decision == decision,
+                        TrainingEvent.reason_text == reason,
+                    )
+                    .limit(1)
+                ).first()
+                if exists:
+                    already_present += 1
+                    continue
+                try:
+                    score = session.get(Score, int(a.id))
+                    features = _feature_snapshot(a, score, _guess_reason_tags(reason))
+                    ml_meta = predict_editor_choice_prob(features)
+                    published_time = a.published_at or a.created_at
+                    event_time = a.archived_at or a.updated_at or datetime.utcnow()
+                    delay_minutes = None
+                    if published_time:
+                        try:
+                            delay_minutes = max(0, int((event_time - published_time).total_seconds() // 60))
+                        except Exception:
+                            delay_minutes = None
+                    session.add(
+                        TrainingEvent(
+                            user_id=None,
+                            article_id=int(a.id),
+                            decision=decision,
+                            label=0,
+                            hour_bucket=(a.selected_hour_bucket_utc or (published_time or event_time).replace(minute=0, second=0, microsecond=0)),
+                            candidate_set_ids=[int(a.id)],
+                            features_json=features,
+                            reason_text=reason,
+                            reason_tags=_guess_reason_tags(reason) or None,
+                            rule_score=(float(score.final_score or 0.0) if score else None),
+                            ml_score_at_decision=(float(ml_meta.get("prob")) if ml_meta.get("ok") else None),
+                            model_version=(ml_meta.get("version") if ml_meta.get("ok") else None),
+                            override=False,
+                            event_time=event_time,
+                            article_published_at=published_time,
+                            delay_minutes=delay_minutes,
+                            final_outcome=("deleted" if decision == "delete" else "hidden"),
+                            created_at=event_time,
+                        )
+                    )
+                    backfilled += 1
+                except Exception:
+                    errors += 1
+                continue
+
+            # No reason: restore back to manual queue.
+            a.status = restore_status
+            a.archived_kind = None
+            a.archived_reason = None
+            a.archived_at = None
+            a.updated_at = datetime.utcnow()
+            restored += 1
+
+    return {
+        "ok": True,
+        "scanned_archived": scanned,
+        "backfilled_training_events": backfilled,
+        "already_present": already_present,
+        "restored_without_reason": restored,
+        "errors": errors,
+        "restore_status": str(restore_status.value if isinstance(restore_status, ArticleStatus) else restore_status),
+    }

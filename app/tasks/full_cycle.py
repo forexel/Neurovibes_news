@@ -14,6 +14,7 @@ from app.services.embedding_dedup import process_embeddings_and_dedup
 from app.services.ingestion import run_backfill_batched, run_ingestion
 from app.services.pipeline import pick_hourly_top, run_hourly_cycle
 from app.services.preference import (
+    backfill_training_and_restore_unreasoned_archived,
     build_editor_choice_dataset,
     build_ranking_dataset,
     train_editor_choice_model,
@@ -102,6 +103,10 @@ def cmd_editor_choice_trainer(days: int) -> None:
     print(train_editor_choice_model(days_back=days))
 
 
+def cmd_recover_manual_week() -> None:
+    print(backfill_training_and_restore_unreasoned_archived())
+
+
 def cmd_drift() -> None:
     print(detect_preference_drift())
 
@@ -154,6 +159,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     editor_trainer = sub.add_parser("editor-choice-train", help="train editor choice model from training_events")
     editor_trainer.add_argument("--days", type=int, default=30)
+    sub.add_parser("recover-manual-week", help="backfill delete/hide reasons to training_events and restore archived without reasons")
 
     sub.add_parser("drift", help="detect preference drift")
     sub.add_parser("auto-decision", help="decide publish candidate using trained model")
@@ -192,6 +198,8 @@ def main() -> None:
         cmd_trainer(days=args.days)
     elif args.command == "editor-choice-train":
         cmd_editor_choice_trainer(days=args.days)
+    elif args.command == "recover-manual-week":
+        cmd_recover_manual_week()
     elif args.command == "drift":
         cmd_drift()
     elif args.command == "auto-decision":
