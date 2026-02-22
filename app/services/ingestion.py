@@ -197,9 +197,14 @@ def _should_use_browser_fetch(url: str, status_code: int | None, html: str | Non
         return False
     host = (urlparse(url).netloc or "").lower()
     domains = [x.strip().lower() for x in get_runtime_csv_list("browser_fetch_domains_csv")]
-    if not any(d in host for d in domains):
+    force_browser_hosts = {
+        "ai.meta.com",
+        "lastweekin.ai",
+    }
+    host_allowed = any(d in host for d in domains) or any(h == host or host.endswith("." + h) for h in force_browser_hosts)
+    if not host_allowed:
         return False
-    if status_code in {401, 403, 406, 429}:
+    if status_code in {400, 401, 403, 406, 429}:
         return True
     if _looks_paywalled_or_thin(html):
         return True
@@ -798,6 +803,7 @@ def _extract_section_links(section_url: str, html: str) -> list[str]:
     try:
         soup = BeautifulSoup(html, "html.parser")
         base = urlparse(section_url)
+        host = (base.netloc or "").lower()
         links: list[str] = []
         for a in soup.find_all("a"):
             href = (a.get("href") or "").strip()
@@ -816,6 +822,33 @@ def _extract_section_links(section_url: str, html: str) -> list[str]:
             low = norm.lower()
             if any(x in low for x in ["/tag/", "/tags/", "/category/", "/categories/", "/author/", "/about", "/privacy", "/terms"]):
                 continue
+            if any(x in low for x in ["/subscribe", "/account", "/login", "/signin", "/auth", "/contact", "/careers", "/jobs"]):
+                continue
+
+            # Source-specific allow/deny rules for html homepages/news sections.
+            if "lastweekin.ai" in host:
+                # Newsletter posts live under /p/...
+                if "/p/" not in low:
+                    continue
+            elif "ai.meta.com" in host:
+                # Meta AI blog links are typically /blog/<slug>/...
+                if "/blog/" not in low or low.rstrip("/") == "https://ai.meta.com/blog":
+                    continue
+            elif "news.microsoft.com" in host:
+                # Prefer concrete article pages under /source/... and avoid section hubs.
+                if "/source/" not in low:
+                    continue
+                if any(low.rstrip("/").endswith(x) for x in ["/source", "/source/topics", "/source/topics/ai"]):
+                    continue
+            elif "anthropic.com" in host:
+                if "/news/" not in low:
+                    continue
+                if low.rstrip("/") == "https://www.anthropic.com/news":
+                    continue
+            elif "therundown.ai" in host or "superhuman.ai" in host or "mindstream.news" in host:
+                # Beehiiv-style posts usually live under /p/<slug>.
+                if "/p/" not in low:
+                    continue
             links.append(norm)
         # keep order, de-dupe
         out: list[str] = []
@@ -1047,7 +1080,11 @@ def run_ingestion_fast(
     status_cb=None,
     progress_cb=None,
 ) -> dict[str, int]:
-    """RSS-only ingestion that does not fetch full article pages (much faster)."""
+    """
+    Fast ingestion for hourly worker.
+    - RSS sources: fetch feed only (no full pages)
+    - HTML sources: fetch section + article pages (slower, but enables sources without RSS)
+    """
     results: dict[str, int] = {}
     with session_scope() as session:
         source_ids = [
@@ -1073,8 +1110,14 @@ def run_ingestion_fast(
             except Exception:
                 pass
 
-        if source_kind != "rss":
-            # html sources require page fetch; skip in fast mode
+        if source_kind == "html":
+            # HTML sources are slower but necessary for sites without RSS feeds.
+            results[source_name] = fetch_source_articles_html(
+                source,
+                days_back=days_back,
+                hours_back=hours_back,
+                fetch_full_pages=True,
+            )
             continue
 
         results[source_name] = fetch_source_articles(

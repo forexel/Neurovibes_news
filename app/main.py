@@ -195,6 +195,14 @@ class SourceAddIn(BaseModel):
     kind: str = Field(default="rss", pattern="^(rss|html)$")
 
 
+class SourceUpdateIn(BaseModel):
+    name: str = Field(min_length=2, max_length=255)
+    rss_url: str = Field(min_length=8, max_length=1024)
+    priority_rank: int = Field(default=50, ge=1, le=999)
+    kind: str = Field(default="rss", pattern="^(rss|html)$")
+    is_active: bool | None = None
+
+
 class ScoreParamUpsertIn(BaseModel):
     key: str = Field(min_length=2, max_length=64)
     title: str = Field(min_length=2, max_length=128)
@@ -872,6 +880,16 @@ def _ensure_content_allowed(article_id: int) -> None:
             )
 
 
+def _ensure_scored(article_id: int) -> None:
+    with session_scope() as session:
+        article = session.get(Article, article_id)
+        if not article:
+            raise HTTPException(status_code=404, detail="Article not found")
+        score = session.get(Score, article_id)
+        if score is None:
+            raise HTTPException(status_code=409, detail="score_required_before_content")
+
+
 @app.post("/ingestion/aggregate")
 def ingestion_aggregate(body: AggregateIn) -> dict:
     period = body.period.lower()
@@ -1410,6 +1428,30 @@ def add_source(body: SourceAddIn, request: Request) -> dict:
         return {"ok": True, "source_id": int(src.id)}
 
 
+@app.post("/sources/{source_id}/update")
+def update_source(source_id: int, body: SourceUpdateIn, request: Request) -> dict:
+    _require_session_user(request)
+    with session_scope() as session:
+        src = session.get(Source, source_id)
+        if not src:
+            raise HTTPException(status_code=404, detail="source_not_found")
+        exists = session.scalar(
+            select(Source.id).where(
+                Source.id != source_id,
+                ((Source.name == body.name.strip()) | (Source.rss_url == body.rss_url.strip())),
+            )
+        )
+        if exists:
+            raise HTTPException(status_code=409, detail="source_name_or_url_already_exists")
+        src.name = body.name.strip()
+        src.rss_url = body.rss_url.strip()
+        src.kind = (body.kind or "rss").strip().lower()
+        src.priority_rank = int(body.priority_rank)
+        if body.is_active is not None:
+            src.is_active = bool(body.is_active)
+    return {"ok": True, "source_id": source_id}
+
+
 @app.post("/sources/{source_id}/check")
 def check_source(source_id: int, request: Request) -> dict:
     _require_session_user(request)
@@ -1816,7 +1858,9 @@ def generate_post_only(article_id: int) -> dict:
 
 @app.post("/articles/{article_id}/translate")
 def translate_article(article_id: int) -> dict:
-    _ensure_content_allowed(article_id)
+    # Manual preview translation is allowed even for low-relevance articles:
+    # editor may still want RU preview text for training/review.
+    _ensure_scored(article_id)
     out = translate_article_text(article_id)
     if not out.get("ok"):
         if out.get("error") == "article_not_found":
@@ -2730,6 +2774,7 @@ def admin_sources_page(request: Request):
           <td>${s.latest_published_at ?? '-'}</td>
           <td>
             <button onclick="checkSource(${s.id})">Check</button>
+            <button onclick="editSource(${s.id})">Edit</button>
             ${s.is_active ? `<button onclick="setActive(${s.id}, false)">Disable</button>` : `<button onclick="setActive(${s.id}, true)">Enable</button>`}
             <button onclick="deleteSource(${s.id})">Delete</button>
           </td>
@@ -2772,6 +2817,41 @@ def admin_sources_page(request: Request):
       const resp = await fetch(`/sources/${id}/check`, {method:'POST'});
       const out = await resp.json();
       setResult(JSON.stringify(out));
+    }
+
+    async function editSource(id){
+      const resp0 = await fetch('/admin-data/sources');
+      const items = await resp0.json();
+      const s = (items || []).find(x => Number(x.id) === Number(id));
+      if (!s) { alert('Источник не найден'); return; }
+
+      const name = prompt('Название источника', s.name || '');
+      if (name === null) return;
+      const kind = prompt('Тип источника: rss или html', (s.kind || 'rss'));
+      if (kind === null) return;
+      const rss_url = prompt('URL (RSS или раздел новостей)', s.rss_url || '');
+      if (rss_url === null) return;
+      const rankRaw = prompt('Priority rank (1..999)', String(s.priority_rank || 50));
+      if (rankRaw === null) return;
+      const priority_rank = Number(rankRaw || 50);
+      if (!name.trim() || !rss_url.trim()) { alert('Name и URL обязательны'); return; }
+      if (!['rss','html'].includes(String(kind).trim().toLowerCase())) { alert('Тип должен быть rss или html'); return; }
+      if (!Number.isFinite(priority_rank) || priority_rank < 1 || priority_rank > 999) { alert('Rank 1..999'); return; }
+
+      const resp = await fetch(`/sources/${id}/update`, {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({
+          name: name.trim(),
+          kind: String(kind).trim().toLowerCase(),
+          rss_url: rss_url.trim(),
+          priority_rank: Math.round(priority_rank),
+        }),
+      });
+      const out = await resp.json();
+      setResult(JSON.stringify(out));
+      if (!resp.ok) { alert(out.detail || 'update failed'); return; }
+      loadSources();
     }
 
     async function deleteSource(id){
