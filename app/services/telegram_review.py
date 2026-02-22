@@ -74,6 +74,16 @@ def _safe_user_id_int(user_id: str | None) -> int | None:
         return None
 
 
+def _safe_log_training_event(**kwargs) -> None:
+    try:
+        log_training_event(**kwargs)
+    except Exception as exc:
+        try:
+            print("[tg] training_event_failed", {"error": str(exc), "kwargs": {k: kwargs.get(k) for k in ("article_id", "decision", "label")}}, flush=True)
+        except Exception:
+            pass
+
+
 def _bot_base_url() -> str | None:
     token = (telegram_bot_token() or settings.telegram_bot_token or "").strip()
     if not token:
@@ -1046,7 +1056,7 @@ def _handle_message(update: dict) -> dict:
                 job.decision_reason = safe_text
                 job.updated_at = datetime.utcnow()
         if out.get("ok"):
-            log_training_event(
+            _safe_log_training_event(
                 article_id=article_id,
                 decision="publish",
                 label=1,
@@ -1081,7 +1091,7 @@ def _handle_message(update: dict) -> dict:
             if job:
                 job.decision_reason = safe_text
                 job.updated_at = datetime.utcnow()
-        log_training_event(
+        _safe_log_training_event(
             article_id=article_id,
             decision="defer",
             label=0,
@@ -1173,7 +1183,7 @@ def _handle_message(update: dict) -> dict:
             if job:
                 job.decision_reason = safe_text
                 job.updated_at = datetime.utcnow()
-        log_training_event(
+        _safe_log_training_event(
             article_id=article_id,
             decision="defer",
             label=0,
@@ -1208,7 +1218,7 @@ def _handle_message(update: dict) -> dict:
                 job.decision_reason = safe_text
                 job.updated_at = datetime.utcnow()
         if out.get("ok"):
-            log_training_event(
+            _safe_log_training_event(
                 article_id=article_id,
                 decision="delete",
                 label=0,
@@ -1249,7 +1259,7 @@ def _handle_message(update: dict) -> dict:
                 job.status = "deleted"
                 job.decision_reason = safe_text
                 job.updated_at = datetime.utcnow()
-        log_training_event(
+        _safe_log_training_event(
             article_id=article_id,
             decision="hide",
             label=0,
@@ -1294,7 +1304,7 @@ def _handle_message(update: dict) -> dict:
                 job.status = "sent"
                 job.decision_reason = f"later: {safe_text}"
                 job.updated_at = datetime.utcnow()
-        log_training_event(
+        _safe_log_training_event(
             article_id=article_id,
             decision="defer",
             label=0,
