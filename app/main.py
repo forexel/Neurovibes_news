@@ -1471,13 +1471,11 @@ def delete_source(source_id: int, request: Request) -> dict:
         src = session.get(Source, source_id)
         if not src:
             raise HTTPException(status_code=404, detail="source_not_found")
-        cnt = int(session.scalar(select(func.count(Article.id)).where(Article.source_id == source_id)) or 0)
-        if cnt > 0:
-            src.is_active = False
-            src.is_deleted = True
-            return {"ok": True, "deleted_source_id": source_id, "soft_deleted": True}
-        session.delete(src)
-    return {"ok": True, "deleted_source_id": source_id, "soft_deleted": False}
+        # Always soft-delete in UI: sources can be referenced by articles, raw_feed_entries,
+        # source_health_metrics, etc. Physical delete is brittle and not needed for admin UX.
+        src.is_active = False
+        src.is_deleted = True
+    return {"ok": True, "deleted_source_id": source_id, "soft_deleted": True}
 
 
 @app.get("/admin-data/score-params")
