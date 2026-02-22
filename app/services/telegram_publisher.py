@@ -41,6 +41,8 @@ def publish_article(article_id: int) -> dict:
         article = session.get(Article, article_id)
         if not article:
             return {"ok": False, "error": "article_not_found"}
+        if article.status in {ArticleStatus.ARCHIVED, ArticleStatus.REJECTED, ArticleStatus.DOUBLE}:
+            return {"ok": False, "error": f"publish_blocked_status:{str(article.status)}"}
         has_ru = bool((article.ru_title or "").strip()) and bool((article.ru_summary or "").strip())
     if not has_ru:
         try:
@@ -52,6 +54,8 @@ def publish_article(article_id: int) -> dict:
         article = session.get(Article, article_id)
         if not article:
             return {"ok": False, "error": "article_not_found"}
+        if article.status in {ArticleStatus.ARCHIVED, ArticleStatus.REJECTED, ArticleStatus.DOUBLE}:
+            return {"ok": False, "error": f"publish_blocked_status:{str(article.status)}"}
         if not (article.ru_title or "").strip() or not (article.ru_summary or "").strip():
             return {"ok": False, "error": "ru_content_required", "hint": "Нажми Generate Post и/или Translate Full, затем сохрани RU текст"}
 

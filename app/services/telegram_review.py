@@ -881,6 +881,12 @@ def _handle_callback(update: dict) -> dict:
 
     if action == "del":
         _edit_message_reply_markup(chat_id, message_id)
+        # Immediately cancel any delayed publication while we wait for the reason.
+        with session_scope() as session:
+            art = session.get(Article, article_id)
+            if art:
+                art.scheduled_publish_at = None
+                art.updated_at = datetime.utcnow()
         prompt = _send_message(chat_id, "Почему удаляем эту новость? Ответь реплаем на это сообщение.", force_reply=True)
         if prompt.get("ok"):
             prompt_id = str((prompt.get("result") or {}).get("message_id") or "")
@@ -900,6 +906,12 @@ def _handle_callback(update: dict) -> dict:
 
     if action == "hide":
         _edit_message_reply_markup(chat_id, message_id)
+        # Immediately cancel any delayed publication while we wait for the reason.
+        with session_scope() as session:
+            art = session.get(Article, article_id)
+            if art:
+                art.scheduled_publish_at = None
+                art.updated_at = datetime.utcnow()
         prompt = _send_message(chat_id, "Почему скрываем (не удаляем) эту новость? Ответь реплаем.", force_reply=True)
         if prompt.get("ok"):
             prompt_id = str((prompt.get("result") or {}).get("message_id") or "")

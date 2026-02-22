@@ -18,6 +18,7 @@ from app.services.preference import get_active_profile, save_selection_decision
 from app.services.scoring import run_scoring
 from app.services.telegram_context import telegram_timezone_name
 from app.services.runtime_settings import get_runtime_str
+from app.services.topic_filter import _normalize_text
 
 
 def _audience_adjusted_score(article: Article, score: Score) -> float:
@@ -56,9 +57,29 @@ def _hour_bucket_utc(dt_utc: datetime, tz_name: str) -> datetime:
     return bucket_utc
 
 
+def _previous_completed_hour_bucket_utc(now_utc: datetime, tz_name: str) -> datetime:
+    # Align to user's timezone and always return the previous completed hour bucket.
+    return _hour_bucket_utc(now_utc - timedelta(hours=1), tz_name)
+
+
+def _title_fallback_key(article: Article) -> str:
+    src = ""
+    try:
+        src = str((article.source.name if article.source else "") or "").lower().strip()
+    except Exception:
+        src = ""
+    t = _normalize_text(article.title or "")
+    # Keep first tokens to collapse near-identical wire duplicates
+    # ("Mistral CEO says X..." vs "... according to Bloomberg")
+    tokens = [x for x in t.split(" ") if x][:12]
+    return f"{src}|{' '.join(tokens)}"
+
+
 def _hourly_candidates(limit: int = 50) -> list[tuple[Article, Score]]:
     now = datetime.utcnow()
-    hour_ago = now - timedelta(hours=1)
+    tz_name = _get_tz_name()
+    bucket_start = _previous_completed_hour_bucket_utc(now, tz_name)
+    bucket_end = bucket_start + timedelta(hours=1)
     day_ago = now - timedelta(hours=24)
     three_days_ago = now - timedelta(days=3)
 
@@ -73,6 +94,16 @@ def _hourly_candidates(limit: int = 50) -> list[tuple[Article, Score]]:
                 )
             ).all()
         )
+        recent_selected_or_published = session.scalars(
+            select(Article)
+            .where(
+                Article.status.in_([ArticleStatus.SELECTED_HOURLY, ArticleStatus.PUBLISHED]),
+                Article.updated_at >= day_ago,
+            )
+            .options(joinedload(Article.source))
+            .limit(1000)
+        ).all()
+        selected_title_keys = {_title_fallback_key(a) for a in recent_selected_or_published}
 
         base = (
             select(Article, Score)
@@ -86,7 +117,10 @@ def _hourly_candidates(limit: int = 50) -> list[tuple[Article, Score]]:
             .limit(limit)
         )
         rows = session.execute(
-            base.where((Article.created_at >= hour_ago) | (Article.published_at >= hour_ago))
+            base.where(
+                ((Article.created_at >= bucket_start) & (Article.created_at < bucket_end))
+                | ((Article.published_at >= bucket_start) & (Article.published_at < bucket_end))
+            )
         ).all()
 
         # Fallback: if last-hour window is empty, use last 24h so Selected Hour
@@ -104,7 +138,13 @@ def _hourly_candidates(limit: int = 50) -> list[tuple[Article, Score]]:
         if not rows:
             rows = session.execute(base).all()
 
-    filtered = [(a, s) for a, s in rows if a.cluster_key not in selected_clusters]
+    filtered = []
+    for a, s in rows:
+        if a.cluster_key and a.cluster_key in selected_clusters:
+            continue
+        if (not a.cluster_key) and (_title_fallback_key(a) in selected_title_keys):
+            continue
+        filtered.append((a, s))
     filtered.sort(key=lambda x: _audience_adjusted_score(x[0], x[1]), reverse=True)
     return filtered
 
@@ -181,7 +221,7 @@ def pick_hourly_top() -> int | None:
         article.status = ArticleStatus.SELECTED_HOURLY
         # Save the hour-bucket so we can backfill 24h later and avoid duplicates per hour.
         tz_name = _get_tz_name()
-        article.selected_hour_bucket_utc = _hour_bucket_utc(datetime.utcnow(), tz_name)
+        article.selected_hour_bucket_utc = _previous_completed_hour_bucket_utc(datetime.utcnow(), tz_name)
         article.updated_at = datetime.utcnow()
 
     rejected = [a.id for a, _ in top3 if a.id != selected_id]
