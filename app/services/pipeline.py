@@ -474,11 +474,15 @@ def run_hourly_cycle(backfill_days: int = 1, select_hourly_top: bool = True) -> 
     except Exception as exc:
         raise RuntimeError(f"cycle_stage_failed: enrich_summary_only: {exc}") from exc
 
+    embedded = 0
+    embedded_error = None
     try:
         _stage("dedup_embeddings")
         embedded = process_embeddings_and_dedup(limit=250)
     except Exception as exc:
-        raise RuntimeError(f"cycle_stage_failed: dedup_embeddings: {exc}") from exc
+        # Non-fatal fallback: if embeddings API fails, continue the cycle so scoring + hourly review still work.
+        embedded_error = str(exc)
+        print("[cycle] dedup_embeddings_warning", {"error": embedded_error[:300]}, flush=True)
 
     try:
         _stage("scoring")
@@ -516,6 +520,7 @@ def run_hourly_cycle(backfill_days: int = 1, select_hourly_top: bool = True) -> 
         "ingestion": ingest,
         "enrich_summary_only": enrich,
         "embedded": embedded,
+        "embedded_error": embedded_error,
         "scored": scored,
         "top_article_id": top_id,
         "select_hourly_top": bool(select_hourly_top),

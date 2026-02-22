@@ -2330,8 +2330,24 @@ def admin_setup_page(request: Request):
     <div class="card">
       <h3>Step 1: Channel</h3>
       <p class="muted">Название канала, тематика, OpenRouter API key (твой). Источники добавляются отдельно в разделе <code>Sources</code>.</p>
-      <p><input id="channel_name" placeholder="Название канала" /></p>
-      <p><textarea id="channel_theme" placeholder="Тематика канала"></textarea></p>
+      <div id="step1SavedView" class="card" style="display:none;padding:12px;margin:10px 0;background:#0f1a33;">
+        <div style="display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap;">
+          <b>Сохранено</b>
+          <button type="button" onclick="toggleStep1Edit(true)">✎ Edit</button>
+        </div>
+        <div style="margin-top:8px;">
+          <div class="muted">Название канала</div>
+          <div id="channel_name_saved">-</div>
+        </div>
+        <div style="margin-top:8px;">
+          <div class="muted">Тематика</div>
+          <div id="channel_theme_saved" style="white-space:pre-wrap;">-</div>
+        </div>
+      </div>
+      <div id="step1EditView" style="display:block;">
+        <p><input id="channel_name" placeholder="Название канала" /></p>
+        <p><textarea id="channel_theme" placeholder="Тематика канала"></textarea></p>
+      </div>
       <div class="card" style="padding:12px;margin:10px 0;background:#0f1a33;">
         <div class="muted" id="openrouter_hint"></div>
         <div id="openrouterSavedRow" style="display:none;gap:10px;align-items:center;flex-wrap:wrap;">
@@ -2343,15 +2359,31 @@ def admin_setup_page(request: Request):
           <div class="muted" style="margin-top:6px;">Ключ хранится в базе зашифрованно и не отображается обратно. Чтобы заменить, вставь новый ключ и нажми Save.</div>
         </div>
       </div>
-      <p><button onclick="saveStep1()">Save Step 1</button></p>
+      <p style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <button onclick="saveStep1()">Save Step 1</button>
+        <span id="step1_save_status" class="muted"></span>
+      </p>
     </div>
     <div class="card">
       <h3>Step 2: Audience + Scoring</h3>
       <p class="muted">Опиши аудиторию канала. ИИ предложит параметры скоринга и заполнит раздел Score.</p>
-      <p><textarea id="audience_description" placeholder="Для кого канал, что им важно, какие темы нежелательны"></textarea></p>
+      <div id="step2SavedView" class="card" style="display:none;padding:12px;margin:10px 0;background:#0f1a33;">
+        <div style="display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap;">
+          <b>Аудитория сохранена</b>
+          <button type="button" onclick="toggleStep2Edit(true)">✎ Edit</button>
+        </div>
+        <div style="margin-top:8px;">
+          <div class="muted">Описание аудитории</div>
+          <div id="audience_description_saved" style="white-space:pre-wrap;">-</div>
+        </div>
+      </div>
+      <div id="step2EditView" style="display:block;">
+        <p><textarea id="audience_description" placeholder="Для кого канал, что им важно, какие темы нежелательны"></textarea></p>
+      </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;">
         <button onclick="saveStep2()">Save Audience</button>
         <button onclick="analyzeStep2()">Analyze Scoring</button>
+        <span id="step2_save_status" class="muted" style="align-self:center;"></span>
       </div>
       <pre id="analysis_out"></pre>
     </div>
@@ -2384,6 +2416,27 @@ def admin_setup_page(request: Request):
   </main>
   <script>
     function setStatus(v){ document.getElementById('status').textContent = v; }
+    function flashSaveStatus(id, text){
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.textContent = text || '';
+      if (!text) return;
+      setTimeout(() => { if (el.textContent === text) el.textContent = ''; }, 2500);
+    }
+    function toggleStep1Edit(on){
+      const edit = document.getElementById('step1EditView');
+      const saved = document.getElementById('step1SavedView');
+      if (edit) edit.style.display = on ? 'block' : 'none';
+      if (saved) saved.style.display = on ? 'none' : 'block';
+      if (on) { const el = document.getElementById('channel_name'); if (el) el.focus(); }
+    }
+    function toggleStep2Edit(on){
+      const edit = document.getElementById('step2EditView');
+      const saved = document.getElementById('step2SavedView');
+      if (edit) edit.style.display = on ? 'block' : 'none';
+      if (saved) saved.style.display = on ? 'none' : 'block';
+      if (on) { const el = document.getElementById('audience_description'); if (el) el.focus(); }
+    }
     function toggleTelegramTokenEdit(on){
       const edit = document.getElementById('telegramTokenEditRow');
       const saved = document.getElementById('telegramSavedRow');
@@ -2405,6 +2458,12 @@ def admin_setup_page(request: Request):
       document.getElementById('channel_name').value = s.channel_name || '';
       document.getElementById('channel_theme').value = s.channel_theme || '';
       document.getElementById('audience_description').value = s.audience_description || '';
+      const cnSaved = document.getElementById('channel_name_saved');
+      if (cnSaved) cnSaved.textContent = s.channel_name || '—';
+      const ctSaved = document.getElementById('channel_theme_saved');
+      if (ctSaved) ctSaved.textContent = s.channel_theme || '—';
+      const adSaved = document.getElementById('audience_description_saved');
+      if (adSaved) adSaved.textContent = s.audience_description || '—';
       document.getElementById('telegram_review_chat_id').value = s.telegram_review_chat_id || '';
       document.getElementById('telegram_channel_id').value = s.telegram_channel_id || '';
       document.getElementById('telegram_signature').value = s.telegram_signature || '';
@@ -2418,6 +2477,8 @@ def admin_setup_page(request: Request):
       const tgMask = document.getElementById('telegramTokenMask');
       if (tgMask) tgMask.textContent = s.telegram_bot_token_set ? '******** (saved)' : 'not set';
       toggleTelegramTokenEdit(!s.telegram_bot_token_set);
+      toggleStep1Edit(!(s.channel_name || s.channel_theme));
+      toggleStep2Edit(!s.audience_description);
 
       const missing = [];
       if (!s.telegram_bot_token_set) missing.push('bot token');
@@ -2439,8 +2500,9 @@ def admin_setup_page(request: Request):
       const out = await resp.json();
       if (!resp.ok) return alert(out.detail || 'save step1 failed');
       setStatus('Step 1 saved');
+      flashSaveStatus('step1_save_status', 'Saved');
       document.getElementById('openrouter_api_key').value = '';
-      loadState();
+      await loadState();
     }
     async function analyzeStep2(){
       const body = { audience_description: (document.getElementById('audience_description').value || '').trim() };
@@ -2457,7 +2519,8 @@ def admin_setup_page(request: Request):
       const out = await resp.json();
       if (!resp.ok) return alert(out.detail || 'save audience failed');
       setStatus('Audience saved');
-      loadState();
+      flashSaveStatus('step2_save_status', 'Saved');
+      await loadState();
     }
     async function saveTelegram(){
       const body = {

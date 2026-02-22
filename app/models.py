@@ -309,6 +309,9 @@ class TrainingEvent(Base):
     features_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     reason_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     reason_tags: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    reason_positive_tags: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    reason_negative_tags: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    reason_sentiment: Mapped[str | None] = mapped_column(String(16), nullable=True)  # positive|negative|mixed|neutral
     rule_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     ml_score_at_decision: Mapped[float | None] = mapped_column(Float, nullable=True)
     model_version: Mapped[str | None] = mapped_column(String(64), nullable=True)

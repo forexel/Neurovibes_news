@@ -83,6 +83,19 @@ EDITOR_CHOICE_FEATURES = [
     "tag_hype",
     "tag_too_local",
     "tag_duplicate",
+    # polarity-aware reason tags (same tag can be positive or negative in different decisions)
+    "tag_pos_hype",
+    "tag_neg_hype",
+    "tag_pos_mass_audience",
+    "tag_neg_not_mass_audience",
+    "tag_pos_business_impact",
+    "tag_neg_no_business_use",
+    "tag_pos_future_trend",
+    "tag_neg_short_lived",
+    "tag_neg_too_technical",
+    "tag_neg_low_significance",
+    "tag_pos_market_signal",
+    "tag_neg_too_local",
 ]
 _TAGS = [
     "breakthrough",
@@ -131,6 +144,29 @@ _BASE_REASON_TAGS_RU: dict[str, str] = {
     "ru_relevance": "Релевантно для РФ / русскоязычной аудитории",
 }
 _AUDIENCE_BASE_TAGS = ["mass_audience", "business", "future", "hype", "technology", "security", "practical", "ru_relevance"]
+_POSITIVE_DEFAULT_TAGS = {
+    "breakthrough",
+    "product_release",
+    "practical_tool",
+    "global_shift",
+    "market_signal",
+    "future_trend",
+    "mass_audience",
+    "business_impact",
+    "ru_relevance",
+    "benchmark",
+    "regulation",
+}
+_NEGATIVE_DEFAULT_TAGS = {
+    "too_local",
+    "duplicate",
+    "too_technical",
+    "not_mass_audience",
+    "short_lived",
+    "low_significance",
+    "no_business_use",
+}
+_AMBIVALENT_TAGS = {"hype", "funding"}
 
 
 def _sigmoid(z: float) -> float:
@@ -198,6 +234,97 @@ def _guess_reason_tags(reason_text: str | None) -> list[str]:
         if any(k in text for k in keywords):
             tags.append(tag)
     return sorted(set(tags))
+
+
+def _guess_reason_tag_polarity(reason_text: str | None, decision: str | None = None, tags: list[str] | None = None) -> dict:
+    text = (reason_text or "").lower()
+    d = (decision or "").strip().lower()
+    union_tags = sorted(set(tags or _guess_reason_tags(reason_text)))
+    pos: set[str] = set()
+    neg: set[str] = set()
+
+    # Default polarity by tag semantics.
+    for t in union_tags:
+        if t in _POSITIVE_DEFAULT_TAGS:
+            pos.add(t)
+        if t in _NEGATIVE_DEFAULT_TAGS:
+            neg.add(t)
+
+    # Ambivalent tags: infer from wording and decision context.
+    if "hype" in union_tags:
+        positive_hype_cues = [
+            "хайпов", "вау", "резонанс", "модн", "интересно пользователям", "много кому интересно", "филлер", "горяч"
+        ]
+        negative_hype_cues = [
+            "шум", "скучн", "не очень интересно", "завтра никто не вспомнит", "точечная новость", "короткоигра"
+        ]
+        if any(c in text for c in positive_hype_cues):
+            pos.add("hype")
+        if any(c in text for c in negative_hype_cues):
+            neg.add("hype")
+        if "hype" not in pos and "hype" not in neg:
+            if d in {"publish", "top_pick"}:
+                pos.add("hype")
+            elif d in {"hide", "delete"}:
+                neg.add("hype")
+
+    if "funding" in union_tags:
+        negative_funding_cues = ["про инвестиции", "инвестиции пока не нужно", "не наш фокус", "слишком инвестиц"]
+        positive_funding_cues = ["большая сумма", "сигнал рынку", "важно для бизнеса", "повлияет на рынок"]
+        if any(c in text for c in positive_funding_cues):
+            pos.add("funding")
+        if any(c in text for c in negative_funding_cues):
+            neg.add("funding")
+        if "funding" not in pos and "funding" not in neg:
+            if d in {"publish", "top_pick"}:
+                pos.add("funding")
+            elif d in {"hide", "delete"}:
+                neg.add("funding")
+
+    # Explicit positive/negative wording can override / add signal.
+    if any(x in text for x in ["не интересно массов", "не для массов", "обывателям не", "массе не интересно"]):
+        neg.add("not_mass_audience")
+    if any(x in text for x in ["массов", "широкой аудитории", "обычным людям", "пользователям интересно"]):
+        pos.add("mass_audience")
+    if any(x in text for x in ["не понятно как использовать бизнесу", "непонятна польза", "нет пользы для бизнеса"]):
+        neg.add("no_business_use")
+    if any(x in text for x in ["повлияет на бизнес", "расходы на проекты", "бизнесменам может быть интересно", "важно для бизнеса"]):
+        pos.add("business_impact")
+    if any(x in text for x in ["завтра никто не вспомнит", "короткоигра", "точечная новость"]):
+        neg.add("short_lived")
+    if any(x in text for x in ["слишком техническ", "гиковск", "узконише"]):
+        neg.add("too_technical")
+
+    # By decision, negative examples usually indicate "minus" rationale if still unresolved.
+    if d in {"hide", "delete"}:
+        for t in union_tags:
+            if t not in pos and t not in _POSITIVE_DEFAULT_TAGS:
+                neg.add(t)
+    elif d in {"publish", "top_pick"}:
+        for t in union_tags:
+            if t not in neg and t not in _NEGATIVE_DEFAULT_TAGS:
+                pos.add(t)
+
+    # Keep only known tags.
+    known = set(_TAGS)
+    pos = {t for t in pos if t in known}
+    neg = {t for t in neg if t in known}
+    # allow mixed (same tag can be both in nuanced phrases), do not subtract
+    all_tags = sorted(set(union_tags) | pos | neg)
+    if pos and neg:
+        sentiment = "mixed"
+    elif pos:
+        sentiment = "positive"
+    elif neg:
+        sentiment = "negative"
+    else:
+        sentiment = "neutral"
+    return {
+        "tags": sorted(all_tags),
+        "positive_tags": sorted(pos),
+        "negative_tags": sorted(neg),
+        "sentiment": sentiment,
+    }
 
 
 def _normalize_reason_text(reason_text: str | None) -> str:
@@ -273,7 +400,14 @@ def _audience_pref_features_from_tags(tags: list[str] | None) -> dict[str, float
     }
 
 
-def _feature_snapshot(article: Article, score: Score | None, reason_tags: list[str] | None = None, audience_tags: list[str] | None = None) -> dict:
+def _feature_snapshot(
+    article: Article,
+    score: Score | None,
+    reason_tags: list[str] | None = None,
+    audience_tags: list[str] | None = None,
+    reason_positive_tags: list[str] | None = None,
+    reason_negative_tags: list[str] | None = None,
+) -> dict:
     f = (score.features or {}) if score and isinstance(score.features, dict) else {}
     now = datetime.utcnow()
     published = article.published_at or article.created_at or now
@@ -319,8 +453,12 @@ def _feature_snapshot(article: Article, score: Score | None, reason_tags: list[s
     }
     out.update(_audience_pref_features_from_tags(audience_tags))
     tags = set(reason_tags or [])
+    pos_tags = set(reason_positive_tags or [])
+    neg_tags = set(reason_negative_tags or [])
     for tag in _TAGS:
         out[f"tag_{tag}"] = 1.0 if tag in tags else 0.0
+        out[f"tag_pos_{tag}"] = 1.0 if tag in pos_tags else 0.0
+        out[f"tag_neg_{tag}"] = 1.0 if tag in neg_tags else 0.0
     return out
 
 
@@ -353,8 +491,12 @@ def log_training_event(
     if decision not in {"publish", "top_pick", "hide", "delete", "defer", "skip"}:
         return {"ok": False, "error": "bad_decision"}
     tags = sorted(set([t for t in (reason_tags or []) if t]))
-    if not tags and reason_text:
-        tags = _guess_reason_tags(reason_text)
+    cls = _guess_reason_tag_polarity(reason_text, decision=decision, tags=tags or None)
+    if not tags:
+        tags = list(cls.get("tags") or [])
+    pos_tags = [t for t in (cls.get("positive_tags") or []) if t]
+    neg_tags = [t for t in (cls.get("negative_tags") or []) if t]
+    sentiment = str(cls.get("sentiment") or "neutral")
 
     with session_scope() as session:
         _ensure_reason_tag_catalog(session)
@@ -364,7 +506,14 @@ def log_training_event(
         score = session.get(Score, int(article_id))
         audience_desc, audience_tags = _latest_workspace_audience(session, user_id=user_id)
         _ = audience_desc  # reserved for future use in feature engineering
-        features = _feature_snapshot(article, score, tags, audience_tags=audience_tags)
+        features = _feature_snapshot(
+            article,
+            score,
+            tags,
+            audience_tags=audience_tags,
+            reason_positive_tags=pos_tags,
+            reason_negative_tags=neg_tags,
+        )
         candidate_ids = _candidate_ids_for_article(session, article)
 
         # enrich context-dependent fields using current candidate set
@@ -420,6 +569,9 @@ def log_training_event(
             features_json=features,
             reason_text=(reason_text or "").strip() or None,
             reason_tags=tags or None,
+            reason_positive_tags=pos_tags or None,
+            reason_negative_tags=neg_tags or None,
+            reason_sentiment=sentiment,
             rule_score=float(score.final_score or 0.0) if score else None,
             ml_score_at_decision=ml_score,
             model_version=(ml_meta.get("version") if ml_meta.get("ok") else None),
@@ -431,7 +583,15 @@ def log_training_event(
         )
         session.add(rec)
         session.flush()
-        return {"ok": True, "id": int(rec.id), "reason_tags": tags, "model_version": rec.model_version}
+        return {
+            "ok": True,
+            "id": int(rec.id),
+            "reason_tags": tags,
+            "reason_positive_tags": pos_tags,
+            "reason_negative_tags": neg_tags,
+            "reason_sentiment": sentiment,
+            "model_version": rec.model_version,
+        }
 
 
 def rebuild_preference_profile(min_feedback: int = 20) -> dict:
@@ -665,8 +825,22 @@ def build_editor_choice_dataset(days_back: int = 30) -> dict:
     for r in rows:
         feats = dict(r.features_json or {})
         # If reason tags were updated later, ensure one-hot is present.
+        raw_tags = r.reason_tags or []
+        if isinstance(raw_tags, str):
+            raw_tags = [raw_tags] if raw_tags.strip() and raw_tags.strip().lower() not in {"null", "none"} else []
+        raw_pos = r.reason_positive_tags or []
+        if isinstance(raw_pos, str):
+            raw_pos = [raw_pos] if raw_pos.strip() and raw_pos.strip().lower() not in {"null", "none"} else []
+        raw_neg = r.reason_negative_tags or []
+        if isinstance(raw_neg, str):
+            raw_neg = [raw_neg] if raw_neg.strip() and raw_neg.strip().lower() not in {"null", "none"} else []
+        union_tags = set([str(x) for x in raw_tags if str(x).strip()])
+        pos_tags = set([str(x) for x in raw_pos if str(x).strip()])
+        neg_tags = set([str(x) for x in raw_neg if str(x).strip()])
         for tag in _TAGS:
-            feats.setdefault(f"tag_{tag}", 1.0 if tag in set(r.reason_tags or []) else 0.0)
+            feats.setdefault(f"tag_{tag}", 1.0 if tag in union_tags else 0.0)
+            feats.setdefault(f"tag_pos_{tag}", 1.0 if tag in pos_tags else 0.0)
+            feats.setdefault(f"tag_neg_{tag}", 1.0 if tag in neg_tags else 0.0)
         vec = [float(feats.get(k, 0.0) or 0.0) for k in EDITOR_CHOICE_FEATURES]
         X.append(vec)
         # label target for "quality/choose eventually": publish=1, others=0.
@@ -924,17 +1098,37 @@ def backfill_training_and_restore_unreasoned_archived(
                 ).first()
                 if exists:
                     row = session.get(TrainingEvent, int(exists))
-                    if row and (not row.reason_tags) and reason:
-                        tags = _guess_reason_tags(reason)
-                        if tags:
-                            row.reason_tags = tags
+                    if row and reason:
+                        cls = _guess_reason_tag_polarity(reason, decision=decision)
+                        changed = False
+                        if (not row.reason_tags) and cls.get("tags"):
+                            row.reason_tags = cls.get("tags") or None
+                            changed = True
+                        if (not row.reason_positive_tags) and cls.get("positive_tags"):
+                            row.reason_positive_tags = cls.get("positive_tags") or None
+                            changed = True
+                        if (not row.reason_negative_tags) and cls.get("negative_tags"):
+                            row.reason_negative_tags = cls.get("negative_tags") or None
+                            changed = True
+                        if not (row.reason_sentiment or "").strip():
+                            row.reason_sentiment = str(cls.get("sentiment") or "neutral")
+                            changed = True
+                        if changed:
                             retagged_existing += 1
                     already_present += 1
                     continue
                 try:
                     score = session.get(Score, int(a.id))
                     _aud_desc, aud_tags = _latest_workspace_audience(session, user_id=None)
-                    features = _feature_snapshot(a, score, _guess_reason_tags(reason), audience_tags=aud_tags)
+                    cls = _guess_reason_tag_polarity(reason, decision=decision)
+                    features = _feature_snapshot(
+                        a,
+                        score,
+                        cls.get("tags"),
+                        audience_tags=aud_tags,
+                        reason_positive_tags=cls.get("positive_tags"),
+                        reason_negative_tags=cls.get("negative_tags"),
+                    )
                     ml_meta = predict_editor_choice_prob(features)
                     published_time = a.published_at or a.created_at
                     event_time = a.archived_at or a.updated_at or datetime.utcnow()
@@ -954,7 +1148,10 @@ def backfill_training_and_restore_unreasoned_archived(
                             candidate_set_ids=[int(a.id)],
                             features_json=features,
                             reason_text=reason,
-                            reason_tags=_guess_reason_tags(reason) or None,
+                            reason_tags=cls.get("tags") or None,
+                            reason_positive_tags=cls.get("positive_tags") or None,
+                            reason_negative_tags=cls.get("negative_tags") or None,
+                            reason_sentiment=str(cls.get("sentiment") or "negative"),
                             rule_score=(float(score.final_score or 0.0) if score else None),
                             ml_score_at_decision=(float(ml_meta.get("prob")) if ml_meta.get("ok") else None),
                             model_version=(ml_meta.get("version") if ml_meta.get("ok") else None),
@@ -1023,9 +1220,17 @@ def backfill_training_and_restore_unreasoned_archived(
 
             try:
                 score = session.get(Score, int(a.id))
-                tags = _guess_reason_tags(reason)
+                cls = _guess_reason_tag_polarity(reason, decision="publish")
+                tags = list(cls.get("tags") or [])
                 _aud_desc, aud_tags = _latest_workspace_audience(session, user_id=None)
-                features = _feature_snapshot(a, score, tags, audience_tags=aud_tags)
+                features = _feature_snapshot(
+                    a,
+                    score,
+                    tags,
+                    audience_tags=aud_tags,
+                    reason_positive_tags=cls.get("positive_tags"),
+                    reason_negative_tags=cls.get("negative_tags"),
+                )
                 ml_meta = predict_editor_choice_prob(features)
                 published_time = a.published_at or a.created_at
                 event_time = a.updated_at or published_time or datetime.utcnow()
@@ -1046,6 +1251,9 @@ def backfill_training_and_restore_unreasoned_archived(
                         features_json=features,
                         reason_text=reason,
                         reason_tags=tags or None,
+                        reason_positive_tags=cls.get("positive_tags") or None,
+                        reason_negative_tags=cls.get("negative_tags") or None,
+                        reason_sentiment=str(cls.get("sentiment") or "positive"),
                         rule_score=(float(score.final_score or 0.0) if score else None),
                         ml_score_at_decision=(float(ml_meta.get("prob")) if ml_meta.get("ok") else None),
                         model_version=(ml_meta.get("version") if ml_meta.get("ok") else None),
@@ -1076,7 +1284,7 @@ def backfill_training_and_restore_unreasoned_archived(
 
 def reretag_training_event_reasons(limit: int = 50000, overwrite: bool = False) -> dict:
     """
-    Recompute reason_tags from reason_text for existing training_events.
+    Recompute reason_tags (+positive/+negative split) from reason_text for existing training_events.
     By default updates only rows with empty/null tags.
     """
     scanned = 0
@@ -1096,13 +1304,23 @@ def reretag_training_event_reasons(limit: int = 50000, overwrite: bool = False) 
                 skipped_no_text += 1
                 continue
             old_tags = list(row.reason_tags or [])
-            if old_tags and not overwrite:
+            has_split = bool((row.reason_positive_tags or []) or (row.reason_negative_tags or []) or (row.reason_sentiment or "").strip())
+            if old_tags and has_split and not overwrite:
                 continue
-            new_tags = _guess_reason_tags(text)
-            if new_tags == old_tags:
+            cls = _guess_reason_tag_polarity(text, decision=row.decision)
+            new_tags = list(cls.get("tags") or [])
+            if (
+                new_tags == old_tags
+                and list(row.reason_positive_tags or []) == list(cls.get("positive_tags") or [])
+                and list(row.reason_negative_tags or []) == list(cls.get("negative_tags") or [])
+                and (row.reason_sentiment or "neutral") == str(cls.get("sentiment") or "neutral")
+            ):
                 unchanged += 1
                 continue
             row.reason_tags = new_tags or None
+            row.reason_positive_tags = cls.get("positive_tags") or None
+            row.reason_negative_tags = cls.get("negative_tags") or None
+            row.reason_sentiment = str(cls.get("sentiment") or "neutral")
             updated += 1
     return {
         "ok": True,
@@ -1198,12 +1416,17 @@ def reclassify_training_reasons_llm(limit: int = 300, only_null: bool = True, al
         for r in rows_all:
             if only_null:
                 rv = r.reason_tags
-                missing = (
+                missing_union = (
                     rv is None
                     or (isinstance(rv, list) and len(rv) == 0)
                     or (isinstance(rv, str) and rv.strip().lower() in {"", "null", "none"})
                 )
-                if not missing:
+                missing_split = (
+                    not (r.reason_positive_tags or [])
+                    and not (r.reason_negative_tags or [])
+                    and not str(r.reason_sentiment or "").strip()
+                )
+                if not (missing_union or missing_split):
                     continue
             rows.append(r)
             if len(rows) >= max(1, int(limit)):
@@ -1218,9 +1441,18 @@ def reclassify_training_reasons_llm(limit: int = 300, only_null: bool = True, al
             created_tags = 0
             for r in rows:
                 reason = _normalize_reason_text(r.reason_text)
-                tags = _guess_reason_tags(reason)
-                if tags != list(r.reason_tags or []):
+                cls = _guess_reason_tag_polarity(reason, decision=r.decision)
+                tags = list(cls.get("tags") or [])
+                if (
+                    tags != list(r.reason_tags or [])
+                    or list(r.reason_positive_tags or []) != list(cls.get("positive_tags") or [])
+                    or list(r.reason_negative_tags or []) != list(cls.get("negative_tags") or [])
+                    or (r.reason_sentiment or "neutral") != str(cls.get("sentiment") or "neutral")
+                ):
                     r.reason_tags = tags or None
+                    r.reason_positive_tags = cls.get("positive_tags") or None
+                    r.reason_negative_tags = cls.get("negative_tags") or None
+                    r.reason_sentiment = str(cls.get("sentiment") or "neutral")
                     updated += 1
             return {
                 "ok": True,
@@ -1269,7 +1501,10 @@ def reclassify_training_reasons_llm(limit: int = 300, only_null: bool = True, al
                                         "multi_label": True,
                                         "can_suggest_new_tags": bool(allow_new_tags),
                                         "output": {
+                                            "positive_tags": ["slug1"],
+                                            "negative_tags": ["slug2"],
                                             "tags": ["slug1", "slug2"],
+                                            "reason_sentiment": "positive|negative|mixed|neutral",
                                             "new_tags": [{"slug": "new_slug", "title_ru": "Русское название"}],
                                             "confidence": 0.0,
                                         },
@@ -1286,8 +1521,13 @@ def reclassify_training_reasons_llm(limit: int = 300, only_null: bool = True, al
             except Exception:
                 data = {}
 
-            tags = [str(x).strip() for x in (data.get("tags") or []) if str(x).strip()]
-            tags = sorted(set(tags + _guess_reason_tags(reason)))
+            llm_pos = [str(x).strip() for x in (data.get("positive_tags") or []) if str(x).strip()]
+            llm_neg = [str(x).strip() for x in (data.get("negative_tags") or []) if str(x).strip()]
+            llm_all = [str(x).strip() for x in (data.get("tags") or []) if str(x).strip()]
+            base_cls = _guess_reason_tag_polarity(reason, decision=r.decision)
+            pos_tags = sorted(set(llm_pos + list(base_cls.get("positive_tags") or [])))
+            neg_tags = sorted(set(llm_neg + list(base_cls.get("negative_tags") or [])))
+            tags = sorted(set(llm_all + pos_tags + neg_tags + list(base_cls.get("tags") or [])))
 
             if allow_new_tags:
                 for item in (data.get("new_tags") or []):
@@ -1310,10 +1550,24 @@ def reclassify_training_reasons_llm(limit: int = 300, only_null: bool = True, al
                         tag_slugs.append(slug)
                         created_tags += 1
 
-            tags = [t for t in tags if t in set(tag_slugs)]
+            allowed = set(tag_slugs)
+            tags = [t for t in tags if t in allowed]
+            pos_tags = [t for t in pos_tags if t in allowed]
+            neg_tags = [t for t in neg_tags if t in allowed]
+            sentiment = str(data.get("reason_sentiment") or base_cls.get("sentiment") or "neutral").strip().lower()
+            if sentiment not in {"positive", "negative", "mixed", "neutral"}:
+                sentiment = str(base_cls.get("sentiment") or "neutral")
             new_val = tags or None
-            if new_val != (r.reason_tags or None):
+            if (
+                new_val != (r.reason_tags or None)
+                or (pos_tags or None) != (r.reason_positive_tags or None)
+                or (neg_tags or None) != (r.reason_negative_tags or None)
+                or (sentiment or None) != (r.reason_sentiment or None)
+            ):
                 r.reason_tags = new_val
+                r.reason_positive_tags = pos_tags or None
+                r.reason_negative_tags = neg_tags or None
+                r.reason_sentiment = sentiment
                 updated += 1
 
         return {
