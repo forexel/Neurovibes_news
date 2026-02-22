@@ -26,6 +26,7 @@ from app.models import (
     SelectionDecision,
     TelegramReviewJob,
     TrainingEvent,
+    User,
     UserWorkspace,
 )
 from app.services.runtime_settings import get_runtime_float
@@ -503,8 +504,16 @@ def log_training_event(
         article = session.get(Article, int(article_id))
         if not article:
             return {"ok": False, "error": "article_not_found"}
+        # Telegram callback user IDs are external IDs and usually do not match local `users.id`.
+        # Keep FK integrity by storing only a valid local user id.
+        local_user_id: int | None = None
+        try:
+            if user_id is not None and session.get(User, int(user_id)):
+                local_user_id = int(user_id)
+        except Exception:
+            local_user_id = None
         score = session.get(Score, int(article_id))
-        audience_desc, audience_tags = _latest_workspace_audience(session, user_id=user_id)
+        audience_desc, audience_tags = _latest_workspace_audience(session, user_id=local_user_id)
         _ = audience_desc  # reserved for future use in feature engineering
         features = _feature_snapshot(
             article,
@@ -560,7 +569,7 @@ def log_training_event(
         hour_bucket = (article.selected_hour_bucket_utc or (published_time or event_time).replace(minute=0, second=0, microsecond=0))
 
         rec = TrainingEvent(
-            user_id=user_id,
+            user_id=local_user_id,
             article_id=int(article_id),
             decision=decision,
             label=int(1 if label else 0),
