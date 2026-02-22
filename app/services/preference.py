@@ -23,6 +23,7 @@ from app.models import (
     RankingExample,
     Score,
     SelectionDecision,
+    TelegramReviewJob,
     TrainingEvent,
 )
 from app.services.runtime_settings import get_runtime_float
@@ -112,14 +113,14 @@ def _guess_reason_tags(reason_text: str | None) -> list[str]:
     tags: list[str] = []
     rules = {
         "breakthrough": ["прорыв", "breakthrough", "революц", "first", "впервые"],
-        "funding": ["инвест", "funding", "m&a", "сделк", "acquire", "раунд"],
-        "product_release": ["релиз", "release", "launch", "launched", "update", "версия"],
+        "funding": ["инвест", "funding", "m&a", "сделк", "acquire", "раунд", "финанс", "valuation", "оценк"],
+        "product_release": ["релиз", "release", "launch", "launched", "update", "версия", "запуск", "доступн", "rollout"],
         "benchmark": ["benchmark", "бенчмарк", "точност", "latency", "скорость", "сравнен"],
-        "regulation": ["регуля", "закон", "policy", "compliance", "безопас", "fraud", "мошенн"],
-        "practical_tool": ["практич", "tool", "инструмент", "для бизнеса", "workflow", "use case"],
-        "global_shift": ["рынок", "global", "стратег", "монопол", "platform shift", "сигнал"],
-        "hype": ["хайп", "скучн", "мнение", "opinion", "noise", "неважно"],
-        "too_local": ["локал", "india", "индия", "узко", "too local", "не для нашей"],
+        "regulation": ["регуля", "закон", "policy", "compliance", "безопас", "fraud", "мошенн", "privacy", "данных", "security"],
+        "practical_tool": ["практич", "tool", "инструмент", "для бизнеса", "workflow", "use case", "полезн", "применим", "можно использовать"],
+        "global_shift": ["рынок", "global", "стратег", "монопол", "platform shift", "сигнал", "крупный игрок", "google", "openai", "meta", "nvidia"],
+        "hype": ["хайп", "скучн", "мнение", "opinion", "noise", "неважно", "не очень интересно", "массе не интересно", "гиковск", "слишком техническ", "нудн"],
+        "too_local": ["локал", "india", "индия", "узко", "too local", "не для нашей", "для рф не", "не актуален для рф", "далеко от нас"],
         "duplicate": ["дубл", "повтор", "duplicate", "already"],
     }
     for tag, keywords in rules.items():
@@ -722,6 +723,8 @@ def backfill_training_and_restore_unreasoned_archived(
     backfilled = 0
     restored = 0
     already_present = 0
+    published_backfilled = 0
+    retagged_existing = 0
     errors = 0
 
     with session_scope() as session:
@@ -772,6 +775,12 @@ def backfill_training_and_restore_unreasoned_archived(
                     .limit(1)
                 ).first()
                 if exists:
+                    row = session.get(TrainingEvent, int(exists))
+                    if row and (not row.reason_tags) and reason:
+                        tags = _guess_reason_tags(reason)
+                        if tags:
+                            row.reason_tags = tags
+                            retagged_existing += 1
                     already_present += 1
                     continue
                 try:
@@ -821,12 +830,135 @@ def backfill_training_and_restore_unreasoned_archived(
             a.updated_at = datetime.utcnow()
             restored += 1
 
+        # Backfill positive examples from published articles with editor reasons.
+        published_rows = session.scalars(
+            select(Article)
+            .where(Article.status == ArticleStatus.PUBLISHED)
+            .order_by(Article.updated_at.desc())
+            .limit(max_articles)
+        ).all()
+        for a in published_rows:
+            exists_pub = session.scalars(
+                select(TrainingEvent.id)
+                .where(
+                    TrainingEvent.article_id == int(a.id),
+                    TrainingEvent.decision == "publish",
+                )
+                .limit(1)
+            ).first()
+            if exists_pub:
+                continue
+
+            # Prefer explicit editor feedback, fallback to telegram review job reason.
+            fb = session.scalars(
+                select(EditorFeedback)
+                .where(EditorFeedback.article_id == int(a.id))
+                .order_by(EditorFeedback.created_at.desc())
+                .limit(1)
+            ).first()
+            tj = session.scalars(
+                select(TelegramReviewJob)
+                .where(TelegramReviewJob.article_id == int(a.id))
+                .order_by(TelegramReviewJob.updated_at.desc(), TelegramReviewJob.id.desc())
+                .limit(1)
+            ).first()
+            reason = ""
+            if fb and (fb.explanation_text or "").strip():
+                reason = str(fb.explanation_text or "").strip()
+            elif tj and (tj.decision_reason or "").strip():
+                reason = str(tj.decision_reason or "").strip()
+
+            # If no reason at all, skip for now (user wants reason-based learning).
+            if not reason:
+                continue
+
+            try:
+                score = session.get(Score, int(a.id))
+                tags = _guess_reason_tags(reason)
+                features = _feature_snapshot(a, score, tags)
+                ml_meta = predict_editor_choice_prob(features)
+                published_time = a.published_at or a.created_at
+                event_time = a.updated_at or published_time or datetime.utcnow()
+                delay_minutes = None
+                if published_time:
+                    try:
+                        delay_minutes = max(0, int((event_time - published_time).total_seconds() // 60))
+                    except Exception:
+                        delay_minutes = None
+                session.add(
+                    TrainingEvent(
+                        user_id=None,
+                        article_id=int(a.id),
+                        decision="publish",
+                        label=1,
+                        hour_bucket=(a.selected_hour_bucket_utc or (published_time or event_time).replace(minute=0, second=0, microsecond=0)),
+                        candidate_set_ids=[int(a.id)],
+                        features_json=features,
+                        reason_text=reason,
+                        reason_tags=tags or None,
+                        rule_score=(float(score.final_score or 0.0) if score else None),
+                        ml_score_at_decision=(float(ml_meta.get("prob")) if ml_meta.get("ok") else None),
+                        model_version=(ml_meta.get("version") if ml_meta.get("ok") else None),
+                        override=False,
+                        event_time=event_time,
+                        article_published_at=published_time,
+                        delay_minutes=delay_minutes,
+                        final_outcome="published",
+                        created_at=event_time,
+                    )
+                )
+                published_backfilled += 1
+            except Exception:
+                errors += 1
+
     return {
         "ok": True,
         "scanned_archived": scanned,
         "backfilled_training_events": backfilled,
+        "published_backfilled": published_backfilled,
         "already_present": already_present,
+        "retagged_existing": retagged_existing,
         "restored_without_reason": restored,
         "errors": errors,
         "restore_status": str(restore_status.value if isinstance(restore_status, ArticleStatus) else restore_status),
+    }
+
+
+def reretag_training_event_reasons(limit: int = 50000, overwrite: bool = False) -> dict:
+    """
+    Recompute reason_tags from reason_text for existing training_events.
+    By default updates only rows with empty/null tags.
+    """
+    scanned = 0
+    updated = 0
+    skipped_no_text = 0
+    unchanged = 0
+    with session_scope() as session:
+        rows = session.scalars(
+            select(TrainingEvent)
+            .order_by(TrainingEvent.id.asc())
+            .limit(max(1, int(limit)))
+        ).all()
+        for row in rows:
+            scanned += 1
+            text = (row.reason_text or "").strip()
+            if not text:
+                skipped_no_text += 1
+                continue
+            old_tags = list(row.reason_tags or [])
+            if old_tags and not overwrite:
+                continue
+            new_tags = _guess_reason_tags(text)
+            if new_tags == old_tags:
+                unchanged += 1
+                continue
+            row.reason_tags = new_tags or None
+            updated += 1
+    return {
+        "ok": True,
+        "scanned": scanned,
+        "updated": updated,
+        "unchanged": unchanged,
+        "skipped_no_text": skipped_no_text,
+        "overwrite": bool(overwrite),
     }

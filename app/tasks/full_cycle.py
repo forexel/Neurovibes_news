@@ -17,9 +17,10 @@ from app.services.preference import (
     backfill_training_and_restore_unreasoned_archived,
     build_editor_choice_dataset,
     build_ranking_dataset,
-    train_editor_choice_model,
     detect_preference_drift,
+    reretag_training_event_reasons,
     rebuild_preference_profile,
+    train_editor_choice_model,
     train_ranking_model,
 )
 from app.services.scoring import run_scoring
@@ -107,6 +108,10 @@ def cmd_recover_manual_week() -> None:
     print(backfill_training_and_restore_unreasoned_archived())
 
 
+def cmd_rereview_reasons(limit: int, overwrite: bool) -> None:
+    print(reretag_training_event_reasons(limit=limit, overwrite=overwrite))
+
+
 def cmd_drift() -> None:
     print(detect_preference_drift())
 
@@ -160,6 +165,9 @@ def build_parser() -> argparse.ArgumentParser:
     editor_trainer = sub.add_parser("editor-choice-train", help="train editor choice model from training_events")
     editor_trainer.add_argument("--days", type=int, default=30)
     sub.add_parser("recover-manual-week", help="backfill delete/hide reasons to training_events and restore archived without reasons")
+    rr = sub.add_parser("rereview-reasons", help="re-tag reason_text into reason_tags for training_events")
+    rr.add_argument("--limit", type=int, default=50000)
+    rr.add_argument("--overwrite", action="store_true")
 
     sub.add_parser("drift", help="detect preference drift")
     sub.add_parser("auto-decision", help="decide publish candidate using trained model")
@@ -200,6 +208,8 @@ def main() -> None:
         cmd_editor_choice_trainer(days=args.days)
     elif args.command == "recover-manual-week":
         cmd_recover_manual_week()
+    elif args.command == "rereview-reasons":
+        cmd_rereview_reasons(limit=args.limit, overwrite=args.overwrite)
     elif args.command == "drift":
         cmd_drift()
     elif args.command == "auto-decision":
