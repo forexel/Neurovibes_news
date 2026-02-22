@@ -14,7 +14,9 @@ from app.services.embedding_dedup import process_embeddings_and_dedup
 from app.services.ingestion import run_backfill_batched, run_ingestion
 from app.services.pipeline import pick_hourly_top, run_hourly_cycle
 from app.services.preference import (
+    build_editor_choice_dataset,
     build_ranking_dataset,
+    train_editor_choice_model,
     detect_preference_drift,
     rebuild_preference_profile,
     train_ranking_model,
@@ -95,6 +97,11 @@ def cmd_trainer(days: int) -> None:
         print(train_ranking_model(ds["batch_id"]))
 
 
+def cmd_editor_choice_trainer(days: int) -> None:
+    print(build_editor_choice_dataset(days_back=days))
+    print(train_editor_choice_model(days_back=days))
+
+
 def cmd_drift() -> None:
     print(detect_preference_drift())
 
@@ -145,6 +152,9 @@ def build_parser() -> argparse.ArgumentParser:
     trainer = sub.add_parser("trainer", help="build dataset and train ranking model")
     trainer.add_argument("--days", type=int, default=14)
 
+    editor_trainer = sub.add_parser("editor-choice-train", help="train editor choice model from training_events")
+    editor_trainer.add_argument("--days", type=int, default=30)
+
     sub.add_parser("drift", help="detect preference drift")
     sub.add_parser("auto-decision", help="decide publish candidate using trained model")
     sub.add_parser("rebuild-profile", help="rebuild preference profile from feedback")
@@ -180,6 +190,8 @@ def main() -> None:
         cmd_loop(backfill_days=args.backfill_days, interval_seconds=args.interval_seconds, auto_publish=args.auto_publish)
     elif args.command == "trainer":
         cmd_trainer(days=args.days)
+    elif args.command == "editor-choice-train":
+        cmd_editor_choice_trainer(days=args.days)
     elif args.command == "drift":
         cmd_drift()
     elif args.command == "auto-decision":

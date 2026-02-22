@@ -14,7 +14,7 @@ from app.services.content_generation import generate_image_card, generate_ru_sum
 from app.services.embedding_dedup import process_embeddings_and_dedup
 from app.services.ingestion import enrich_summary_only_articles, run_ingestion_fast
 from app.services.llm import get_client, track_usage_from_response
-from app.services.preference import get_active_profile, save_selection_decision
+from app.services.preference import blended_editor_score, get_active_profile, log_training_event, save_selection_decision
 from app.services.scoring import run_scoring
 from app.services.telegram_context import telegram_timezone_name
 from app.services.runtime_settings import get_runtime_str
@@ -35,7 +35,12 @@ def _audience_adjusted_score(article: Article, score: Score) -> float:
         mult *= 0.90
     if article.content_mode == "summary_only":
         mult *= 0.85
-    return raw * mult
+    base = raw * mult
+    blend = blended_editor_score(base, score.features if isinstance(score.features, dict) else {})
+    if blend.get("ok"):
+        # convert 0..1 back to 0..10 for existing ranking comparisons
+        return float(blend["final"]) * 10.0
+    return base
 
 
 def _get_tz_name() -> str:
@@ -240,6 +245,17 @@ def pick_hourly_top() -> int | None:
             for a, s in top3
         ],
     )
+    try:
+        log_training_event(
+            article_id=selected_id,
+            decision="top_pick",
+            label=1,
+            reason_text=None,
+            reason_tags=None,
+            override=False,
+        )
+    except Exception:
+        pass
 
     return selected_id
 
@@ -434,7 +450,7 @@ def auto_select_by_profile(top_n: int = 5) -> dict:
     return {"ok": True, "article_id": selected_id, **explain}
 
 
-def run_hourly_cycle(backfill_days: int = 1) -> dict:
+def run_hourly_cycle(backfill_days: int = 1, select_hourly_top: bool = True) -> dict:
     # Fast ingestion: do not fetch full pages here.
     # Full text is handled by the explicit enrich step.
     def _stage(name: str):
@@ -474,11 +490,15 @@ def run_hourly_cycle(backfill_days: int = 1) -> dict:
     except Exception as exc:
         raise RuntimeError(f"cycle_stage_failed: scoring: {exc}") from exc
 
-    try:
-        _stage("pick_hourly_top")
-        top_id = pick_hourly_top()
-    except Exception as exc:
-        raise RuntimeError(f"cycle_stage_failed: pick_hourly_top: {exc}") from exc
+    top_id = None
+    if select_hourly_top:
+        try:
+            _stage("pick_hourly_top")
+            top_id = pick_hourly_top()
+        except Exception as exc:
+            raise RuntimeError(f"cycle_stage_failed: pick_hourly_top: {exc}") from exc
+    else:
+        _stage("pick_hourly_top_skipped")
 
     if top_id:
         try:
@@ -498,4 +518,5 @@ def run_hourly_cycle(backfill_days: int = 1) -> dict:
         "embedded": embedded,
         "scored": scored,
         "top_article_id": top_id,
+        "select_hourly_top": bool(select_hourly_top),
     }

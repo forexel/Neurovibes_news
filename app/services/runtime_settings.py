@@ -59,6 +59,8 @@ RUNTIME_DEFAULTS: dict[str, str] = {
     "telegram_channel_id": os.getenv("TELEGRAM_CHANNEL_ID", "").strip(),
     "telegram_signature": os.getenv("TELEGRAM_SIGNATURE", "@neuro_vibes_future").strip() or "@neuro_vibes_future",
     "timezone_name": os.getenv("TIMEZONE_NAME", "Europe/Moscow").strip() or "Europe/Moscow",
+    # ML ranking blend (0..0.8). Start low and increase gradually as dataset grows.
+    "ml_editor_choice_weight": "0.10",
 }
 
 

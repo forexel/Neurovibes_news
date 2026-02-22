@@ -31,6 +31,7 @@ from app.services.telegram_context import (
 )
 from app.services.runtime_settings import get_runtime_str
 from app.services.pipeline import pick_hourly_backfill, pick_hourly_top
+from app.services.preference import log_training_event
 from app.services.scoring import reclassify_all_articles
 
 _SQLI_PATTERNS = [
@@ -64,6 +65,13 @@ def _sanitize_reason_input(text: str) -> tuple[bool, str, str | None]:
         if pattern.search(cleaned):
             return False, "", "текст похож на небезопасный ввод"
     return True, cleaned, None
+
+
+def _safe_user_id_int(user_id: str | None) -> int | None:
+    try:
+        return int(str(user_id or "").strip())
+    except Exception:
+        return None
 
 
 def _bot_base_url() -> str | None:
@@ -1037,6 +1045,16 @@ def _handle_message(update: dict) -> dict:
                 job.status = "published" if out.get("ok") else "failed"
                 job.decision_reason = safe_text
                 job.updated_at = datetime.utcnow()
+        if out.get("ok"):
+            log_training_event(
+                article_id=article_id,
+                decision="publish",
+                label=1,
+                reason_text=safe_text,
+                user_id=_safe_user_id_int(user_id),
+                override=False,
+                final_outcome="published",
+            )
         # Keep chat clean: remove bot prompt + user's reply + original preview message.
         _delete_message(chat_id, prompt_id)
         if msg_id:
@@ -1063,6 +1081,14 @@ def _handle_message(update: dict) -> dict:
             if job:
                 job.decision_reason = safe_text
                 job.updated_at = datetime.utcnow()
+        log_training_event(
+            article_id=article_id,
+            decision="defer",
+            label=0,
+            reason_text=safe_text,
+            user_id=_safe_user_id_int(user_id),
+            final_outcome=None,
+        )
         _delete_message(chat_id, prompt_id)
         if msg_id:
             _delete_message(chat_id, msg_id)
@@ -1147,6 +1173,14 @@ def _handle_message(update: dict) -> dict:
             if job:
                 job.decision_reason = safe_text
                 job.updated_at = datetime.utcnow()
+        log_training_event(
+            article_id=article_id,
+            decision="defer",
+            label=0,
+            reason_text=safe_text,
+            user_id=_safe_user_id_int(user_id),
+            final_outcome=None,
+        )
         _delete_message(chat_id, prompt_id)
         if msg_id:
             _delete_message(chat_id, msg_id)
@@ -1173,6 +1207,15 @@ def _handle_message(update: dict) -> dict:
                 job.status = "deleted" if out.get("ok") else "failed"
                 job.decision_reason = safe_text
                 job.updated_at = datetime.utcnow()
+        if out.get("ok"):
+            log_training_event(
+                article_id=article_id,
+                decision="delete",
+                label=0,
+                reason_text=safe_text,
+                user_id=_safe_user_id_int(user_id),
+                final_outcome="deleted",
+            )
         _delete_message(chat_id, prompt_id)
         if msg_id:
             _delete_message(chat_id, msg_id)
@@ -1206,6 +1249,14 @@ def _handle_message(update: dict) -> dict:
                 job.status = "deleted"
                 job.decision_reason = safe_text
                 job.updated_at = datetime.utcnow()
+        log_training_event(
+            article_id=article_id,
+            decision="hide",
+            label=0,
+            reason_text=safe_text,
+            user_id=_safe_user_id_int(user_id),
+            final_outcome="hidden",
+        )
         _delete_message(chat_id, prompt_id)
         if msg_id:
             _delete_message(chat_id, msg_id)
@@ -1243,6 +1294,14 @@ def _handle_message(update: dict) -> dict:
                 job.status = "sent"
                 job.decision_reason = f"later: {safe_text}"
                 job.updated_at = datetime.utcnow()
+        log_training_event(
+            article_id=article_id,
+            decision="defer",
+            label=0,
+            reason_text=safe_text,
+            user_id=_safe_user_id_int(user_id),
+            final_outcome=None,
+        )
         _send_message(
             chat_id,
             "Поставил отложенную публикацию на +3 часа. Время можно изменить в карточке статьи (Schedule). Причину сохранил.",

@@ -295,6 +295,36 @@ class ModelArtifact(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class TrainingEvent(Base):
+    __tablename__ = "training_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    article_id: Mapped[int] = mapped_column(ForeignKey("articles.id"), nullable=False)
+    decision: Mapped[str] = mapped_column(String(32), nullable=False)  # publish|top_pick|hide|delete|defer|skip
+    label: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 1/0
+    hour_bucket: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    candidate_set_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    features_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    reason_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reason_tags: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    rule_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ml_score_at_decision: Mapped[float | None] = mapped_column(Float, nullable=True)
+    model_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    override: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    event_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    article_published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    delay_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    final_outcome: Mapped[str | None] = mapped_column(String(32), nullable=True)  # published|expired|deleted|hidden
+
+    __table_args__ = (
+        Index("ix_training_events_created", "created_at"),
+        Index("ix_training_events_article_created", "article_id", "created_at"),
+        Index("ix_training_events_decision_created", "decision", "created_at"),
+    )
+
+
 class DriftMetric(Base):
     __tablename__ = "drift_metrics"
 

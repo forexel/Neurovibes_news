@@ -26,6 +26,7 @@ from app.services.llm import get_workspace_api_key, set_user_api_key
 
 INTERVAL_SECONDS = int(os.getenv("WORKER_INTERVAL_SECONDS", "3600"))
 BACKFILL_DAYS = int(os.getenv("WORKER_BACKFILL_DAYS", "1"))
+SCRAPER_SLOT_MINUTES = max(1, int(os.getenv("SCRAPER_SLOT_MINUTES", "30")))
 # Telegram polling interval (controls how fast inline кнопки реагируют).
 TELEGRAM_POLL_INTERVAL_SECONDS = float(os.getenv("TELEGRAM_POLL_INTERVAL_SECONDS", "2"))
 # How often we check scheduled publications.
@@ -111,15 +112,36 @@ def _parse_publish_times(value: str) -> set[int]:
     return out
 
 
-def _run_cycle_thread(backfill_days: int) -> None:
+def _wall_clock_slot(now_ts: float, slot_minutes: int) -> tuple[str, bool, float]:
+    """
+    Align worker runs to wall-clock slots (:00/:30 by default), independent of process start time.
+    Returns (slot_key_utc, is_full_hour_boundary, next_slot_ts).
+    """
+    slot_seconds = max(60, int(slot_minutes) * 60)
+    slot_start_ts = int(now_ts // slot_seconds) * slot_seconds
+    dt_utc = datetime.fromtimestamp(slot_start_ts, tz=timezone.utc)
+    slot_key = dt_utc.strftime("%Y%m%d%H%M")
+    is_full_hour = dt_utc.minute == 0
+    return slot_key, is_full_hour, float(slot_start_ts + slot_seconds)
+
+
+def _run_cycle_thread(backfill_days: int, decision_mode: bool, slot_key: str) -> None:
     # Cycle runs in background so Telegram polling stays responsive.
     _load_default_user_context()
     _set_worker_kv("worker_cycle_state", "running")
     _set_worker_kv("worker_last_cycle_error", "")
     _set_worker_kv("worker_last_cycle_start_utc", datetime.now(timezone.utc).isoformat())
     try:
-        print("[worker] cycle start", {"backfill_days": backfill_days}, flush=True)
-        result = run_hourly_cycle(backfill_days=backfill_days)
+        print(
+            "[worker] cycle start",
+            {
+                "backfill_days": backfill_days,
+                "slot": slot_key,
+                "cycle_mode": "hour_close" if decision_mode else "half_hour_ingest",
+            },
+            flush=True,
+        )
+        result = run_hourly_cycle(backfill_days=backfill_days, select_hourly_top=decision_mode)
         print("[worker] cycle done", result, flush=True)
 
         top_article_id = result.get("top_article_id")
@@ -129,6 +151,9 @@ def _run_cycle_thread(backfill_days: int) -> None:
             inserted_total = int(sum(int(v or 0) for v in ingest.values()))
         except Exception:
             inserted_total = 0
+
+        if not decision_mode:
+            return
 
         if top_article_id:
             # Auto-mode: never spam the same hour slot. Force resend is only for manual backfill endpoints.
@@ -165,10 +190,18 @@ def _run_cycle_thread(backfill_days: int) -> None:
 def main() -> None:
     init_db()
     seed_sources()
-    print("[worker] started", {"interval_seconds": INTERVAL_SECONDS, "backfill_days": BACKFILL_DAYS}, flush=True)
+    print(
+        "[worker] started",
+        {
+            "interval_seconds": INTERVAL_SECONDS,
+            "backfill_days": BACKFILL_DAYS,
+            "scraper_slot_minutes": SCRAPER_SLOT_MINUTES,
+        },
+        flush=True,
+    )
     publish_minutes = _parse_publish_times(AUTO_PUBLISH_TIMES_UTC)
     published_slots: set[str] = set()
-    next_cycle_ts = 0.0
+    last_cycle_slot_key = ""
     cycle_thread: threading.Thread | None = None
     cycle_started_at: float | None = None
     last_publish_check_ts = 0.0
@@ -179,13 +212,17 @@ def main() -> None:
         if cycle_running and cycle_started_at and MAX_CYCLE_SECONDS > 0 and (now - cycle_started_at) > MAX_CYCLE_SECONDS:
             _set_worker_kv("worker_last_cycle_error", f"cycle_timeout>{MAX_CYCLE_SECONDS}s (still running)")
 
-        if now >= next_cycle_ts and not cycle_running:
-            # Compute next run immediately so UI can show it even while cycle is running.
-            next_cycle_ts = now + INTERVAL_SECONDS
-            _set_worker_kv("worker_next_cycle_utc", datetime.fromtimestamp(next_cycle_ts, tz=timezone.utc).isoformat())
+        current_slot_key, is_full_hour, next_slot_ts = _wall_clock_slot(now, SCRAPER_SLOT_MINUTES)
+        _set_worker_kv("worker_next_cycle_utc", datetime.fromtimestamp(next_slot_ts, tz=timezone.utc).isoformat())
+
+        if current_slot_key != last_cycle_slot_key and not cycle_running:
+            last_cycle_slot_key = current_slot_key
+            decision_mode = bool(is_full_hour)
+            _set_worker_kv("worker_last_cycle_slot", current_slot_key)
+            _set_worker_kv("worker_last_cycle_mode", "decision" if decision_mode else "ingest_only")
             cycle_thread = threading.Thread(
                 target=_run_cycle_thread,
-                args=(BACKFILL_DAYS,),
+                args=(BACKFILL_DAYS, decision_mode, current_slot_key),
                 daemon=True,
                 name="hourly-cycle",
             )
