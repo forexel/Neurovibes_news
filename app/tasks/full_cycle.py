@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import argparse
 import time
+from datetime import datetime, timedelta, timezone
 
+import httpx
 from sqlalchemy import select
 
 from app.db import init_db, session_scope
-from app.models import Article, ArticleStatus
+from app.models import Article, ArticleStatus, TelegramBotKV
 from app.services.auto_decision import decide_and_maybe_publish
 from app.services.bootstrap import seed_sources
 from app.services.content_generation import generate_image_card, generate_ru_summary
@@ -26,6 +28,7 @@ from app.services.preference import (
     train_ranking_model,
 )
 from app.services.scoring import run_scoring
+from app.services.telegram_context import load_workspace_telegram_context, telegram_bot_token, telegram_review_chat_id
 from app.services.telegram_publisher import publish_article, send_test_message
 
 
@@ -126,6 +129,131 @@ def cmd_drift() -> None:
     print(detect_preference_drift())
 
 
+def _kv_get(session, key: str, default: str = "") -> str:
+    row = session.get(TelegramBotKV, key)
+    return str(row.value if row else default)
+
+
+def _kv_set(session, key: str, value: str) -> None:
+    row = session.get(TelegramBotKV, key)
+    if row is None:
+        session.add(TelegramBotKV(key=key, value=str(value), updated_at=datetime.utcnow()))
+        return
+    row.value = str(value)
+    row.updated_at = datetime.utcnow()
+
+
+def _parse_iso_utc_maybe(v: str | None) -> datetime | None:
+    s = (v or "").strip()
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _send_watchdog_alert(text: str) -> dict:
+    load_workspace_telegram_context(None)
+    token = (telegram_bot_token() or "").strip()
+    chat_id = (telegram_review_chat_id() or "").strip()
+    if not token or not chat_id:
+        return {"ok": False, "error": "telegram_not_configured"}
+    try:
+        with httpx.Client(timeout=15) as client:
+            r = client.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat_id, "text": text[:3500]},
+            )
+        return {"ok": bool(r.status_code == 200), "status_code": r.status_code, "text": (r.text or "")[:400]}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def cmd_watchdog_check(
+    *,
+    max_running_seconds: int,
+    stale_next_cycle_seconds: int,
+    notify: bool,
+    dedupe_minutes: int,
+) -> int:
+    now = datetime.now(timezone.utc)
+    with session_scope() as session:
+        state = _kv_get(session, "worker_cycle_state", "")
+        last_start = _parse_iso_utc_maybe(_kv_get(session, "worker_last_cycle_start_utc", ""))
+        last_finish = _parse_iso_utc_maybe(_kv_get(session, "worker_last_cycle_finish_utc", ""))
+        last_error = _kv_get(session, "worker_last_cycle_error", "")
+        next_cycle = _parse_iso_utc_maybe(_kv_get(session, "worker_next_cycle_utc", ""))
+        last_slot = _kv_get(session, "worker_last_cycle_slot", "")
+        tg_offset = _kv_get(session, "telegram_review_offset", "")
+        last_article_slot = _kv_get(session, "telegram_review_last_article_slot", "")
+
+        problems: list[str] = []
+        if state.strip().lower() == "running" and last_start:
+            run_age = (now - last_start).total_seconds()
+            if run_age > max_running_seconds:
+                problems.append(f"worker stuck running for {int(run_age)}s since {last_start.isoformat()}")
+        if next_cycle:
+            lag = (now - next_cycle).total_seconds()
+            if lag > stale_next_cycle_seconds:
+                problems.append(f"next cycle overdue by {int(lag)}s (next={next_cycle.isoformat()})")
+        if last_error.strip():
+            problems.append(f"last cycle error: {last_error.strip()}")
+
+        healthy = len(problems) == 0
+        result = {
+            "ok": True,
+            "healthy": healthy,
+            "now_utc": now.isoformat(),
+            "worker_cycle_state": state,
+            "worker_last_cycle_slot": last_slot,
+            "worker_last_cycle_start_utc": last_start.isoformat() if last_start else None,
+            "worker_last_cycle_finish_utc": last_finish.isoformat() if last_finish else None,
+            "worker_next_cycle_utc": next_cycle.isoformat() if next_cycle else None,
+            "worker_last_cycle_error": last_error or None,
+            "telegram_review_offset": tg_offset or None,
+            "telegram_review_last_article_slot": last_article_slot or None,
+            "problems": problems,
+        }
+        print(result)
+
+        if healthy or not notify:
+            if healthy:
+                # Clear alert dedupe window on recovery.
+                _kv_set(session, "watchdog_pipeline_last_alert_sig", "")
+                _kv_set(session, "watchdog_pipeline_last_alert_at", "")
+            return 0 if healthy else 2
+
+        alert_sig = "|".join(problems)[:500]
+        prev_sig = _kv_get(session, "watchdog_pipeline_last_alert_sig", "")
+        prev_at = _parse_iso_utc_maybe(_kv_get(session, "watchdog_pipeline_last_alert_at", ""))
+        should_send = True
+        if prev_sig == alert_sig and prev_at:
+            if (now - prev_at) < timedelta(minutes=max(1, dedupe_minutes)):
+                should_send = False
+
+        if should_send:
+            text = (
+                "ALERT: pipeline watchdog detected issue\n"
+                f"- state: {state or '-'}\n"
+                f"- last_slot: {last_slot or '-'}\n"
+                f"- last_start_utc: {last_start.isoformat() if last_start else '-'}\n"
+                f"- last_finish_utc: {last_finish.isoformat() if last_finish else '-'}\n"
+                f"- next_cycle_utc: {next_cycle.isoformat() if next_cycle else '-'}\n"
+                f"- tg_last_article_slot: {last_article_slot or '-'}\n"
+                f"- tg_offset: {tg_offset or '-'}\n"
+                f"- problems:\n  - " + "\n  - ".join(problems)
+            )
+            send_res = _send_watchdog_alert(text)
+            _kv_set(session, "watchdog_pipeline_last_alert_sig", alert_sig)
+            _kv_set(session, "watchdog_pipeline_last_alert_at", now.isoformat())
+            _kv_set(session, "watchdog_pipeline_last_alert_result", str(send_res))
+        return 2
+
+
 def cmd_loop(backfill_days: int, interval_seconds: int, auto_publish: bool) -> None:
     while True:
         try:
@@ -190,6 +318,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("auto-decision", help="decide publish candidate using trained model")
     sub.add_parser("rebuild-profile", help="rebuild preference profile from feedback")
     sub.add_parser("telegram-test", help="send test message to telegram channel")
+    wd = sub.add_parser("watchdog-check", help="health-check worker state and optionally notify Telegram")
+    wd.add_argument("--max-running-seconds", type=int, default=1800)
+    wd.add_argument("--stale-next-cycle-seconds", type=int, default=900)
+    wd.add_argument("--notify", action="store_true")
+    wd.add_argument("--dedupe-minutes", type=int, default=30)
 
     return parser
 
@@ -239,6 +372,15 @@ def main() -> None:
         cmd_rebuild_profile()
     elif args.command == "telegram-test":
         cmd_telegram_test()
+    elif args.command == "watchdog-check":
+        raise SystemExit(
+            cmd_watchdog_check(
+                max_running_seconds=args.max_running_seconds,
+                stale_next_cycle_seconds=args.stale_next_cycle_seconds,
+                notify=args.notify,
+                dedupe_minutes=args.dedupe_minutes,
+            )
+        )
 
 
 if __name__ == "__main__":

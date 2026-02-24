@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import queue
+import threading
 import time
 from datetime import datetime, timedelta
 from urllib.parse import urljoin, urlparse
@@ -16,7 +18,7 @@ from sqlalchemy.exc import IntegrityError
 from app.db import session_scope
 from app.core.config import settings
 from app.models import Article, ArticleStatus, RawFeedEntry, RawPageSnapshot, Source, SourceHealthMetric
-from app.services.runtime_settings import get_runtime_bool, get_runtime_csv_list
+from app.services.runtime_settings import get_runtime_bool, get_runtime_csv_list, get_runtime_float
 from app.services.topic_filter import passes_ai_topic_filter
 from app.services.utils import normalize_url, stable_hash, strip_html
 
@@ -41,6 +43,35 @@ HTML_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
     "Upgrade-Insecure-Requests": "1",
 }
+
+
+def _run_with_timeout(seconds: float, fn, *args, **kwargs):
+    """
+    Run callable with a hard wall timeout.
+
+    Uses a daemon thread so a hung source does not block the whole worker cycle.
+    If the thread times out, it is left to die with process restart; caller continues.
+    """
+    q: queue.Queue = queue.Queue(maxsize=1)
+
+    def _target():
+        try:
+            q.put(("ok", fn(*args, **kwargs)))
+        except Exception as exc:  # pragma: no cover - passthrough diagnostics
+            q.put(("err", exc))
+
+    t = threading.Thread(target=_target, daemon=True)
+    t.start()
+    t.join(timeout=max(0.1, float(seconds)))
+    if t.is_alive():
+        raise TimeoutError(f"source_timeout>{seconds:.0f}s")
+    try:
+        kind, payload = q.get_nowait()
+    except queue.Empty:
+        raise RuntimeError("source_runner_finished_without_result")
+    if kind == "err":
+        raise payload
+    return payload
 
 
 def _looks_like_feed_url(url: str) -> bool:
@@ -1129,6 +1160,7 @@ def run_ingestion_fast(
     - HTML sources: fetch section + article pages (slower, but enables sources without RSS)
     """
     results: dict[str, int] = {}
+    per_source_timeout_s = max(5.0, float(get_runtime_float("ingestion_source_timeout_seconds", default=45.0) or 45.0))
     with session_scope() as session:
         source_ids = [
             row[0]
@@ -1147,30 +1179,93 @@ def run_ingestion_fast(
                 continue
             source_name = source.name
             source_kind = (source.kind or "rss").lower()
+            source_url = _resolve_source_url_template(source.rss_url or "")
         if status_cb:
             try:
                 status_cb(f"{idx}/{total}: {source_name}")
             except Exception:
                 pass
 
-        if source_kind == "html":
-            # HTML sources are slower but necessary for sites without RSS feeds.
-            results[source_name] = fetch_source_articles_html(
-                source,
-                days_back=days_back,
-                hours_back=hours_back,
-                fetch_full_pages=True,
+        started = time.perf_counter()
+        try:
+            print(
+                "[ingest] source_start",
+                {"idx": idx, "total": total, "name": source_name, "kind": source_kind, "url": source_url},
+                flush=True,
             )
-            continue
+        except Exception:
+            pass
 
-        results[source_name] = fetch_source_articles(
-            source,
-            days_back=days_back,
-            hours_back=hours_back,
-            fetch_full_pages=False,
-            max_entries=max_entries,
-            progress_cb=progress_cb,
-        )
+        try:
+            if source_kind == "html":
+                count = _run_with_timeout(
+                    per_source_timeout_s,
+                    fetch_source_articles_html,
+                    source,
+                    days_back=days_back,
+                    hours_back=hours_back,
+                    fetch_full_pages=True,
+                )
+            else:
+                count = _run_with_timeout(
+                    per_source_timeout_s,
+                    fetch_source_articles,
+                    source,
+                    days_back=days_back,
+                    hours_back=hours_back,
+                    fetch_full_pages=False,
+                    max_entries=max_entries,
+                    progress_cb=progress_cb,
+                )
+            results[source_name] = int(count or 0)
+            try:
+                print(
+                    "[ingest] source_done",
+                    {
+                        "name": source_name,
+                        "kind": source_kind,
+                        "count": results[source_name],
+                        "duration_ms": int((time.perf_counter() - started) * 1000),
+                    },
+                    flush=True,
+                )
+            except Exception:
+                pass
+        except TimeoutError as exc:
+            results[source_name] = 0
+            try:
+                print(
+                    "[ingest] source_timeout",
+                    {
+                        "name": source_name,
+                        "kind": source_kind,
+                        "url": source_url,
+                        "timeout_s": per_source_timeout_s,
+                        "duration_ms": int((time.perf_counter() - started) * 1000),
+                        "error": str(exc),
+                    },
+                    flush=True,
+                )
+            except Exception:
+                pass
+            continue
+        except Exception as exc:
+            results[source_name] = 0
+            try:
+                print(
+                    "[ingest] source_failed",
+                    {
+                        "name": source_name,
+                        "kind": source_kind,
+                        "url": source_url,
+                        "duration_ms": int((time.perf_counter() - started) * 1000),
+                        "error": str(exc),
+                    },
+                    flush=True,
+                )
+            except Exception:
+                pass
+            continue
 
     return results
 

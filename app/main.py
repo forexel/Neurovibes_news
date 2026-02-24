@@ -88,6 +88,8 @@ PRUNE_JOBS: dict[str, dict] = {}
 PRUNE_LOCK = threading.Lock()
 PIPELINE_JOBS: dict[str, dict] = {}
 PIPELINE_LOCK = threading.Lock()
+AGGREGATE_JOBS: dict[str, dict] = {}
+AGGREGATE_LOCK = threading.Lock()
 
 
 def _get_session_user(request: Request) -> User | None:
@@ -915,6 +917,146 @@ def ingestion_aggregate(body: AggregateIn) -> dict:
         "enrich_summary_only": enrich,
         "scored": scored,
     }
+
+
+@app.post("/ingestion/aggregate-start")
+def ingestion_aggregate_start(body: AggregateIn, request: Request) -> dict:
+    _require_session_user(request)
+    period = (body.period or "month").lower()
+    job_id = uuid.uuid4().hex
+    with AGGREGATE_LOCK:
+        AGGREGATE_JOBS[job_id] = {
+            "job_id": job_id,
+            "status": "running",
+            "period": period,
+            "stage": "starting",
+            "stage_detail": None,
+            "processed": 0,   # sources processed during ingestion stage
+            "total": 0,       # total sources
+            "eta_seconds": None,
+            "started_at": datetime.utcnow().isoformat(),
+            "finished_at": None,
+            "error": None,
+            "result": None,
+        }
+
+    def _set_state(stage: str, *, processed: int | None = None, total: int | None = None, detail: str | None = None) -> None:
+        with AGGREGATE_LOCK:
+            job = AGGREGATE_JOBS.get(job_id)
+            if not job:
+                return
+            job["stage"] = stage
+            if processed is not None:
+                job["processed"] = int(processed)
+            if total is not None:
+                job["total"] = int(total)
+            if detail is not None:
+                job["stage_detail"] = detail
+            try:
+                started_at = datetime.fromisoformat(str(job.get("started_at") or ""))
+                elapsed = max(0.0, (datetime.utcnow() - started_at).total_seconds())
+                done = int(job.get("processed") or 0)
+                total_n = int(job.get("total") or 0)
+                # ETA only makes sense during source ingestion when total sources is known.
+                if stage.startswith("ingestion") and total_n > 0 and done > 0 and done <= total_n:
+                    avg = elapsed / max(done, 1)
+                    rem = max(0.0, avg * (total_n - done))
+                    job["eta_seconds"] = int(rem)
+                else:
+                    job["eta_seconds"] = None
+            except Exception:
+                job["eta_seconds"] = None
+
+    def _run() -> None:
+        try:
+            logger = logging.getLogger("nv.aggregate")
+
+            def _status_cb(s: str) -> None:
+                txt = str(s or "")
+                # Expected format from run_ingestion*: "idx/total: source_name"
+                idx = None
+                total = None
+                detail = txt
+                try:
+                    head, tail = txt.split(":", 1)
+                    if "/" in head:
+                        a, b = head.strip().split("/", 1)
+                        idx = int(a.strip())
+                        total = int(b.strip())
+                        detail = tail.strip()
+                except Exception:
+                    pass
+                _set_state("ingestion/source", processed=idx, total=total, detail=detail)
+                if idx and total:
+                    logger.info("aggregate ingestion source %s/%s (%s)", idx, total, detail)
+
+            _set_state("ingestion/source", processed=0, total=0, detail="starting")
+            if period == "hour":
+                ingestion = run_ingestion(hours_back=1, status_cb=_status_cb)
+            elif period == "day":
+                ingestion = run_ingestion(days_back=1, status_cb=_status_cb)
+            elif period == "week":
+                ingestion = run_ingestion(days_back=7, status_cb=_status_cb)
+            else:
+                ingestion = run_ingestion(days_back=30, status_cb=_status_cb)
+
+            _set_state("dedup/embeddings", processed=0, total=1)
+            dedup = process_embeddings_and_dedup(limit=1000)
+            _set_state("dedup/embeddings", processed=1, total=1)
+
+            _set_state("enrich/summary_only", processed=0, total=1)
+            enrich = enrich_summary_only_articles(limit=400, days_back=30)
+            _set_state("enrich/summary_only", processed=1, total=1)
+
+            inserted_total = int(sum(ingestion.values()))
+            score_limit = max(100, inserted_total * 2)
+            _set_state("scoring", processed=0, total=1, detail=f"limit={score_limit}")
+            scored = run_scoring(limit=score_limit)
+            _set_state("scoring", processed=1, total=1, detail=f"scored={scored}")
+
+            result = {
+                "ok": True,
+                "period": period,
+                "inserted_total": inserted_total,
+                "by_source": ingestion,
+                "dedup_processed": dedup,
+                "enrich_summary_only": enrich,
+                "scored": scored,
+            }
+            with AGGREGATE_LOCK:
+                job = AGGREGATE_JOBS.get(job_id)
+                if job:
+                    job["status"] = "done"
+                    job["stage"] = "done"
+                    job["stage_detail"] = None
+                    job["result"] = result
+                    job["eta_seconds"] = None
+                    job["finished_at"] = datetime.utcnow().isoformat()
+        except Exception as exc:
+            try:
+                logging.getLogger("nv.aggregate").exception("aggregate sync failed")
+            except Exception:
+                pass
+            with AGGREGATE_LOCK:
+                job = AGGREGATE_JOBS.get(job_id)
+                if job:
+                    job["status"] = "error"
+                    job["error"] = str(exc)
+                    job["eta_seconds"] = None
+                    job["finished_at"] = datetime.utcnow().isoformat()
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"ok": True, "job_id": job_id}
+
+
+@app.get("/ingestion/jobs/{job_id}")
+def ingestion_aggregate_job_status(job_id: str, request: Request) -> dict:
+    _require_session_user(request)
+    with AGGREGATE_LOCK:
+        job = AGGREGATE_JOBS.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="job_not_found")
+        return dict(job)
 
 
 @app.post("/ingestion/aggregate-fast")
@@ -3628,17 +3770,77 @@ def _render_admin_list_page(view: str) -> str:
       const period = document.getElementById('aggregatePeriod').value || 'month';
       setBusy(true, `sync ${period}`);
       setResult(`sync started: ${period}`);
-      try {
-        const resp = await fetch('/ingestion/aggregate', {
-          method:'POST',
-          headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({period})
-        });
-        setResult(JSON.stringify(await resp.json()));
-        loadArticles();
-      } finally {
+      const resp = await fetch('/ingestion/aggregate-start', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({period})
+      });
+      const out = await resp.json();
+      setResult(JSON.stringify(out, null, 2));
+      if (!resp.ok || !out.job_id) {
         setBusy(false, `sync ${period}`);
+        return;
       }
+      startAggregatePolling(out.job_id, period);
+    }
+
+    let aggregatePollTimer = null;
+    function _formatEtaSeconds(sec) {
+      const s = Number(sec || 0);
+      if (!Number.isFinite(s) || s <= 0) return '';
+      const m = Math.floor(s / 60);
+      const r = Math.floor(s % 60);
+      if (m <= 0) return `${r}s`;
+      return `${m}m ${r}s`;
+    }
+
+    function startAggregatePolling(jobId, period) {
+      if (aggregatePollTimer) clearInterval(aggregatePollTimer);
+      const wrap = document.getElementById('pipelineProgressWrap');
+      const bar = document.getElementById('pipelineProgressBar');
+      const text = document.getElementById('pipelineProgressText');
+      if (wrap) wrap.style.display = 'block';
+      aggregatePollTimer = setInterval(async () => {
+        try {
+          const resp = await fetch(`/ingestion/jobs/${jobId}`);
+          const out = await resp.json();
+          document.getElementById('result').textContent = JSON.stringify(out, null, 2);
+
+          const stage = out.stage || out.status || '';
+          const detail = out.stage_detail ? ` (${out.stage_detail})` : '';
+          const processed = Number(out.processed || 0);
+          const total = Number(out.total || 0);
+          const pct = total > 0 ? Math.min(100, Math.max(0, Math.round((processed / total) * 100))) : 0;
+          const eta = out.eta_seconds != null ? _formatEtaSeconds(out.eta_seconds) : '';
+
+          const state = document.getElementById('action_state');
+          if (state) {
+            let suffix = '';
+            if (stage === 'ingestion/source' && total > 0) suffix = ` ${processed}/${total}`;
+            if (eta) suffix += `, ETA ${eta}`;
+            state.textContent = `Running: sync ${period} (${stage}${detail})${suffix}...`;
+          }
+
+          if (text) {
+            if (stage === 'ingestion/source' && total > 0) {
+              text.textContent = `Sync (${period}): sources ${processed}/${total} (${pct}%)${eta ? `, ETA ${eta}` : ''}${detail}`;
+            } else {
+              text.textContent = `Sync (${period}): ${stage}${detail}${eta ? `, ETA ${eta}` : ''}`;
+            }
+          }
+          if (bar) {
+            bar.style.width = `${pct}%`;
+          }
+
+          if (out.status === 'done' || out.status === 'error') {
+            clearInterval(aggregatePollTimer);
+            aggregatePollTimer = null;
+            if (wrap) wrap.style.display = 'none';
+            setBusy(false, `sync ${period}`);
+            if (out.status === 'done') loadArticles();
+          }
+        } catch (_) {}
+      }, 1200);
     }
 
     async function rebuildProfile() {
