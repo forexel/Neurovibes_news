@@ -831,7 +831,8 @@ def _handle_callback(update: dict) -> dict:
         return {"ok": True, "action": "publish_choose_time", "article_id": article_id}
 
     if action == "pubnow":
-        _edit_message_reply_markup(chat_id, message_id)
+        # This callback comes from the temporary "Когда публиковать?" chooser; remove it entirely.
+        _delete_message(chat_id, message_id)
         # Safety: do NOT publish immediately. Ask for reason first, then publish in message handler.
         prompt = _send_message(chat_id, "Почему публикуем сейчас? Ответь реплаем на это сообщение.", force_reply=True)
         if prompt.get("ok"):
@@ -851,7 +852,8 @@ def _handle_callback(update: dict) -> dict:
         return {"ok": True, "action": "publish_now_pending_reason", "article_id": article_id}
 
     if action == "pub1h":
-        _edit_message_reply_markup(chat_id, message_id)
+        # This callback comes from the temporary "Когда публиковать?" chooser; remove it entirely.
+        _delete_message(chat_id, message_id)
         with session_scope() as session:
             article = session.get(Article, article_id)
             if article:
@@ -875,7 +877,8 @@ def _handle_callback(update: dict) -> dict:
         return {"ok": True, "action": "publish_plus_1h", "article_id": article_id}
 
     if action == "pubpick":
-        _edit_message_reply_markup(chat_id, message_id)
+        # This callback comes from the temporary "Когда публиковать?" chooser; remove it entirely.
+        _delete_message(chat_id, message_id)
         prompt = _send_message(
             chat_id,
             "Напиши время публикации по Москве: `HH:MM` или `YYYY-MM-DD HH:MM`. Ответь реплаем на это сообщение.",
@@ -1151,6 +1154,10 @@ def _handle_message(update: dict) -> dict:
                 return {"ok": True, "action": "pick_time_missing_article", "article_id": article_id}
             article.scheduled_publish_at = dt_utc
             article.updated_at = datetime.utcnow()
+        # Cleanup intermediate time-entry prompt and the user's reply with time.
+        _delete_message(chat_id, prompt_id)
+        if msg_id:
+            _delete_message(chat_id, msg_id)
         prompt2 = _send_message(chat_id, f"Ок, поставил публикацию на {dt_msk.strftime('%Y-%m-%d %H:%M')} МСК. Почему выбрал эту новость? Ответь реплаем.", force_reply=True)
         if prompt2.get("ok"):
             prompt2_id = str((prompt2.get("result") or {}).get("message_id") or "")
