@@ -550,6 +550,57 @@ def _load_feed(rss_url: str):
     return parsed
 
 
+def _load_api_json(url: str) -> dict:
+    try:
+        with httpx.Client(follow_redirects=True, timeout=20, headers=HTML_HEADERS) as client:
+            resp = client.get(url)
+            if 200 <= resp.status_code < 400 and (resp.text or "").strip():
+                return json.loads(resp.text or "{}")
+    except Exception:
+        return {}
+    return {}
+
+
+def _api_hits_from_algolia(data: dict) -> list[dict]:
+    hits = list(data.get("hits") or [])
+    out: list[dict] = []
+    for hit in hits:
+        if not isinstance(hit, dict):
+            continue
+        title = str(hit.get("story_title") or hit.get("title") or "").strip()
+        link = normalize_url(str(hit.get("story_url") or hit.get("url") or "").strip())
+        if not title:
+            continue
+        if not link:
+            object_id = str(hit.get("objectID") or "").strip()
+            if object_id:
+                link = f"https://news.ycombinator.com/item?id={object_id}"
+        if not link:
+            continue
+        story_text = str(hit.get("story_text") or hit.get("comment_text") or "").strip()
+        author = str(hit.get("author") or "").strip()
+        points = hit.get("points")
+        tags = [str(x).strip() for x in list(hit.get("_tags") or []) if str(x).strip()]
+        subtitle_parts: list[str] = []
+        if author:
+            subtitle_parts.append(f"author: {author}")
+        if points is not None:
+            subtitle_parts.append(f"points: {points}")
+        if tags:
+            subtitle_parts.append("tags: " + ", ".join(tags[:6]))
+        out.append(
+            {
+                "id": str(hit.get("objectID") or stable_hash(f"{title}|{link}")),
+                "link": link,
+                "title": title,
+                "summary": story_text[:700] if story_text else " | ".join(subtitle_parts)[:350],
+                "published": str(hit.get("created_at") or ""),
+                "tags": [{"term": t} for t in tags[:10]],
+            }
+        )
+    return out
+
+
 def geo_check_sources(limit: int | None = None, timeout_s: int = 15, progress_cb=None) -> dict:
     """
     Quick diagnostic: fetch each source.rss_url and classify common blocks.
@@ -821,6 +872,188 @@ def fetch_source_articles(
     if latest_published:
         stale_minutes = max(0.0, (datetime.utcnow() - latest_published).total_seconds() / 60.0)
     success_rate = (success_fetch / processed) if processed else 0.0
+    avg_latency = (latency_sum / processed) if processed else 0.0
+    avg_quality = (quality_sum / processed) if processed else 0.0
+    _save_health_metric(source.id, success_rate, avg_latency, avg_quality, stale_minutes, last_error)
+
+    return inserted
+
+
+def fetch_source_articles_api(
+    source: Source,
+    days_back: int = 30,
+    hours_back: int | None = None,
+    fetch_full_pages: bool = False,
+    max_entries: int = 120,
+    progress_cb=None,
+) -> int:
+    data = _load_api_json(_resolve_source_url_template(source.rss_url))
+    entries = _api_hits_from_algolia(data)
+
+    if hours_back is not None:
+        min_dt = datetime.utcnow() - timedelta(hours=hours_back)
+    else:
+        min_dt = datetime.utcnow() - timedelta(days=days_back)
+    inserted = 0
+    processed = 0
+    success_fetch = 0
+    latency_sum = 0.0
+    quality_sum = 0.0
+    latest_published: datetime | None = None
+    last_error: str | None = None
+
+    total_entries = min(len(entries), max_entries)
+    if progress_cb:
+        try:
+            progress_cb("read", 0, total_entries, source.name)
+        except Exception:
+            pass
+
+    with session_scope() as session:
+        max_rank = int(session.scalar(select(func.max(Source.priority_rank))) or 22)
+        score_fn = None
+        if settings.auto_score_on_ingest:
+            from app.services.scoring import score_article_in_session as _score_article_in_session
+
+            score_fn = _score_article_in_session
+
+        for entry in entries:
+            processed += 1
+            if processed > max_entries:
+                break
+            if progress_cb:
+                try:
+                    progress_cb("read", processed, total_entries, source.name)
+                except Exception:
+                    pass
+            link = normalize_url(entry.get("link", ""))
+            if not link:
+                continue
+
+            external_id = _entry_external_id(entry)
+            content_hash = _entry_hash(entry)
+
+            raw_exists = session.scalar(
+                select(RawFeedEntry.id).where(RawFeedEntry.source_id == source.id, RawFeedEntry.external_id == external_id)
+            )
+            if raw_exists:
+                continue
+            hash_exists = session.scalar(
+                select(RawFeedEntry.id).where(RawFeedEntry.source_id == source.id, RawFeedEntry.content_hash == content_hash)
+            )
+            if hash_exists:
+                continue
+
+            published_at = _parse_dt(entry.get("published") or entry.get("updated"))
+            if published_at and published_at < min_dt:
+                continue
+
+            title = (entry.get("title") or "").strip() or "Untitled"
+            subtitle = strip_html(entry.get("summary", ""))[:350]
+            tags = [tag.get("term") for tag in entry.get("tags", []) if tag.get("term")]
+            fallback_text = _extract_html_text(entry)
+
+            html = None
+            final_url = link
+            status_code = None
+            latency_ms = 0.0
+            full_text = ""
+            quality = 0.0
+            canonical_url = link
+            if fetch_full_pages:
+                html, final_url, status_code, latency_ms = _fetch_page(link)
+                latency_sum += latency_ms
+                canonical_url = _extract_canonical(html or "", final_url)
+                full_text, quality = _extract_full_text(html)
+                quality_sum += quality
+                if status_code and 200 <= status_code < 400:
+                    success_fetch += 1
+                else:
+                    last_error = f"status_code={status_code}"
+            else:
+                canonical_url = normalize_url(link)
+
+            final_text = full_text or fallback_text
+            content_mode = "full" if (full_text and len(full_text) >= 700 and quality >= 0.08) else "summary_only"
+            fetched_at = datetime.utcnow()
+            effective_published_at = published_at or fetched_at
+
+            raw_feed = RawFeedEntry(
+                source_id=source.id,
+                external_id=external_id,
+                entry_url=link,
+                payload=json.loads(json.dumps(dict(entry), default=str)),
+                parsed_article={"title": title, "subtitle": subtitle, "tags": tags, "published_at": str(effective_published_at)},
+                content_hash=content_hash,
+            )
+            session.add(raw_feed)
+            try:
+                session.flush()
+            except IntegrityError:
+                session.rollback()
+                continue
+
+            if not passes_ai_topic_filter(title=title, subtitle=subtitle, text=final_text or subtitle, tags=tags):
+                continue
+
+            exists_by_url = session.scalar(select(Article.id).where(Article.canonical_url == canonical_url))
+            exists_by_external = session.scalar(
+                select(Article.id).where(Article.source_id == source.id, Article.external_id == external_id)
+            )
+            if exists_by_url or exists_by_external:
+                continue
+
+            article = Article(
+                source_id=source.id,
+                raw_feed_entry_id=raw_feed.id,
+                external_id=external_id,
+                content_hash=content_hash,
+                title=title,
+                subtitle=subtitle,
+                tags=tags,
+                text=final_text or subtitle or "",
+                content_mode=content_mode,
+                image_url=None,
+                published_at=effective_published_at,
+                canonical_url=canonical_url,
+                status=ArticleStatus.INBOX,
+            )
+            session.add(article)
+            session.flush()
+
+            if score_fn is not None:
+                try:
+                    score_fn(session, article, max_rank=max_rank)
+                except Exception:
+                    pass
+
+            if fetch_full_pages:
+                session.add(
+                    RawPageSnapshot(
+                        article_id=article.id,
+                        source_id=source.id,
+                        url=link,
+                        final_url=final_url,
+                        html_text=html,
+                        status_code=status_code,
+                        latency_ms=latency_ms,
+                        parse_quality=quality,
+                    )
+                )
+
+            inserted += 1
+            if progress_cb:
+                try:
+                    progress_cb("save", inserted, total_entries, source.name)
+                except Exception:
+                    pass
+            if effective_published_at and (latest_published is None or effective_published_at > latest_published):
+                latest_published = effective_published_at
+
+    stale_minutes = 0.0
+    if latest_published:
+        stale_minutes = max(0.0, (datetime.utcnow() - latest_published).total_seconds() / 60.0)
+    success_rate = (success_fetch / processed) if (processed and fetch_full_pages) else (1.0 if processed else 0.0)
     avg_latency = (latency_sum / processed) if processed else 0.0
     avg_quality = (quality_sum / processed) if processed else 0.0
     _save_health_metric(source.id, success_rate, avg_latency, avg_quality, stale_minutes, last_error)
@@ -1100,6 +1333,16 @@ def check_source_health(source_id: int) -> dict:
             "links_found": len(links),
             "sample_links": links[:5],
         }
+    if kind == "api":
+        data = _load_api_json(url)
+        hits = _api_hits_from_algolia(data)
+        return {
+            "ok": True,
+            "kind": "api",
+            "url": url,
+            "entries_found": len(hits),
+            "sample_titles": [strip_html((e.get("title") or "")).strip() for e in hits[:5]],
+        }
 
     parsed = _load_feed(url)
     entries = list(getattr(parsed, "entries", []) or [])
@@ -1139,6 +1382,10 @@ def run_ingestion(days_back: int = 30, hours_back: int | None = None, status_cb=
                 pass
         if source_kind == "html":
             results[source_name] = fetch_source_articles_html(source, days_back=days_back, hours_back=hours_back)
+        elif source_kind == "api":
+            results[source_name] = fetch_source_articles_api(
+                source, days_back=days_back, hours_back=hours_back, progress_cb=progress_cb
+            )
         else:
             results[source_name] = fetch_source_articles(
                 source, days_back=days_back, hours_back=hours_back, progress_cb=progress_cb
@@ -1205,6 +1452,17 @@ def run_ingestion_fast(
                     days_back=days_back,
                     hours_back=hours_back,
                     fetch_full_pages=True,
+                )
+            elif source_kind == "api":
+                count = _run_with_timeout(
+                    per_source_timeout_s,
+                    fetch_source_articles_api,
+                    source,
+                    days_back=days_back,
+                    hours_back=hours_back,
+                    fetch_full_pages=False,
+                    max_entries=max_entries,
+                    progress_cb=progress_cb,
                 )
             else:
                 count = _run_with_timeout(
