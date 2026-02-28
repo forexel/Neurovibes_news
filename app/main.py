@@ -3362,8 +3362,44 @@ def _render_admin_list_page(view: str) -> str:
     let sortDir = null;
     let searchQuery = '';
     window.NV_TZ = 'Europe/Moscow';
+    const VIEW_STATE_KEY = `nv_admin_list_state:${CURRENT_VIEW}`;
+
+    function saveViewState() {
+      try {
+        const hideDouble = !!document.getElementById('hideDoubleToggle')?.checked;
+        const pageSize = document.getElementById('pageSizeInput')?.value || '25';
+        sessionStorage.setItem(VIEW_STATE_KEY, JSON.stringify({
+          page: currentPage,
+          pageSize,
+          sortBy,
+          sortDir,
+          searchQuery,
+          hideDouble,
+        }));
+      } catch (_) {}
+    }
+
+    function restoreViewState() {
+      try {
+        const raw = sessionStorage.getItem(VIEW_STATE_KEY);
+        if (!raw) return;
+        const state = JSON.parse(raw);
+        currentPage = Math.max(1, Number(state.page || 1));
+        sortBy = state.sortBy || null;
+        sortDir = state.sortDir || null;
+        searchQuery = String(state.searchQuery || '').trim();
+        const pageSize = String(state.pageSize || '25');
+        const pageSizeEl = document.getElementById('pageSizeInput');
+        if (pageSizeEl) pageSizeEl.value = pageSize;
+        const searchEl = document.getElementById('searchInput');
+        if (searchEl) searchEl.value = searchQuery;
+        const hideDoubleEl = document.getElementById('hideDoubleToggle');
+        if (hideDoubleEl) hideDoubleEl.checked = !!state.hideDouble;
+      } catch (_) {}
+    }
 
     async function loadArticles() {
+      saveViewState();
       const pageSize = document.getElementById('pageSizeInput').value || '25';
       const qs = new URLSearchParams();
       qs.set('view', CURRENT_VIEW);
@@ -3405,10 +3441,12 @@ def _render_admin_list_page(view: str) -> str:
         </tr>
       `).join('');
       renderSortIndicators();
+      saveViewState();
     }
     function applySearch() {
       searchQuery = (document.getElementById('searchInput')?.value || '').trim();
       currentPage = 1;
+      saveViewState();
       loadArticles();
     }
     function clearSearch() {
@@ -3416,6 +3454,7 @@ def _render_admin_list_page(view: str) -> str:
       const el = document.getElementById('searchInput');
       if (el) el.value = '';
       currentPage = 1;
+      saveViewState();
       loadArticles();
     }
     async function refreshCosts() {
@@ -3479,6 +3518,7 @@ def _render_admin_list_page(view: str) -> str:
       }
       currentPage = 1;
       renderSortIndicators();
+      saveViewState();
       loadArticles();
     }
 
@@ -3500,17 +3540,20 @@ def _render_admin_list_page(view: str) -> str:
 
     function onPageSizeChange() {
       currentPage = 1;
+      saveViewState();
       loadArticles();
     }
 
     function onHideDoubleChange() {
       currentPage = 1;
+      saveViewState();
       loadArticles();
     }
 
     function prevPage() {
       if (currentPage > 1) {
         currentPage -= 1;
+        saveViewState();
         loadArticles();
       }
     }
@@ -3518,6 +3561,7 @@ def _render_admin_list_page(view: str) -> str:
     function nextPage() {
       if (currentPage < totalPages) {
         currentPage += 1;
+        saveViewState();
         loadArticles();
       }
     }
@@ -4008,9 +4052,7 @@ def _render_admin_list_page(view: str) -> str:
         alert('Нужна причина удаления (минимум 5 символов).');
         return;
       }
-      const row = document.getElementById(`row-${id}`);
-      if (row) row.remove();
-      setResult(`Удалено из списка (UI): ${id}. Удаляю в БД...`);
+      setResult(`Удаляю: ${id}...`);
       const resp = await fetch(`/articles/${id}`, {
         method:'DELETE',
         headers:{'Content-Type':'application/json'},
@@ -4020,7 +4062,9 @@ def _render_admin_list_page(view: str) -> str:
       setResult(JSON.stringify(out));
       if (!resp.ok) {
         alert('Удаление в БД не выполнено: ' + (out.detail || 'unknown error'));
+        return;
       }
+      loadArticles();
     }
 
     async function restoreArticle(id) {
@@ -4041,6 +4085,7 @@ def _render_admin_list_page(view: str) -> str:
     }
 
     document.addEventListener('DOMContentLoaded', () => {
+      restoreViewState();
       const s = document.getElementById('searchInput');
       if (s) {
         s.addEventListener('keydown', (e) => {
