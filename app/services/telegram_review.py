@@ -271,6 +271,14 @@ def _build_review_text(article: Article, window: tuple[datetime, datetime, str] 
         title = (article.title or "").strip()
     if not summary:
         summary = ((article.subtitle or "")[:900]).strip() or "Короткий текст пока не готов."
+    badge_map = {
+        "tool": "🧰 Инструмент",
+        "case": "🧪 Кейс",
+        "hot": "⚡ Срочная новость",
+        "playbook": "🛠 Пошаговый гайд",
+        "trend": "🧭 Тренд",
+    }
+    badge = badge_map.get((article.content_type or "").strip().lower(), "")
     url = escape((article.canonical_url or "").strip())
     signature = escape(telegram_signature() or get_runtime_str("telegram_signature") or settings.telegram_signature or "@neuro_vibes_future")
     source_name = ""
@@ -324,15 +332,20 @@ def _build_review_text(article: Article, window: tuple[datetime, datetime, str] 
         start_local, end_local, tz_label = window
     window_label = _hour_window_label_ru(start_local, end_local, tz_label)
 
-    return (
+    body = (
         f"{escape(window_label)}\n"
         "Кандидат на публикацию. Публиковать?\n\n"
         f"{meta}\n\n"
+    )
+    if badge:
+        body += f"{escape(badge)}\n\n"
+    body += (
         f"<b>{escape(title)}</b>\n\n"
         f"{escape(summary)}\n"
         f"<a href=\"{url}\">Подробнее</a>\n\n"
         f"{signature}"
     )
+    return body
 
 
 def _send_message(chat_id: str, text: str, reply_markup: dict | None = None, force_reply: bool = False) -> dict:

@@ -108,6 +108,10 @@ class Article(Base):
     ru_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     short_hook: Mapped[str | None] = mapped_column(Text, nullable=True)
     generated_image_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    content_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    practical_value: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    audience_fit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    ml_prob: Mapped[float | None] = mapped_column(Float, nullable=True)
     scheduled_publish_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # Hour bucket (UTC, naive) for Selected Hour backfill/dedup.
     selected_hour_bucket_utc: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -120,6 +124,7 @@ class Article(Base):
 
     source = relationship("Source")
     scores = relationship("Score", back_populates="article", uselist=False)
+    enrichment = relationship("ArticleEnrichment", back_populates="article", uselist=False)
 
     __table_args__ = (
         UniqueConstraint("canonical_url", name="uq_articles_canonical_url"),
@@ -187,6 +192,31 @@ class Score(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
     article = relationship("Article", back_populates="scores")
+
+
+class ArticleEnrichment(Base):
+    __tablename__ = "article_enrichment"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    article_id: Mapped[int] = mapped_column(ForeignKey("articles.id"), nullable=False, unique=True)
+    content_type: Mapped[str] = mapped_column(String(32), nullable=False, default="other")
+    practical_value: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    audience_fit: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    actionability: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    use_cases: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    tool_detected: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    tool_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tool_is_free_tier: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    requires_code: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    setup_time_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    risk_flags: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    why_short: Mapped[str | None] = mapped_column(Text, nullable=True)
+    enrichment_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    enriched_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+    article = relationship("Article", back_populates="enrichment")
+
+    __table_args__ = (Index("ix_article_enrichment_content_type", "content_type"),)
 
 
 class ContentVersion(Base):

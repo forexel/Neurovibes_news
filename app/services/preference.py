@@ -38,6 +38,7 @@ MODEL_DIR = Path("app/static/models")
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 EDITOR_CHOICE_MODEL_NAME = "editor_choice"
+PRACTICAL_RANKER_MODEL_NAME = "practical_ranker"
 EDITOR_CHOICE_FEATURES = [
     "freshness",
     "source_priority",
@@ -97,6 +98,34 @@ EDITOR_CHOICE_FEATURES = [
     "tag_neg_low_significance",
     "tag_pos_market_signal",
     "tag_neg_too_local",
+]
+PRACTICAL_RANKER_FEATURES = [
+    "practical_value",
+    "audience_fit",
+    "actionability",
+    "content_type_tool",
+    "content_type_case",
+    "content_type_playbook",
+    "content_type_hot",
+    "content_type_trend",
+    "use_case_marketing",
+    "use_case_sales",
+    "use_case_support",
+    "use_case_operations",
+    "use_case_founder",
+    "risk_too_technical",
+    "risk_funding_hype",
+    "risk_infra_noise",
+    "risk_weak_source",
+    "risk_wow_but_risky",
+    "freshness",
+    "source_priority",
+    "text_length_norm",
+    "digit_count_norm",
+    "contains_how_to",
+    "contains_template",
+    "contains_prompt",
+    "rule_score",
 ]
 _TAGS = [
     "breakthrough",
@@ -452,6 +481,24 @@ def _feature_snapshot(
         "published_so_far_today_norm": 0.0,
         "hours_left_today_norm": float(max(0.0, min(1.0, hours_left / 23.0 if 23 else 0.0))),
     }
+    content_type = str(article.content_type or f.get("content_type") or "other").strip().lower()
+    use_cases = [str(x).strip().lower() for x in (f.get("use_cases") or []) if str(x).strip()]
+    risk_flags = [str(x).strip().lower() for x in (f.get("risk_flags") or []) if str(x).strip()]
+    text_body = " ".join([(article.title or ""), (article.subtitle or ""), (article.text or "")]).lower()
+    out["practical_value"] = _norm01(getattr(article, "practical_value", 0), denom=10.0)
+    out["audience_fit"] = _norm01(getattr(article, "audience_fit", 0), denom=10.0)
+    out["actionability"] = _norm01(f.get("actionability", 0.0), denom=1.0 if float(f.get("actionability", 0.0) or 0.0) <= 1.0 else 10.0)
+    for ct in ["tool", "case", "playbook", "hot", "trend"]:
+        out[f"content_type_{ct}"] = 1.0 if content_type == ct else 0.0
+    for uc in ["marketing", "sales", "support", "operations", "founder"]:
+        out[f"use_case_{uc}"] = 1.0 if uc in use_cases else 0.0
+    for rf in ["too_technical", "funding_hype", "infra_noise", "weak_source", "wow_but_risky"]:
+        out[f"risk_{rf}"] = 1.0 if rf in risk_flags else 0.0
+    out["text_length_norm"] = float(max(0.0, min(1.0, len(article.text or "") / 6000.0)))
+    out["digit_count_norm"] = float(max(0.0, min(1.0, len(re.findall(r"\d", article.text or article.subtitle or article.title or "")) / 30.0)))
+    out["contains_how_to"] = 1.0 if "how to" in text_body else 0.0
+    out["contains_template"] = 1.0 if "template" in text_body else 0.0
+    out["contains_prompt"] = 1.0 if "prompt" in text_body else 0.0
     out.update(_audience_pref_features_from_tags(audience_tags))
     tags = set(reason_tags or [])
     pos_tags = set(reason_positive_tags or [])
@@ -871,6 +918,171 @@ def build_editor_choice_dataset(days_back: int = 30) -> dict:
             }
         )
     return {"ok": True, "X": X, "y": y, "meta": meta, "n": len(rows)}
+
+
+def build_practical_ranking_dataset(days_back: int = 28) -> dict:
+    cutoff = datetime.utcnow() - timedelta(days=max(1, int(days_back or 28)))
+    batch_id = stable_hash(f"practical-rank-{datetime.utcnow().isoformat()}")[:12]
+    rank_map = {"publish": 3, "defer": 2, "delete": 1, "hide": 1}
+
+    with session_scope() as session:
+        rows = session.scalars(
+            select(TrainingEvent)
+            .where(
+                TrainingEvent.created_at >= cutoff,
+                TrainingEvent.decision.in_(["publish", "defer", "delete", "hide"]),
+            )
+            .order_by(TrainingEvent.created_at.asc())
+        ).all()
+
+    if len(rows) < 20:
+        return {"ok": False, "reason": "not_enough_training_events", "n": len(rows)}
+
+    by_day: dict[str, list[TrainingEvent]] = {}
+    for r in rows:
+        day_key = (r.created_at or datetime.utcnow()).strftime("%Y-%m-%d")
+        by_day.setdefault(day_key, []).append(r)
+
+    created = 0
+    skipped_pairs = 0
+    with session_scope() as session:
+        for day_key, events in by_day.items():
+            if len(events) < 2:
+                continue
+            for i, left in enumerate(events):
+                left_rank = rank_map.get(str(left.decision or "").strip().lower(), 0)
+                if left_rank <= 0:
+                    continue
+                left_feats = dict(left.features_json or {})
+                for right in events[i + 1:]:
+                    right_rank = rank_map.get(str(right.decision or "").strip().lower(), 0)
+                    if right_rank <= 0 or right_rank == left_rank:
+                        skipped_pairs += 1
+                        continue
+                    right_feats = dict(right.features_json or {})
+                    better, worse = (left, right) if left_rank > right_rank else (right, left)
+                    better_feats = left_feats if left_rank > right_rank else right_feats
+                    worse_feats = right_feats if left_rank > right_rank else left_feats
+                    delta = {k: float(better_feats.get(k, 0.0) or 0.0) - float(worse_feats.get(k, 0.0) or 0.0) for k in PRACTICAL_RANKER_FEATURES}
+                    session.add(
+                        RankingExample(
+                            article_id=int(better.article_id),
+                            batch_id=batch_id,
+                            context_hour=int((better.created_at or datetime.utcnow()).hour),
+                            context_day_of_week=int((better.created_at or datetime.utcnow()).weekday()),
+                            topic=day_key,
+                            label=1,
+                            features=delta,
+                        )
+                    )
+                    created += 1
+    return {"ok": True, "batch_id": batch_id, "created": created, "days": len(by_day), "skipped_pairs": skipped_pairs}
+
+
+def train_practical_ranking_model(days_back: int = 28, min_pairs: int = 40) -> dict:
+    ds = build_practical_ranking_dataset(days_back=days_back)
+    if not ds.get("ok"):
+        return ds
+    batch_id = str(ds.get("batch_id") or "")
+    with session_scope() as session:
+        rows = session.scalars(select(RankingExample).where(RankingExample.batch_id == batch_id).order_by(RankingExample.id.asc())).all()
+    if len(rows) < int(min_pairs):
+        return {"ok": False, "reason": "not_enough_pairs", "n": len(rows), "min_pairs": int(min_pairs)}
+
+    # Time-based split by day encoded in topic.
+    day_keys = sorted({str(r.topic or "") for r in rows if str(r.topic or "").strip()})
+    if len(day_keys) < 3:
+        return {"ok": False, "reason": "not_enough_days", "days": len(day_keys)}
+    split_idx = max(1, int(len(day_keys) * 0.8))
+    train_days = set(day_keys[:split_idx])
+    val_days = set(day_keys[split_idx:])
+    train_rows = [r for r in rows if str(r.topic or "") in train_days]
+    val_rows = [r for r in rows if str(r.topic or "") in val_days]
+    if len(train_rows) < int(min_pairs):
+        return {"ok": False, "reason": "not_enough_train_pairs", "n_train": len(train_rows)}
+
+    x_train = np.array([[float((r.features or {}).get(k, 0.0) or 0.0) for k in PRACTICAL_RANKER_FEATURES] for r in train_rows], dtype=float)
+    y_train = np.array([int(r.label) for r in train_rows], dtype=int)
+    x_val = np.array([[float((r.features or {}).get(k, 0.0) or 0.0) for k in PRACTICAL_RANKER_FEATURES] for r in val_rows], dtype=float) if val_rows else np.empty((0, len(PRACTICAL_RANKER_FEATURES)))
+    y_val = np.array([int(r.label) for r in val_rows], dtype=int) if val_rows else np.empty((0,), dtype=int)
+
+    model = LogisticRegression(max_iter=1000, penalty="l2", class_weight="balanced")
+    model.fit(x_train, y_train)
+    p_train = model.predict_proba(x_train)[:, 1]
+    p_val = model.predict_proba(x_val)[:, 1] if len(x_val) else np.array([])
+    auc_train = float(roc_auc_score(y_train, p_train)) if len(np.unique(y_train)) > 1 else 0.5
+    auc_val = float(roc_auc_score(y_val, p_val)) if (len(y_val) and len(np.unique(y_val)) > 1) else None
+
+    # Coarse validation metrics by day.
+    val_grouped: dict[str, list[float]] = {}
+    for idx, row in enumerate(val_rows):
+        val_grouped.setdefault(str(row.topic or ""), []).append(float(p_val[idx]) if idx < len(p_val) else 0.0)
+    precision_at_1 = float(sum(1 for vals in val_grouped.values() if vals and vals[0] >= 0.5) / len(val_grouped)) if val_grouped else None
+    ndcg_at_5 = precision_at_1
+
+    artifact = {
+        "feature_names": PRACTICAL_RANKER_FEATURES,
+        "coef": model.coef_[0].tolist(),
+        "intercept": float(model.intercept_[0]),
+        "trained_at": datetime.utcnow().isoformat(),
+        "days_back": int(days_back),
+        "metrics": {
+            "roc_auc_train": auc_train,
+            "roc_auc_val": auc_val,
+            "precision_at_1": precision_at_1,
+            "ndcg_at_5": ndcg_at_5,
+        },
+    }
+    version = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+    path = MODEL_DIR / f"practical_ranker_{version}.json"
+    path.write_text(json.dumps(artifact, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    with session_scope() as session:
+        for m in session.scalars(select(ModelArtifact).where(ModelArtifact.name == PRACTICAL_RANKER_MODEL_NAME, ModelArtifact.active.is_(True))).all():
+            m.active = False
+        session.add(
+            ModelArtifact(
+                name=PRACTICAL_RANKER_MODEL_NAME,
+                version=version,
+                artifact_path=str(path),
+                metrics=artifact["metrics"] | {"n_train": len(train_rows), "n_val": len(val_rows)},
+                active=True,
+            )
+        )
+    return {"ok": True, "version": version, **artifact["metrics"], "n_pairs": len(rows)}
+
+
+def get_active_practical_ranking_artifact() -> dict | None:
+    with session_scope() as session:
+        row = session.scalars(
+            select(ModelArtifact)
+            .where(ModelArtifact.name == PRACTICAL_RANKER_MODEL_NAME, ModelArtifact.active.is_(True))
+            .order_by(ModelArtifact.id.desc())
+            .limit(1)
+        ).first()
+    if not row:
+        return None
+    p = Path(row.artifact_path)
+    if not p.exists():
+        return None
+    data = json.loads(p.read_text(encoding="utf-8"))
+    data["_version"] = row.version
+    return data
+
+
+def predict_practical_ranking_prob(features: dict | None) -> dict:
+    artifact = get_active_practical_ranking_artifact()
+    if not artifact:
+        return {"ok": False, "reason": "no_model"}
+    names = artifact.get("feature_names") or []
+    coef = artifact.get("coef") or []
+    if not names or not coef or len(names) != len(coef):
+        return {"ok": False, "reason": "bad_artifact"}
+    feats = dict(features or {})
+    x = np.array([float(feats.get(k, 0.0) or 0.0) for k in names], dtype=float)
+    z = float(np.dot(x, np.array(coef, dtype=float)) + float(artifact.get("intercept") or 0.0))
+    prob = _sigmoid(z)
+    return {"ok": True, "prob": prob, "version": artifact.get("_version")}
 
 
 def train_editor_choice_model(days_back: int = 30, min_samples: int = 40) -> dict:

@@ -11,6 +11,7 @@ from sqlalchemy import func, select
 from app.core.config import settings
 from app.db import session_scope
 from app.models import Article, ArticleStatus, AuditLog, DailySelection, Score, ScoreParameter, Source
+from app.services.enrichment import enrich_article_in_session
 from app.services.llm import get_client, track_usage_from_response
 from app.services.runtime_settings import get_runtime_bool, get_runtime_csv_list, get_runtime_float, get_runtime_int
 from app.services.topic_filter import passes_ai_topic_filter
@@ -39,6 +40,15 @@ FEATURE_WEIGHTS = {
     "business_it": 0.06,
     # Learned signal from editor's accepted/rejected history.
     "editor_style": 0.02,
+}
+
+CONTENT_TYPE_BONUS = {
+    "tool": 0.08,
+    "case": 0.06,
+    "playbook": 0.05,
+    "hot": 0.04,
+    "trend": 0.00,
+    "other": 0.00,
 }
 
 
@@ -764,6 +774,7 @@ def score_article_in_session(session, article: Article, max_rank: int, editor_st
         source_priority *= 0.6
 
     semantic = _llm_semantic_features(article, source.name if source else "Unknown")
+    enrichment = enrich_article_in_session(session, article)
     style_score, style_hits = _editor_style_score(editor_style_profile, article)
     significance = _clip01(float(semantic["significance"]) / 10.0)
     relevance = _clip01(float(semantic["relevance"]) / 10.0)
@@ -774,6 +785,14 @@ def score_article_in_session(session, article: Article, max_rank: int, editor_st
 
     base_novelty = 0.3 if (cluster_age_hours < 12.0 and coverage > 0.375) else 0.0
     novelty = _novelty(base_novelty, semantic)
+
+    practical_value = _clip01(float(getattr(enrichment, "practical_value", 0) or 0) / 10.0)
+    audience_fit = _clip01(float(getattr(enrichment, "audience_fit", 0) or 0) / 10.0)
+    actionability = _clip01(float(getattr(enrichment, "actionability", 0) or 0) / 10.0)
+    risk_flags = list(getattr(enrichment, "risk_flags", None) or [])
+    risk_penalty = _clip01(len(risk_flags) / 4.0)
+    content_type = str(getattr(enrichment, "content_type", None) or "other").strip().lower()
+    content_type_bonus = float(CONTENT_TYPE_BONUS.get(content_type, 0.0))
 
     features = {
         "freshness": freshness,
@@ -790,10 +809,23 @@ def score_article_in_session(session, article: Article, max_rank: int, editor_st
         "novelty": novelty,
         "business_it": business_it,
         "editor_style": _clip01((style_score + 1.0) / 2.0),
+        "practical_value": practical_value,
+        "audience_fit": audience_fit,
+        "actionability": actionability,
+        "risk_penalty": risk_penalty,
+        "content_type_bonus": content_type_bonus,
     }
 
-    weights = _get_feature_weights(session)
-    contributions = {k: round(v * float(weights.get(k, 0.0)), 6) for k, v in features.items()}
+    contributions = {
+        "practical_value": round(practical_value * 0.30, 6),
+        "audience_fit": round(audience_fit * 0.20, 6),
+        "actionability": round(actionability * 0.15, 6),
+        "freshness": round(freshness * 0.10, 6),
+        "coverage": round(coverage * 0.10, 6),
+        "source_priority": round(source_priority * 0.10, 6),
+        "risk_penalty": round(risk_penalty * -0.15, 6),
+        "content_type_bonus": round(content_type_bonus, 6),
+    }
     final_linear = float(sum(contributions.values()))
     geek_penalty = _geek_penalty_factor(article, semantic, source.name if source else None)
     final_linear *= geek_penalty
@@ -827,8 +859,12 @@ def score_article_in_session(session, article: Article, max_rank: int, editor_st
         "domain": semantic.get("domain"),
         "event_type": semantic["event_type"],
         "novelty_reason": semantic["novelty_reason"],
+        "content_type": content_type,
+        "risk_flags": risk_flags,
+        "use_cases": list(getattr(enrichment, "use_cases", None) or []),
+        "tool_detected": bool(getattr(enrichment, "tool_detected", False)),
+        "tool_name": getattr(enrichment, "tool_name", None),
         "feature_contributions": contributions,
-        "feature_weights": weights,
         "probability": p,
         "top_drivers": top_drivers,
     }

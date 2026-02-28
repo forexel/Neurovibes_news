@@ -34,6 +34,10 @@ def init_db() -> None:
         conn.execute(text("ALTER TABLE IF EXISTS articles ADD COLUMN IF NOT EXISTS archived_kind VARCHAR(32) NULL"))
         conn.execute(text("ALTER TABLE IF EXISTS articles ADD COLUMN IF NOT EXISTS archived_reason TEXT NULL"))
         conn.execute(text("ALTER TABLE IF EXISTS articles ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP NULL"))
+        conn.execute(text("ALTER TABLE IF EXISTS articles ADD COLUMN IF NOT EXISTS content_type VARCHAR(32) NULL"))
+        conn.execute(text("ALTER TABLE IF EXISTS articles ADD COLUMN IF NOT EXISTS practical_value INTEGER NULL"))
+        conn.execute(text("ALTER TABLE IF EXISTS articles ADD COLUMN IF NOT EXISTS audience_fit INTEGER NULL"))
+        conn.execute(text("ALTER TABLE IF EXISTS articles ADD COLUMN IF NOT EXISTS ml_prob DOUBLE PRECISION NULL"))
         conn.execute(text("ALTER TABLE IF EXISTS selection_decisions ADD COLUMN IF NOT EXISTS selector_kind VARCHAR(32) NULL"))
         conn.execute(text("ALTER TABLE IF EXISTS user_workspaces ADD COLUMN IF NOT EXISTS openrouter_api_key_enc TEXT NULL"))
         conn.execute(text("ALTER TABLE IF EXISTS user_workspaces ADD COLUMN IF NOT EXISTS telegram_bot_token_enc TEXT NULL"))
@@ -45,6 +49,29 @@ def init_db() -> None:
         conn.execute(text("ALTER TABLE IF EXISTS training_events ADD COLUMN IF NOT EXISTS reason_positive_tags JSON NULL"))
         conn.execute(text("ALTER TABLE IF EXISTS training_events ADD COLUMN IF NOT EXISTS reason_negative_tags JSON NULL"))
         conn.execute(text("ALTER TABLE IF EXISTS training_events ADD COLUMN IF NOT EXISTS reason_sentiment VARCHAR(16) NULL"))
+        conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS article_enrichment ("
+                "id SERIAL PRIMARY KEY,"
+                "article_id INTEGER NOT NULL UNIQUE REFERENCES articles(id),"
+                "content_type VARCHAR(32) NOT NULL DEFAULT 'other',"
+                "practical_value INTEGER NOT NULL DEFAULT 0,"
+                "audience_fit INTEGER NOT NULL DEFAULT 0,"
+                "actionability INTEGER NOT NULL DEFAULT 0,"
+                "use_cases JSON NULL,"
+                "tool_detected BOOLEAN NOT NULL DEFAULT FALSE,"
+                "tool_name TEXT NULL,"
+                "tool_is_free_tier BOOLEAN NULL,"
+                "requires_code BOOLEAN NULL,"
+                "setup_time_minutes INTEGER NULL,"
+                "risk_flags JSON NULL,"
+                "why_short TEXT NULL,"
+                "enrichment_json JSON NULL,"
+                "enriched_at TIMESTAMP NOT NULL DEFAULT NOW()"
+                ")"
+            )
+        )
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_article_enrichment_content_type ON article_enrichment (content_type)"))
 
         # Only backfill content_mode when the column is added for the first time.
         col_exists = bool(
