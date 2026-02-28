@@ -3240,15 +3240,16 @@ def _render_admin_list_page(view: str) -> str:
       <div class="menu">
         <div class="menu-trigger">Actions</div>
         <div class="menu-panel">
-          <label>Period:
-            <select id="aggregatePeriod">
+          <div class="menu-panel-row menu-panel-row-controls">
+            <label class="menu-panel-label" for="aggregatePeriod">Period</label>
+            <select id="aggregatePeriod" class="menu-panel-select">
               <option value="hour">1h</option>
               <option value="day">1d</option>
               <option value="week">1w</option>
               <option value="month" selected>1m</option>
             </select>
-          </label>
-          <button onclick="aggregateNews()" title="Load only new items for selected period">Sync</button>
+            <button class="menu-panel-icon-button" onclick="aggregateNews()" title="Load only new items for selected period" aria-label="Sync">↻</button>
+          </div>
           <button onclick="runPipeline()" title="Sync + Enrich full text + Dedup + Score + Pick hourly top + Prepare RU+Image">Run Pipeline</button>
           <button onclick="runScoring()" title="Score unscored items (new) and update Selected Hour">Score New</button>
           <button onclick="enrichFullText()" title="Try to fetch full text from site for summary_only articles">Get Full Text</button>

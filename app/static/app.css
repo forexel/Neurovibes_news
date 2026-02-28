@@ -55,7 +55,7 @@ button {
 button:hover {
   border-color: var(--hover);
   color: #cfe2ff;
-  text-decoration: underline;
+  text-decoration: none;
 }
 
 button:disabled {
@@ -125,17 +125,22 @@ body.auth button { background: var(--input); }
 
 /* Hover dropdown menu (tabs) */
 .menu-group {
-  display: flex;
+  display: inline-flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
   align-items: stretch;
   border: 1px solid var(--border);
   border-radius: 12px;
   background: var(--panel);
   overflow: visible;
+  align-self: flex-start;
+  white-space: nowrap;
 }
 
 .menu {
   position: relative;
   display: flex;
+  flex: 0 0 auto;
 }
 
 .menu + .menu {
@@ -152,7 +157,7 @@ body.auth button { background: var(--input); }
   height: 38px;
   display: flex;
   align-items: center;
-  min-width: 112px;
+  min-width: 120px;
   justify-content: center;
 }
 .menu:first-child .menu-trigger {
@@ -169,6 +174,7 @@ body.auth button { background: var(--input); }
 .menu:hover .menu-trigger {
   background: #0f1a33;
   color: #cfe2ff;
+  text-decoration: none;
 }
 
 .menu-panel {
@@ -192,8 +198,8 @@ body.auth button { background: var(--input); }
 .menu:hover .menu-panel { display: flex; }
 .menu-panel:hover { display: flex; }
 .menu-panel a { text-decoration: none; }
+.menu-panel-row,
 .menu-panel button,
-.menu-panel label,
 .menu-panel .menu-item {
   width: 100%;
   text-align: left;
@@ -209,8 +215,42 @@ body.auth button { background: var(--input); }
 .menu-panel > :last-child {
   border-radius: 0 0 12px 12px;
 }
-.menu-panel label { justify-content: space-between; }
-.menu-panel select { width: 140px; }
+.menu-panel-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+}
+
+.menu-panel-row-controls {
+  justify-content: space-between;
+}
+
+.menu-panel-label {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  flex: 0 0 auto;
+}
+
+.menu-panel-select {
+  width: 88px;
+  min-width: 88px;
+  margin-left: auto;
+}
+
+.menu-panel-icon-button {
+  width: 36px;
+  min-width: 36px;
+  height: 36px;
+  min-height: 36px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  line-height: 1;
+}
 
 .menu-item {
   display: block;
@@ -219,32 +259,21 @@ body.auth button { background: var(--input); }
   cursor: pointer;
 }
 .menu-panel button:hover,
-.menu-panel label:hover,
+.menu-panel-row:hover,
 .menu-item:hover {
   background: #17284a;
   color: #cfe2ff;
+  text-decoration: none;
+}
+.menu-panel button {
+  padding: 10px 12px;
 }
 
 @media (max-width: 980px) {
   .menu-group {
-    width: 100%;
-    flex-wrap: wrap;
-  }
-
-  .menu {
-    flex: 1 1 50%;
-  }
-
-  .menu:nth-child(odd) {
-    border-left: 0;
-  }
-
-  .menu + .menu {
-    border-left: 1px solid var(--border);
-  }
-
-  .menu-trigger {
-    width: 100%;
+    overflow-x: auto;
+    max-width: 100%;
+    scrollbar-width: thin;
   }
 }
 
