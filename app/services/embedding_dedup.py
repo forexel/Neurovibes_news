@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from datetime import datetime, timedelta
 
 from sqlalchemy import and_, select
@@ -13,6 +14,11 @@ from app.services.utils import stable_hash
 
 
 EMBEDDING_SIZE = 1536
+_TITLE_STOPWORDS = {
+    "the", "a", "an", "and", "or", "to", "for", "with", "of", "in", "on", "at", "by",
+    "is", "are", "as", "after", "into", "from", "over", "under", "new", "latest",
+    "says", "say", "will", "would", "could", "should", "that", "this",
+}
 
 
 def _embed_text(text: str) -> list[float] | None:
@@ -38,6 +44,30 @@ def _cosine_similarity(v1: list[float], v2: list[float]) -> float:
     if n1 == 0 or n2 == 0:
         return 0.0
     return dot / (n1 * n2)
+
+
+def _title_tokens(title: str) -> set[str]:
+    raw = re.findall(r"[a-zA-Z0-9]{3,}", (title or "").lower())
+    out = []
+    for tok in raw:
+        if tok in _TITLE_STOPWORDS:
+            continue
+        if tok.endswith("s") and len(tok) > 4:
+            tok = tok[:-1]
+        if tok.endswith("ing") and len(tok) > 6:
+            tok = tok[:-3]
+        out.append(tok)
+    return set(out)
+
+
+def _title_overlap_ratio(left: str, right: str) -> float:
+    lt = _title_tokens(left)
+    rt = _title_tokens(right)
+    if not lt or not rt:
+        return 0.0
+    inter = len(lt & rt)
+    base = max(1, min(len(lt), len(rt)))
+    return float(inter / base)
 
 
 def process_embeddings_and_dedup(limit: int = 200) -> int:
@@ -103,13 +133,27 @@ def process_embeddings_and_dedup(limit: int = 200) -> int:
                     )
                 )
                 .order_by(ArticleEmbedding.embedding.cosine_distance(embedding))
-                .limit(1)
+                .limit(5)
             ).all()
 
             if candidate_rows:
-                candidate_emb, candidate_article, candidate_source = candidate_rows[0]
-                similarity = _cosine_similarity(embedding, candidate_emb.embedding)
-                if similarity >= settings.dedup_similarity_threshold:
+                best_row = None
+                best_similarity = 0.0
+                best_overlap = 0.0
+                for candidate_emb, candidate_article, candidate_source in candidate_rows:
+                    similarity = _cosine_similarity(embedding, candidate_emb.embedding)
+                    overlap = _title_overlap_ratio(article.title or "", candidate_article.title or "")
+                    if similarity > best_similarity or (math.isclose(similarity, best_similarity) and overlap > best_overlap):
+                        best_row = (candidate_emb, candidate_article, candidate_source)
+                        best_similarity = similarity
+                        best_overlap = overlap
+
+                if best_row is not None and (
+                    best_similarity >= settings.dedup_similarity_threshold
+                    or (best_similarity >= max(0.78, settings.dedup_similarity_threshold - 0.08) and best_overlap >= 0.60)
+                    or best_overlap >= 0.75
+                ):
+                    candidate_emb, candidate_article, candidate_source = best_row
                     if article_source.priority_rank > candidate_source.priority_rank:
                         article.status = ArticleStatus.DOUBLE
                         article.double_of_article_id = candidate_article.id

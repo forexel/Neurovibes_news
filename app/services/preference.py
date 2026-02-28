@@ -407,6 +407,108 @@ def _get_active_reason_tag_slugs(session) -> list[str]:
     return sorted(set(slugs))
 
 
+def _classify_reason_tags_with_llm(
+    session,
+    *,
+    reason_text: str,
+    decision: str | None,
+    article: Article | None,
+    allow_new_tags: bool = True,
+) -> dict:
+    _ensure_reason_tag_catalog(session)
+    base_cls = _guess_reason_tag_polarity(reason_text, decision=decision)
+    if not settings.openrouter_api_key:
+        return base_cls
+
+    tag_slugs = _get_active_reason_tag_slugs(session)
+    audience_desc, audience_tags = _latest_workspace_audience(session)
+    title = str((article.ru_title or article.title) if article else "").strip()
+    subtitle = str((article.ru_summary or article.subtitle) if article else "").strip()[:500]
+
+    try:
+        client = get_client()
+        resp = client.chat.completions.create(
+            model=settings.llm_text_model,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": "Extract editorial rejection/publish reason tags. Multi-label. Return compact JSON only."},
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "allowed_tags": tag_slugs,
+                            "audience_tags": audience_tags,
+                            "audience_description": audience_desc[:800],
+                            "decision": decision,
+                            "title": title[:300],
+                            "summary": subtitle,
+                            "reason_text": reason_text[:1000],
+                            "instructions": {
+                                "multi_label": True,
+                                "can_suggest_new_tags": bool(allow_new_tags),
+                                "output": {
+                                    "positive_tags": ["slug1"],
+                                    "negative_tags": ["slug2"],
+                                    "tags": ["slug1", "slug2"],
+                                    "reason_sentiment": "positive|negative|mixed|neutral",
+                                    "new_tags": [{"slug": "new_slug", "title_ru": "Русское название"}],
+                                    "confidence": 0.0,
+                                },
+                            },
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            ],
+            temperature=0.1,
+        )
+        track_usage_from_response(resp, operation="preference.classify_reason_inline_llm", model=settings.llm_text_model, kind="chat")
+        data = json.loads(resp.choices[0].message.content or "{}")
+    except Exception:
+        return base_cls
+
+    llm_pos = [str(x).strip() for x in (data.get("positive_tags") or []) if str(x).strip()]
+    llm_neg = [str(x).strip() for x in (data.get("negative_tags") or []) if str(x).strip()]
+    llm_all = [str(x).strip() for x in (data.get("tags") or []) if str(x).strip()]
+
+    if allow_new_tags:
+        for item in (data.get("new_tags") or []):
+            slug = str((item or {}).get("slug") or "").strip().lower()
+            title_ru = str((item or {}).get("title_ru") or slug).strip()
+            if not slug:
+                continue
+            if slug not in tag_slugs:
+                session.add(
+                    ReasonTagCatalog(
+                        slug=slug[:64],
+                        title_ru=title_ru[:128] or slug[:64],
+                        description="llm/user discovered tag",
+                        is_active=True,
+                        is_system=False,
+                        created_at=datetime.utcnow(),
+                        updated_at=datetime.utcnow(),
+                    )
+                )
+                tag_slugs.append(slug)
+
+    allowed = set(tag_slugs)
+    pos_tags = sorted(set(llm_pos + list(base_cls.get("positive_tags") or [])))
+    neg_tags = sorted(set(llm_neg + list(base_cls.get("negative_tags") or [])))
+    tags = sorted(set(llm_all + pos_tags + neg_tags + list(base_cls.get("tags") or [])))
+    pos_tags = [t for t in pos_tags if t in allowed]
+    neg_tags = [t for t in neg_tags if t in allowed]
+    tags = [t for t in tags if t in allowed]
+    sentiment = str(data.get("reason_sentiment") or base_cls.get("sentiment") or "neutral").strip().lower()
+    if sentiment not in {"positive", "negative", "mixed", "neutral"}:
+        sentiment = str(base_cls.get("sentiment") or "neutral")
+    return {
+        "tags": tags,
+        "positive_tags": pos_tags,
+        "negative_tags": neg_tags,
+        "sentiment": sentiment,
+    }
+
+
 def _latest_workspace_audience(session, user_id: int | None = None) -> tuple[str, list[str]]:
     q = select(UserWorkspace)
     if user_id:
@@ -539,18 +641,23 @@ def log_training_event(
     if decision not in {"publish", "top_pick", "hide", "delete", "defer", "skip"}:
         return {"ok": False, "error": "bad_decision"}
     tags = sorted(set([t for t in (reason_tags or []) if t]))
-    cls = _guess_reason_tag_polarity(reason_text, decision=decision, tags=tags or None)
-    if not tags:
-        tags = list(cls.get("tags") or [])
-    pos_tags = [t for t in (cls.get("positive_tags") or []) if t]
-    neg_tags = [t for t in (cls.get("negative_tags") or []) if t]
-    sentiment = str(cls.get("sentiment") or "neutral")
-
     with session_scope() as session:
         _ensure_reason_tag_catalog(session)
         article = session.get(Article, int(article_id))
         if not article:
             return {"ok": False, "error": "article_not_found"}
+        cls = _classify_reason_tags_with_llm(
+            session,
+            reason_text=reason_text or "",
+            decision=decision,
+            article=article,
+            allow_new_tags=True,
+        )
+        if not tags:
+            tags = list(cls.get("tags") or [])
+        pos_tags = [t for t in (cls.get("positive_tags") or []) if t]
+        neg_tags = [t for t in (cls.get("negative_tags") or []) if t]
+        sentiment = str(cls.get("sentiment") or "neutral")
         # Telegram callback user IDs are external IDs and usually do not match local `users.id`.
         # Keep FK integrity by storing only a valid local user id.
         local_user_id: int | None = None

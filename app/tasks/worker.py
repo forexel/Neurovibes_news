@@ -4,6 +4,7 @@ import os
 import threading
 import time
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from app.db import init_db
 from app.db import session_scope
@@ -13,6 +14,7 @@ from app.models import TelegramBotKV
 from sqlalchemy import func, select
 from app.services.bootstrap import seed_sources
 from app.services.pipeline import pick_hourly_top, run_hourly_cycle
+from app.services.preference import reclassify_training_reasons_llm, train_editor_choice_model, train_practical_ranking_model
 from app.services.telegram_publisher import publish_scheduled_due
 from app.services.telegram_review import (
     poll_review_updates,
@@ -21,6 +23,7 @@ from app.services.telegram_review import (
 )
 from app.services.telegram_context import load_workspace_telegram_context
 from app.services.llm import get_workspace_api_key, set_user_api_key
+from app.services.telegram_context import telegram_timezone_name
 
 
 INTERVAL_SECONDS = int(os.getenv("WORKER_INTERVAL_SECONDS", "3600"))
@@ -34,6 +37,8 @@ PUBLISH_TICK_SECONDS = float(os.getenv("PUBLISH_TICK_SECONDS", "10"))
 SCHEDULE_TICK_SECONDS = int(os.getenv("SCHEDULE_TICK_SECONDS", "30"))
 # If the hourly cycle hangs, we can't kill the thread, but we can surface it.
 MAX_CYCLE_SECONDS = int(os.getenv("MAX_CYCLE_SECONDS", str(20 * 60)))
+DAILY_ML_RETRAIN_HOUR = int(os.getenv("DAILY_ML_RETRAIN_HOUR", "0"))
+DAILY_ML_RETRAIN_MINUTE = int(os.getenv("DAILY_ML_RETRAIN_MINUTE", "30"))
 
 _DEFAULT_USER_ID: int | None = None
 _DEFAULT_USER_LOADED_AT: float = 0.0
@@ -166,6 +171,40 @@ def _run_cycle_thread(backfill_days: int, decision_mode: bool, slot_key: str) ->
         _set_worker_kv("worker_cycle_state", "idle")
 
 
+def _worker_local_now() -> datetime:
+    tz_name = (telegram_timezone_name() or "Europe/Moscow").strip() or "Europe/Moscow"
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = ZoneInfo("Europe/Moscow")
+    return datetime.now(tz)
+
+
+def _run_daily_ml_maintenance_thread(local_day_key: str) -> None:
+    _load_default_user_context()
+    _set_worker_kv("worker_daily_ml_state", "running")
+    _set_worker_kv("worker_daily_ml_error", "")
+    _set_worker_kv("worker_daily_ml_started_at_utc", datetime.now(timezone.utc).isoformat())
+    try:
+        reasons_out = reclassify_training_reasons_llm(limit=500, only_null=False, allow_new_tags=True)
+        editor_out = train_editor_choice_model(days_back=30)
+        practical_out = train_practical_ranking_model(days_back=28)
+        result = {
+            "reason_reclassify": reasons_out,
+            "editor_choice_train": editor_out,
+            "practical_rank_train": practical_out,
+        }
+        print("[worker] daily ml maintenance", result, flush=True)
+        _set_worker_kv("worker_daily_ml_last_run_local_date", local_day_key)
+        _set_worker_kv("worker_daily_ml_last_result", str(result)[:3000])
+    except Exception as exc:
+        print(f"[worker] daily ml maintenance failed: {exc}", flush=True)
+        _set_worker_kv("worker_daily_ml_error", str(exc)[:1000])
+    finally:
+        _set_worker_kv("worker_daily_ml_finished_at_utc", datetime.now(timezone.utc).isoformat())
+        _set_worker_kv("worker_daily_ml_state", "idle")
+
+
 def main() -> None:
     init_db()
     seed_sources()
@@ -180,6 +219,7 @@ def main() -> None:
     )
     last_cycle_slot_key = ""
     cycle_thread: threading.Thread | None = None
+    daily_ml_thread: threading.Thread | None = None
     cycle_started_at: float | None = None
     last_publish_check_ts = 0.0
     while True:
@@ -205,6 +245,25 @@ def main() -> None:
             )
             cycle_started_at = now
             cycle_thread.start()
+
+        local_now = _worker_local_now()
+        local_day_key = local_now.strftime("%Y-%m-%d")
+        daily_ml_running = bool(daily_ml_thread and daily_ml_thread.is_alive())
+        with session_scope() as session:
+            last_daily_ml_day = (session.get(TelegramBotKV, "worker_daily_ml_last_run_local_date").value if session.get(TelegramBotKV, "worker_daily_ml_last_run_local_date") else "")
+        if (
+            not daily_ml_running
+            and local_now.hour == DAILY_ML_RETRAIN_HOUR
+            and local_now.minute >= DAILY_ML_RETRAIN_MINUTE
+            and last_daily_ml_day != local_day_key
+        ):
+            daily_ml_thread = threading.Thread(
+                target=_run_daily_ml_maintenance_thread,
+                args=(local_day_key,),
+                daemon=True,
+                name="daily-ml-maintenance",
+            )
+            daily_ml_thread.start()
 
         # Scheduled publishing check (separate cadence, should not delay Telegram polling).
         if (now - last_publish_check_ts) >= max(1.0, PUBLISH_TICK_SECONDS):
