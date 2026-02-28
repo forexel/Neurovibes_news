@@ -24,7 +24,72 @@ from app.services.preference import (
 from app.services.scoring import run_scoring
 from app.services.telegram_context import telegram_timezone_name
 from app.services.runtime_settings import get_runtime_str
+from app.services.runtime_settings import get_runtime_csv_list, get_runtime_float
 from app.services.topic_filter import _normalize_text
+
+
+def _clip_multiplier(value: float) -> float:
+    min_mult = get_runtime_float("editorial_min_multiplier", default=0.55)
+    max_mult = get_runtime_float("editorial_max_multiplier", default=1.25)
+    return float(max(min_mult, min(max_mult, value)))
+
+
+def _editorial_score_multiplier(article: Article, score: Score) -> tuple[float, list[str]]:
+    features = score.features if isinstance(score.features, dict) else {}
+    normalized_text = " ".join(
+        [
+            _normalize_text(article.title or ""),
+            _normalize_text(article.subtitle or ""),
+            _normalize_text(article.ru_title or ""),
+            _normalize_text(article.short_hook or ""),
+            _normalize_text(article.text[:800] if article.text else ""),
+        ]
+    ).strip()
+    domain = str(features.get("domain") or "").strip().lower()
+    event_type = str(features.get("event_type") or "").strip().lower()
+    business_it = float(features.get("business_it") or 0.0)
+
+    def has_any(key: str) -> bool:
+        return any(token in normalized_text for token in get_runtime_csv_list(key))
+
+    multiplier = 1.0
+    reasons: list[str] = []
+
+    if has_any("editorial_penalty_investment_keywords_csv") or event_type == "funding_round":
+        multiplier -= get_runtime_float("editorial_penalty_investment_weight", default=0.18)
+        reasons.append("penalty:investment")
+    if domain == "finance_investing":
+        multiplier -= 0.08
+        reasons.append("penalty:finance_domain")
+    if has_any("editorial_penalty_chip_keywords_csv") or domain in {"research", "industrial"}:
+        multiplier -= get_runtime_float("editorial_penalty_chip_weight", default=0.16)
+        reasons.append("penalty:chips")
+    if has_any("editorial_penalty_layoff_keywords_csv"):
+        multiplier -= get_runtime_float("editorial_penalty_layoff_weight", default=0.14)
+        reasons.append("penalty:layoffs")
+
+    too_technical = has_any("editorial_penalty_too_technical_keywords_csv")
+    if features.get("technical_gate") == "failed" or features.get("deep_technical_gate") == "failed":
+        too_technical = True
+    if domain == "research" and business_it < 0.82:
+        too_technical = True
+    if event_type == "incremental_update" and business_it < 0.80:
+        too_technical = True
+    if too_technical:
+        multiplier -= get_runtime_float("editorial_penalty_too_technical_weight", default=0.20)
+        reasons.append("penalty:too_technical")
+
+    if has_any("editorial_bonus_new_tool_keywords_csv"):
+        multiplier += get_runtime_float("editorial_bonus_new_tool_weight", default=0.12)
+        reasons.append("bonus:new_tool")
+    elif event_type in {"paradigm_shift", "market_structure_change", "regulatory_shift"}:
+        multiplier += 0.08
+        reasons.append("bonus:event_type")
+    if has_any("editorial_bonus_new_usage_keywords_csv") or business_it >= 0.86:
+        multiplier += get_runtime_float("editorial_bonus_new_usage_weight", default=0.10)
+        reasons.append("bonus:new_usage")
+
+    return _clip_multiplier(multiplier), reasons
 
 
 def _rule_adjusted_score(article: Article, score: Score) -> float:
@@ -41,6 +106,8 @@ def _rule_adjusted_score(article: Article, score: Score) -> float:
         mult *= 0.90
     if article.content_mode == "summary_only":
         mult *= 0.85
+    editorial_mult, _ = _editorial_score_multiplier(article, score)
+    mult *= editorial_mult
     return raw * mult
 
 
@@ -111,17 +178,27 @@ def _resolve_hourly_selection_strategy(now_utc: datetime | None = None) -> str:
 def _ml_candidate_score(article: Article, score: Score) -> tuple[float, dict]:
     rule_score = _rule_adjusted_score(article, score)
     features = score.features if isinstance(score.features, dict) else {}
+    editorial_mult, editorial_reasons = _editorial_score_multiplier(article, score)
     ml_meta = predict_editor_choice_prob(features)
     if not ml_meta.get("ok"):
-        return float(rule_score / 10.0), {"mode": "ml_fallback_rule", "confidence": None, "ml_meta": ml_meta}
+        return float(rule_score / 10.0), {
+            "mode": "ml_fallback_rule",
+            "confidence": None,
+            "ml_meta": ml_meta,
+            "editorial_multiplier": editorial_mult,
+            "editorial_reasons": editorial_reasons,
+        }
     ml_prob = float(ml_meta.get("prob") or 0.0)
     # Keep a small rule component so ML ties still prefer stronger articles.
     combined = (0.85 * ml_prob) + (0.15 * float(max(0.0, min(10.0, rule_score)) / 10.0))
+    combined *= editorial_mult
     return combined, {
         "mode": "ml",
         "confidence": ml_prob,
         "ml_meta": ml_meta,
         "rule_score": rule_score,
+        "editorial_multiplier": editorial_mult,
+        "editorial_reasons": editorial_reasons,
     }
 
 
@@ -322,20 +399,26 @@ def pick_hourly_top(strategy: str | None = None) -> int | None:
         article.updated_at = datetime.utcnow()
 
     rejected = [a.id for a, _ in top3 if a.id != selected_id]
+    candidate_payload = []
+    for a, s in top3:
+        editorial_mult, editorial_reasons = _editorial_score_multiplier(a, s)
+        candidate_payload.append(
+            {
+                "article_id": a.id,
+                "score": s.final_score,
+                "editorial_multiplier": editorial_mult,
+                "editorial_reasons": editorial_reasons,
+                "top_drivers": (s.features or {}).get("top_drivers", []),
+                "novelty_reason": (s.features or {}).get("novelty_reason", ""),
+            }
+        )
+
     save_selection_decision(
         chosen_article_id=selected_id,
         rejected_article_ids=rejected,
         decision_mode=DecisionMode.AUTO if explain.get("selector_kind") == "ml" else DecisionMode.MANUAL,
         confidence=explain.get("confidence"),
-        candidates=[
-            {
-                "article_id": a.id,
-                "score": s.final_score,
-                "top_drivers": (s.features or {}).get("top_drivers", []),
-                "novelty_reason": (s.features or {}).get("novelty_reason", ""),
-            }
-            for a, s in top3
-        ],
+        candidates=candidate_payload,
         selector_kind=explain.get("selector_kind"),
     )
     try:

@@ -65,6 +65,44 @@ RUNTIME_DEFAULTS: dict[str, str] = {
     # Examples: "09:script,10:ml,11:off"
     "hourly_slot_strategy_csv": os.getenv("HOURLY_SLOT_STRATEGY_CSV", "").strip(),
     "hourly_default_selection_strategy": os.getenv("HOURLY_DEFAULT_SELECTION_STRATEGY", "ml").strip() or "ml",
+    # Editorial candidate bias: penalize repetitive/pop topics, boost usable product news.
+    "editorial_penalty_investment_keywords_csv": (
+        "funding,investment,investor,valuation,raises,raised,raise,$,billion,million,round,series a,series b,"
+        "series c,seed round,acquire,acquires,acquisition,stake,merger,deal,private credit,public company,"
+        "market cap,shares,stock jumps,profit hits record,revenue surge,revenue jumps"
+    ),
+    "editorial_penalty_chip_keywords_csv": (
+        "chip,chips,gpu,gpus,compute,data center,datacenter,semiconductor,server,servers,nvidia,amd,blackwell,"
+        "rack,cluster,ai factory,processor,processors,infrastructure surge,ai infrastructure,compute capacity,"
+        "training cluster"
+    ),
+    "editorial_penalty_layoff_keywords_csv": (
+        "layoff,layoffs,cut jobs,cuts jobs,job cuts,slash jobs,slashes jobs,workforce reduction,firing,firings,"
+        "staff cuts,headcount,laid off,job losses,restructuring"
+    ),
+    "editorial_penalty_too_technical_keywords_csv": (
+        "benchmark,latency,throughput,token context,context window,lora,hypernetwork,embedding,quantization,"
+        "kernel,weights,inference stack,training stack,attention,architecture,ablation,ranker,eval,leaderboard,"
+        "parameters,parameter count,distillation,zero-shot,fine-tuning,app store ranking,retrieval"
+    ),
+    "editorial_bonus_new_tool_keywords_csv": (
+        "launches,launched,releases,released,introduces,introduced,rolls out,new tool,new tools,new app,new agent,"
+        "assistant,copilot,plugin,plugins,api,sdk,feature available,now available,ships,shipping today,"
+        "available to users,available in app"
+    ),
+    "editorial_bonus_new_usage_keywords_csv": (
+        "use case,workflow,for teams,for business,for users,lets users,lets developers,used to,helps teams,"
+        "can now,integrates with,automation,automate,practical,real-world,real world,adoption,using ai in work,"
+        "productivity,save time"
+    ),
+    "editorial_penalty_investment_weight": "0.24",
+    "editorial_penalty_chip_weight": "0.22",
+    "editorial_penalty_layoff_weight": "0.18",
+    "editorial_penalty_too_technical_weight": "0.28",
+    "editorial_bonus_new_tool_weight": "0.16",
+    "editorial_bonus_new_usage_weight": "0.14",
+    "editorial_min_multiplier": "0.45",
+    "editorial_max_multiplier": "1.25",
 }
 
 
@@ -101,6 +139,20 @@ ENV_TO_RUNTIME: dict[str, str] = {
     "TIMEZONE_NAME": "timezone_name",
     "HOURLY_SLOT_STRATEGY_CSV": "hourly_slot_strategy_csv",
     "HOURLY_DEFAULT_SELECTION_STRATEGY": "hourly_default_selection_strategy",
+    "EDITORIAL_PENALTY_INVESTMENT_KEYWORDS": "editorial_penalty_investment_keywords_csv",
+    "EDITORIAL_PENALTY_CHIP_KEYWORDS": "editorial_penalty_chip_keywords_csv",
+    "EDITORIAL_PENALTY_LAYOFF_KEYWORDS": "editorial_penalty_layoff_keywords_csv",
+    "EDITORIAL_PENALTY_TOO_TECHNICAL_KEYWORDS": "editorial_penalty_too_technical_keywords_csv",
+    "EDITORIAL_BONUS_NEW_TOOL_KEYWORDS": "editorial_bonus_new_tool_keywords_csv",
+    "EDITORIAL_BONUS_NEW_USAGE_KEYWORDS": "editorial_bonus_new_usage_keywords_csv",
+    "EDITORIAL_PENALTY_INVESTMENT_WEIGHT": "editorial_penalty_investment_weight",
+    "EDITORIAL_PENALTY_CHIP_WEIGHT": "editorial_penalty_chip_weight",
+    "EDITORIAL_PENALTY_LAYOFF_WEIGHT": "editorial_penalty_layoff_weight",
+    "EDITORIAL_PENALTY_TOO_TECHNICAL_WEIGHT": "editorial_penalty_too_technical_weight",
+    "EDITORIAL_BONUS_NEW_TOOL_WEIGHT": "editorial_bonus_new_tool_weight",
+    "EDITORIAL_BONUS_NEW_USAGE_WEIGHT": "editorial_bonus_new_usage_weight",
+    "EDITORIAL_MIN_MULTIPLIER": "editorial_min_multiplier",
+    "EDITORIAL_MAX_MULTIPLIER": "editorial_max_multiplier",
 }
 
 
