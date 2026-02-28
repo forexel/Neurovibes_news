@@ -3214,54 +3214,56 @@ def _render_admin_list_page(view: str) -> str:
     </div>
   </div>
   <header>
-    <div class="menu" tabindex="0">
-      <div class="menu-trigger">Account ▾</div>
-      <div class="menu-panel">
-        <a class="menu-item" href="/setup">Setup</a>
-        <a class="menu-item" href="/sources">Sources</a>
-        <a class="menu-item" href="/logout">Logout</a>
+    <div class="menu-group">
+      <div class="menu">
+        <div class="menu-trigger">Account</div>
+        <div class="menu-panel">
+          <a class="menu-item" href="/setup">Setup</a>
+          <a class="menu-item" href="/sources">Sources</a>
+          <a class="menu-item" href="/logout">Logout</a>
+        </div>
       </div>
-    </div>
 
-    <div class="menu" tabindex="0">
-      <div class="menu-trigger">Articles ▾</div>
-      <div class="menu-panel">
-        <a class="menu-item" href="/">All</a>
-        <a class="menu-item" href="/unsorted">Unsorted</a>
-        <a class="menu-item" href="/published">Published</a>
-        <a class="menu-item" href="/selected-day">Selected Day</a>
-        <a class="menu-item" href="/selected-hour">Selected Hour</a>
-        <a class="menu-item" href="/deleted">Deleted</a>
-        <button onclick="autoSelect()" title="Pick best candidate using preference profile (no publish)">Auto Select</button>
+      <div class="menu">
+        <div class="menu-trigger">Articles</div>
+        <div class="menu-panel">
+          <a class="menu-item" href="/">All</a>
+          <a class="menu-item" href="/unsorted">Unsorted</a>
+          <a class="menu-item" href="/published">Published</a>
+          <a class="menu-item" href="/selected-day">Selected Day</a>
+          <a class="menu-item" href="/selected-hour">Selected Hour</a>
+          <a class="menu-item" href="/deleted">Deleted</a>
+          <button onclick="autoSelect()" title="Pick best candidate using preference profile (no publish)">Auto Select</button>
+        </div>
       </div>
-    </div>
 
-    <div class="menu" tabindex="0">
-      <div class="menu-trigger">Actions ▾</div>
-      <div class="menu-panel">
-        <label>Period:
-          <select id="aggregatePeriod">
-            <option value="hour">1h</option>
-            <option value="day">1d</option>
-            <option value="week">1w</option>
-            <option value="month" selected>1m</option>
-          </select>
-        </label>
-        <button onclick="aggregateNews()" title="Load only new items for selected period">Sync</button>
-        <button onclick="runPipeline()" title="Sync + Enrich full text + Dedup + Score + Pick hourly top + Prepare RU+Image">Run Pipeline</button>
-        <button onclick="runScoring()" title="Score unscored items (new) and update Selected Hour">Score New</button>
-        <button onclick="enrichFullText()" title="Try to fetch full text from site for summary_only articles">Get Full Text</button>
-        <button onclick="pruneBad()" title="Archive items that don't match filters (non-AI, too technical, low relevance, etc.)">Prune</button>
-        <button onclick="rebuildProfile()" title="Rebuild preference profile from feedback (LLM-costly)">Rebuild Profile</button>
+      <div class="menu">
+        <div class="menu-trigger">Actions</div>
+        <div class="menu-panel">
+          <label>Period:
+            <select id="aggregatePeriod">
+              <option value="hour">1h</option>
+              <option value="day">1d</option>
+              <option value="week">1w</option>
+              <option value="month" selected>1m</option>
+            </select>
+          </label>
+          <button onclick="aggregateNews()" title="Load only new items for selected period">Sync</button>
+          <button onclick="runPipeline()" title="Sync + Enrich full text + Dedup + Score + Pick hourly top + Prepare RU+Image">Run Pipeline</button>
+          <button onclick="runScoring()" title="Score unscored items (new) and update Selected Hour">Score New</button>
+          <button onclick="enrichFullText()" title="Try to fetch full text from site for summary_only articles">Get Full Text</button>
+          <button onclick="pruneBad()" title="Archive items that don't match filters (non-AI, too technical, low relevance, etc.)">Prune</button>
+          <button onclick="rebuildProfile()" title="Rebuild preference profile from feedback (LLM-costly)">Rebuild Profile</button>
+        </div>
       </div>
-    </div>
 
-    <div class="menu" tabindex="0">
-      <div class="menu-trigger">Tools ▾</div>
-      <div class="menu-panel">
-        <a class="menu-item" href="/bot">Bot</a>
-        <a class="menu-item" href="/publish">Publish</a>
-        <a class="menu-item" href="/score">Score</a>
+      <div class="menu">
+        <div class="menu-trigger">Tools</div>
+        <div class="menu-panel">
+          <a class="menu-item" href="/bot">Bot</a>
+          <a class="menu-item" href="/publish">Publish</a>
+          <a class="menu-item" href="/score">Score</a>
+        </div>
       </div>
     </div>
 
@@ -3270,9 +3272,9 @@ def _render_admin_list_page(view: str) -> str:
     <div class="statusbar">
       <label><input id="hideDoubleToggle" type="checkbox" onchange="onHideDoubleChange()"> No Double</label>
       <label>Page size: <input id="pageSizeInput" type="number" value="25" min="5" max="100" onchange="onPageSizeChange()"></label>
-      <label style="display:flex;align-items:center;gap:6px;">
+      <label class="statusbar-search">
         Search:
-        <input id="searchInput" type="text" placeholder="Заголовок или текст..." style="min-width:260px;">
+        <input id="searchInput" class="statusbar-search-input" type="text" placeholder="Заголовок или текст...">
         <button type="button" onclick="applySearch()">Search</button>
         <button type="button" onclick="clearSearch()">Clear</button>
       </label>
@@ -3283,28 +3285,28 @@ def _render_admin_list_page(view: str) -> str:
       <span id="result" class="muted"></span>
     </div>
 
-    <div id="scoreProgressWrap" style="display:none;min-width:260px;">
+    <div id="scoreProgressWrap" class="progress-wrap progress-wrap-sm">
       <div class="muted" id="scoreProgressText">Scoring: 0/0</div>
-      <div style="height:10px;background:#0c1a33;border:1px solid #355;border-radius:999px;overflow:hidden;">
-        <div id="scoreProgressBar" style="height:100%;width:0%;background:#3f8cff;"></div>
+      <div class="progress-track">
+        <div id="scoreProgressBar" class="progress-fill progress-fill-score"></div>
       </div>
     </div>
-    <div id="enrichProgressWrap" style="display:none;min-width:340px;">
+    <div id="enrichProgressWrap" class="progress-wrap progress-wrap-md">
       <div class="muted" id="enrichProgressText">Enrich: 0/0</div>
-      <div style="height:10px;background:#0c1a33;border:1px solid #355;border-radius:999px;overflow:hidden;">
-        <div id="enrichProgressBar" style="height:100%;width:0%;background:#37c078;"></div>
+      <div class="progress-track">
+        <div id="enrichProgressBar" class="progress-fill progress-fill-enrich"></div>
       </div>
     </div>
-  <div id="pruneProgressWrap" style="display:none;min-width:420px;">
+  <div id="pruneProgressWrap" class="progress-wrap progress-wrap-lg">
       <div class="muted" id="pruneProgressText">Prune: 0/0</div>
-      <div style="height:10px;background:#0c1a33;border:1px solid #355;border-radius:999px;overflow:hidden;">
-        <div id="pruneProgressBar" style="height:100%;width:0%;background:#ffb020;"></div>
+      <div class="progress-track">
+        <div id="pruneProgressBar" class="progress-fill progress-fill-prune"></div>
       </div>
     </div>
-    <div id="pipelineProgressWrap" style="display:none;min-width:420px;">
+    <div id="pipelineProgressWrap" class="progress-wrap progress-wrap-lg">
       <div class="muted" id="pipelineProgressText">Pipeline: 0/0</div>
-      <div style="height:10px;background:#0c1a33;border:1px solid #355;border-radius:999px;overflow:hidden;">
-        <div id="pipelineProgressBar" style="height:100%;width:0%;background:#c084fc;"></div>
+      <div class="progress-track">
+        <div id="pipelineProgressBar" class="progress-fill progress-fill-pipeline"></div>
       </div>
     </div>
   </header>
@@ -3324,20 +3326,20 @@ def _render_admin_list_page(view: str) -> str:
       </thead>
       <tbody id="rows"></tbody>
     </table>
-    <div style="display:flex;gap:8px;align-items:center;margin-top:12px;">
+    <div class="pager-row">
       <button onclick="prevPage()">Prev</button>
       <span id="pager" class="muted"></span>
       <button onclick="nextPage()">Next</button>
     </div>
   </main>
-  <div id="previewModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;">
-    <div style="max-width:900px;margin:4vh auto;background:#0f1a33;border:1px solid #345;border-radius:12px;padding:16px;max-height:90vh;overflow:auto;">
-      <div style="display:flex;justify-content:space-between;align-items:center;">
-        <h3 style="margin:0;">Preview Post</h3>
+  <div id="previewModal" class="preview-modal">
+    <div class="preview-modal-card">
+      <div class="preview-modal-header">
+        <h3 class="preview-modal-title">Preview Post</h3>
         <button onclick="closePreview()">Close</button>
       </div>
       <p class="muted" id="previewTitle"></p>
-      <pre id="previewText" style="white-space:pre-wrap;background:#0b1428;border:1px solid #2a3b60;padding:12px;border-radius:8px;"></pre>
+      <pre id="previewText" class="preview-text"></pre>
     </div>
   </div>
   <script>
@@ -4202,14 +4204,14 @@ def admin_article_page(article_id: int, request: Request):
   </div>
   <div class='card'>
     <h3>Actions</h3>
-    <p id='action_state' style='color:#9ec5ff;margin-top:0;'>Ready</p>
+    <p id='action_state' class='article-action-state'>Ready</p>
     <p class='muted'>Отложенная публикация (локальное время из Setup → Telegram timezone):</p>
     <p>
       <input id='schedule_at' type='datetime-local' />
       <button onclick='schedulePublish()'>Schedule</button>
       <button onclick='unschedulePublish()'>Clear Schedule</button>
     </p>
-    <div style='display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;'>
+    <div class='action-row action-row-spaced'>
       <button onclick='pullFromSource()'>Read From Site</button>
       <button onclick='scoreNow()'>Score</button>
       <button onclick='prepareWithImage()'>Prepare + Image</button>
@@ -4217,12 +4219,12 @@ def admin_article_page(article_id: int, request: Request):
       <button onclick='translateArticle()'>Translate Preview</button>
       <button onclick='prepare()'>Generate Post</button>
     </div>
-    <div style='display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;'>
+    <div class='action-row action-row-spaced'>
       <button id='btn_day_toggle' onclick='toggleDaySelection()'>Select Day</button>
       <button id='btn_hour_toggle' onclick='toggleHourSelection()'>Select Hour</button>
       <button onclick="setStatus('selected_hourly')">Mark Selected</button>
     </div>
-    <div style='display:flex;gap:8px;flex-wrap:wrap;'>
+    <div class='action-row'>
       <button onclick='archiveArticle()'>Archive</button>
       <button onclick='deleteArticle()'>Delete</button>
       <button onclick='publish()'>Publish</button>
@@ -4232,7 +4234,7 @@ def admin_article_page(article_id: int, request: Request):
     <h3>Why selected</h3>
     <textarea id='feedback' placeholder='Почему выбрана именно эта новость'></textarea>
     <p><button onclick='saveFeedback()'>Save Feedback</button></p>
-    <pre id='result' style='margin-top:8px;color:#9ec5ff;'></pre>
+    <pre id='result' class='article-result'></pre>
   </div>
 </main>
 <script>
@@ -4269,7 +4271,7 @@ document.getElementById('ru_summary_edit').value = data.ru_summary || '';
 document.getElementById('feedback').value = data.feedback || '';
 document.getElementById('post_preview').textContent = data.post_preview || '';
 document.getElementById('image_prompt').value = data.image_prompt || '';
-document.getElementById('image').innerHTML = data.image_web ? `Image: <a target='_blank' href='${{data.image_web}}'>${{data.image}}</a><br><img src='${{data.image_web}}' style='max-width:420px;border-radius:8px;margin-top:8px'>` : 'No generated image';
+document.getElementById('image').innerHTML = data.image_web ? `Image: <a target='_blank' href='${{data.image_web}}'>${{data.image}}</a><br><img class='preview-image preview-image-sm' src='${{data.image_web}}'>` : 'No generated image';
 document.getElementById('schedule_at').value = toLocalInputValue(data.scheduled_publish_at);
 const originalTexts = {{
   en_full_text: document.getElementById('en_full_text').value || '',
@@ -4368,7 +4370,7 @@ async function prepareWithImage() {{
     updateSaveButtons();
     if (out.image_path) {{
       const path = out.image_path.startsWith('app/static/') ? ('/static/' + out.image_path.replace('app/static/','')) : out.image_path;
-      document.getElementById('image').innerHTML = `Image: <a target='_blank' href='${{path}}'>${{out.image_path}}</a><br><img src='${{path}}' style='max-width:640px;border-radius:8px;margin-top:8px'>`;
+      document.getElementById('image').innerHTML = `Image: <a target='_blank' href='${{path}}'>${{out.image_path}}</a><br><img class='preview-image preview-image-lg' src='${{path}}'>`;
     }}
   }} finally {{
     setBusy(false, 'prepare + image');
@@ -4470,7 +4472,7 @@ async function generatePicture() {{
     if (!ok) return showError(out);
     if (out.image_path) {{
       const path = out.image_path.startsWith('app/static/') ? ('/static/' + out.image_path.replace('app/static/','')) : out.image_path;
-      document.getElementById('image').innerHTML = `Image: <a target='_blank' href='${{path}}'>${{out.image_path}}</a><br><img src='${{path}}' style='max-width:640px;border-radius:8px;margin-top:8px'>`;
+      document.getElementById('image').innerHTML = `Image: <a target='_blank' href='${{path}}'>${{out.image_path}}</a><br><img class='preview-image preview-image-lg' src='${{path}}'>`;
     }}
   }} finally {{
     setBusy(false, 'generate picture');
@@ -4497,7 +4499,7 @@ async function uploadPicture() {{
     if (!ok) return showError(out);
     if (out.image_path) {{
       const path = out.image_path.startsWith('app/static/') ? ('/static/' + out.image_path.replace('app/static/','')) : out.image_path;
-      document.getElementById('image').innerHTML = `Image: <a target='_blank' href='${{path}}'>${{out.image_path}}</a><br><img src='${{path}}' style='max-width:640px;border-radius:8px;margin-top:8px'>`;
+      document.getElementById('image').innerHTML = `Image: <a target='_blank' href='${{path}}'>${{out.image_path}}</a><br><img class='preview-image preview-image-lg' src='${{path}}'>`;
     }}
   }} finally {{
     setBusy(false, 'upload picture');
