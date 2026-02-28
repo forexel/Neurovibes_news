@@ -671,7 +671,14 @@ def get_active_profile() -> str:
     return profile.profile_text if profile else ""
 
 
-def save_selection_decision(chosen_article_id: int, rejected_article_ids: list[int], decision_mode: DecisionMode, confidence: float | None, candidates: list[dict] | None = None) -> int:
+def save_selection_decision(
+    chosen_article_id: int,
+    rejected_article_ids: list[int],
+    decision_mode: DecisionMode,
+    confidence: float | None,
+    candidates: list[dict] | None = None,
+    selector_kind: str | None = None,
+) -> int:
     with session_scope() as session:
         rec = SelectionDecision(
             chosen_article_id=chosen_article_id,
@@ -679,6 +686,7 @@ def save_selection_decision(chosen_article_id: int, rejected_article_ids: list[i
             decision_mode=decision_mode,
             confidence=confidence,
             candidates=candidates,
+            selector_kind=((selector_kind or "").strip() or None),
         )
         session.add(rec)
         session.flush()

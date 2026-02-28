@@ -34,6 +34,7 @@ def init_db() -> None:
         conn.execute(text("ALTER TABLE IF EXISTS articles ADD COLUMN IF NOT EXISTS archived_kind VARCHAR(32) NULL"))
         conn.execute(text("ALTER TABLE IF EXISTS articles ADD COLUMN IF NOT EXISTS archived_reason TEXT NULL"))
         conn.execute(text("ALTER TABLE IF EXISTS articles ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP NULL"))
+        conn.execute(text("ALTER TABLE IF EXISTS selection_decisions ADD COLUMN IF NOT EXISTS selector_kind VARCHAR(32) NULL"))
         conn.execute(text("ALTER TABLE IF EXISTS user_workspaces ADD COLUMN IF NOT EXISTS openrouter_api_key_enc TEXT NULL"))
         conn.execute(text("ALTER TABLE IF EXISTS user_workspaces ADD COLUMN IF NOT EXISTS telegram_bot_token_enc TEXT NULL"))
         conn.execute(text("ALTER TABLE IF EXISTS user_workspaces ADD COLUMN IF NOT EXISTS telegram_review_chat_id VARCHAR(255) NULL"))

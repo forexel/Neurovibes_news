@@ -228,6 +228,7 @@ class SelectionDecision(Base):
     chosen_article_id: Mapped[int] = mapped_column(ForeignKey("articles.id"), nullable=False)
     rejected_article_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     candidates: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    selector_kind: Mapped[str | None] = mapped_column(String(32), nullable=True)
     decision_mode: Mapped[DecisionMode] = mapped_column(SQLEnum(DecisionMode), default=DecisionMode.MANUAL, nullable=False)
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)

@@ -61,6 +61,10 @@ RUNTIME_DEFAULTS: dict[str, str] = {
     "timezone_name": os.getenv("TIMEZONE_NAME", "Europe/Moscow").strip() or "Europe/Moscow",
     # ML ranking blend (0..0.8). Start low and increase gradually as dataset grows.
     "ml_editor_choice_weight": "0.10",
+    # Hour-end article selection strategy.
+    # Examples: "09:script,10:ml,11:off"
+    "hourly_slot_strategy_csv": os.getenv("HOURLY_SLOT_STRATEGY_CSV", "").strip(),
+    "hourly_default_selection_strategy": os.getenv("HOURLY_DEFAULT_SELECTION_STRATEGY", "ml").strip() or "ml",
 }
 
 
@@ -95,6 +99,8 @@ ENV_TO_RUNTIME: dict[str, str] = {
     "TELEGRAM_CHANNEL_ID": "telegram_channel_id",
     "TELEGRAM_SIGNATURE": "telegram_signature",
     "TIMEZONE_NAME": "timezone_name",
+    "HOURLY_SLOT_STRATEGY_CSV": "hourly_slot_strategy_csv",
+    "HOURLY_DEFAULT_SELECTION_STRATEGY": "hourly_default_selection_strategy",
 }
 
 

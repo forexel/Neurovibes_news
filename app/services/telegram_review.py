@@ -17,6 +17,7 @@ from app.models import (
     DailySelection,
     EditorFeedback,
     Score,
+    SelectionDecision,
     TelegramBotKV,
     TelegramPendingReason,
     TelegramReviewJob,
@@ -296,6 +297,27 @@ def _build_review_text(article: Article, window: tuple[datetime, datetime, str] 
     if source_name:
         meta = meta + "\n" + escape("Источник: " + source_name)
 
+    selector_line = ""
+    with session_scope() as session:
+        selection = session.scalars(
+            select(SelectionDecision)
+            .where(SelectionDecision.chosen_article_id == int(article.id))
+            .order_by(SelectionDecision.created_at.desc())
+            .limit(1)
+        ).first()
+    if selection is not None:
+        selector_kind = (selection.selector_kind or "").strip().lower()
+        if selector_kind == "ml":
+            selector_line = "Выбор: ML-кандидат на публикацию"
+            if selection.confidence is not None:
+                selector_line += f" (confidence {float(selection.confidence):.3f})"
+        elif selector_kind == "script":
+            selector_line = "Выбор: скрипт/правила"
+        elif selector_kind:
+            selector_line = f"Выбор: {selector_kind}"
+    if selector_line:
+        meta = meta + "\n" + escape(selector_line)
+
     if window is None:
         start_local, end_local, tz_label = _window_for_article_local(article, tz)
     else:
@@ -304,7 +326,7 @@ def _build_review_text(article: Article, window: tuple[datetime, datetime, str] 
 
     return (
         f"{escape(window_label)}\n"
-        "Топ-1 за час. Публиковать?\n\n"
+        "Кандидат на публикацию. Публиковать?\n\n"
         f"{meta}\n\n"
         f"<b>{escape(title)}</b>\n\n"
         f"{escape(summary)}\n"

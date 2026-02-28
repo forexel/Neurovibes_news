@@ -14,14 +14,20 @@ from app.services.content_generation import generate_image_card, generate_ru_sum
 from app.services.embedding_dedup import process_embeddings_and_dedup
 from app.services.ingestion import enrich_summary_only_articles, run_ingestion_fast
 from app.services.llm import get_client, track_usage_from_response
-from app.services.preference import blended_editor_score, get_active_profile, log_training_event, save_selection_decision
+from app.services.preference import (
+    blended_editor_score,
+    get_active_profile,
+    log_training_event,
+    predict_editor_choice_prob,
+    save_selection_decision,
+)
 from app.services.scoring import run_scoring
 from app.services.telegram_context import telegram_timezone_name
 from app.services.runtime_settings import get_runtime_str
 from app.services.topic_filter import _normalize_text
 
 
-def _audience_adjusted_score(article: Article, score: Score) -> float:
+def _rule_adjusted_score(article: Article, score: Score) -> float:
     raw = float(score.final_score or 0.0)
     features = score.features if isinstance(score.features, dict) else {}
     domain = str(features.get("domain") or "").strip().lower()
@@ -35,7 +41,11 @@ def _audience_adjusted_score(article: Article, score: Score) -> float:
         mult *= 0.90
     if article.content_mode == "summary_only":
         mult *= 0.85
-    base = raw * mult
+    return raw * mult
+
+
+def _audience_adjusted_score(article: Article, score: Score) -> float:
+    base = _rule_adjusted_score(article, score)
     blend = blended_editor_score(base, score.features if isinstance(score.features, dict) else {})
     if blend.get("ok"):
         # convert 0..1 back to 0..10 for existing ranking comparisons
@@ -65,6 +75,54 @@ def _hour_bucket_utc(dt_utc: datetime, tz_name: str) -> datetime:
 def _previous_completed_hour_bucket_utc(now_utc: datetime, tz_name: str) -> datetime:
     # Align to user's timezone and always return the previous completed hour bucket.
     return _hour_bucket_utc(now_utc - timedelta(hours=1), tz_name)
+
+
+def _current_local_hour(now_utc: datetime | None = None) -> int:
+    now_utc = now_utc or datetime.utcnow()
+    tz_name = _get_tz_name()
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = ZoneInfo("Europe/Moscow")
+    local = now_utc.replace(tzinfo=ZoneInfo("UTC")).astimezone(tz)
+    return int(local.hour)
+
+
+def _resolve_hourly_selection_strategy(now_utc: datetime | None = None) -> str:
+    mapping_raw = (get_runtime_str("hourly_slot_strategy_csv", default="") or "").strip()
+    default_strategy = (get_runtime_str("hourly_default_selection_strategy", default="ml") or "ml").strip().lower()
+    hour = _current_local_hour(now_utc)
+    mapping: dict[int, str] = {}
+    for chunk in mapping_raw.split(","):
+        item = chunk.strip()
+        if not item or ":" not in item:
+            continue
+        hh, strategy = item.split(":", 1)
+        try:
+            hour_key = int(hh.strip())
+        except ValueError:
+            continue
+        strategy_key = strategy.strip().lower()
+        if 0 <= hour_key <= 23 and strategy_key in {"script", "ml", "off"}:
+            mapping[hour_key] = strategy_key
+    return mapping.get(hour, default_strategy if default_strategy in {"script", "ml", "off"} else "ml")
+
+
+def _ml_candidate_score(article: Article, score: Score) -> tuple[float, dict]:
+    rule_score = _rule_adjusted_score(article, score)
+    features = score.features if isinstance(score.features, dict) else {}
+    ml_meta = predict_editor_choice_prob(features)
+    if not ml_meta.get("ok"):
+        return float(rule_score / 10.0), {"mode": "ml_fallback_rule", "confidence": None, "ml_meta": ml_meta}
+    ml_prob = float(ml_meta.get("prob") or 0.0)
+    # Keep a small rule component so ML ties still prefer stronger articles.
+    combined = (0.85 * ml_prob) + (0.15 * float(max(0.0, min(10.0, rule_score)) / 10.0))
+    return combined, {
+        "mode": "ml",
+        "confidence": ml_prob,
+        "ml_meta": ml_meta,
+        "rule_score": rule_score,
+    }
 
 
 def _title_fallback_key(article: Article) -> str:
@@ -211,13 +269,47 @@ Return JSON only:
         }
 
 
-def pick_hourly_top() -> int | None:
+def pick_hourly_top(strategy: str | None = None) -> int | None:
     candidates = _hourly_candidates(limit=50)
     if not candidates:
         return None
 
-    top3 = candidates[:3]
-    selected_id, explain = _choose_with_profile(top3, top_n=3)
+    resolved_strategy = (strategy or _resolve_hourly_selection_strategy()).strip().lower()
+    if resolved_strategy == "off":
+        return None
+
+    if resolved_strategy == "script":
+        ranked = sorted(candidates, key=lambda x: _rule_adjusted_score(x[0], x[1]), reverse=True)
+        top3 = ranked[:3]
+        if not top3:
+            return None
+        selected_id = int(top3[0][0].id)
+        explain = {
+            "mode": "script",
+            "confidence": None,
+            "selector_kind": "script",
+        }
+    elif resolved_strategy == "ml":
+        scored_candidates: list[tuple[Article, Score, float, dict]] = []
+        for article, score in candidates:
+            ml_score, ml_explain = _ml_candidate_score(article, score)
+            scored_candidates.append((article, score, ml_score, ml_explain))
+        scored_candidates.sort(key=lambda x: x[2], reverse=True)
+        top3 = [(article, score) for article, score, _, _ in scored_candidates[:3]]
+        if not top3:
+            return None
+        selected_id = int(top3[0][0].id)
+        top_ml_meta = scored_candidates[0][3]
+        explain = {
+            "mode": "ml",
+            "confidence": top_ml_meta.get("confidence"),
+            "selector_kind": "ml",
+            "model_version": ((top_ml_meta.get("ml_meta") or {}).get("version")),
+        }
+    else:
+        top3 = candidates[:3]
+        selected_id, explain = _choose_with_profile(top3, top_n=3)
+        explain["selector_kind"] = "profile" if explain.get("mode") == "profile" else "script"
 
     with session_scope() as session:
         article = session.get(Article, selected_id)
@@ -233,7 +325,7 @@ def pick_hourly_top() -> int | None:
     save_selection_decision(
         chosen_article_id=selected_id,
         rejected_article_ids=rejected,
-        decision_mode=DecisionMode.AUTO if explain.get("mode") == "profile" else DecisionMode.MANUAL,
+        decision_mode=DecisionMode.AUTO if explain.get("selector_kind") == "ml" else DecisionMode.MANUAL,
         confidence=explain.get("confidence"),
         candidates=[
             {
@@ -244,6 +336,7 @@ def pick_hourly_top() -> int | None:
             }
             for a, s in top3
         ],
+        selector_kind=explain.get("selector_kind"),
     )
     try:
         log_training_event(
@@ -495,10 +588,12 @@ def run_hourly_cycle(backfill_days: int = 1, select_hourly_top: bool = True) -> 
         raise RuntimeError(f"cycle_stage_failed: scoring: {exc}") from exc
 
     top_id = None
+    selection_strategy = _resolve_hourly_selection_strategy()
     if select_hourly_top:
         try:
             _stage("pick_hourly_top")
-            top_id = pick_hourly_top()
+            if selection_strategy != "off":
+                top_id = pick_hourly_top(strategy=selection_strategy)
         except Exception as exc:
             raise RuntimeError(f"cycle_stage_failed: pick_hourly_top: {exc}") from exc
     else:
@@ -523,5 +618,6 @@ def run_hourly_cycle(backfill_days: int = 1, select_hourly_top: bool = True) -> 
         "embedded_error": embedded_error,
         "scored": scored,
         "top_article_id": top_id,
+        "selection_strategy": selection_strategy,
         "select_hourly_top": bool(select_hourly_top),
     }

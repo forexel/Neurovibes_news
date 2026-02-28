@@ -13,7 +13,6 @@ from app.models import TelegramBotKV
 from sqlalchemy import func, select
 from app.services.bootstrap import seed_sources
 from app.services.pipeline import pick_hourly_top, run_hourly_cycle
-from app.services.telegram_publisher import publish_article
 from app.services.telegram_publisher import publish_scheduled_due
 from app.services.telegram_review import (
     poll_review_updates,
@@ -33,7 +32,6 @@ TELEGRAM_POLL_INTERVAL_SECONDS = float(os.getenv("TELEGRAM_POLL_INTERVAL_SECONDS
 PUBLISH_TICK_SECONDS = float(os.getenv("PUBLISH_TICK_SECONDS", "10"))
 # Legacy: keep for backwards compatibility (do NOT use it to delay Telegram polling).
 SCHEDULE_TICK_SECONDS = int(os.getenv("SCHEDULE_TICK_SECONDS", "30"))
-AUTO_PUBLISH_TIMES_UTC = os.getenv("AUTO_PUBLISH_TIMES_UTC", "").strip()
 # If the hourly cycle hangs, we can't kill the thread, but we can surface it.
 MAX_CYCLE_SECONDS = int(os.getenv("MAX_CYCLE_SECONDS", str(20 * 60)))
 
@@ -91,25 +89,6 @@ def _load_default_user_context() -> None:
         set_user_api_key(get_workspace_api_key(user_id))
     else:
         set_user_api_key(None)
-
-
-def _parse_publish_times(value: str) -> set[int]:
-    out: set[int] = set()
-    if not value:
-        return out
-    for chunk in value.split(","):
-        s = chunk.strip()
-        if not s or ":" not in s:
-            continue
-        hh, mm = s.split(":", 1)
-        try:
-            h = int(hh)
-            m = int(mm)
-        except ValueError:
-            continue
-        if 0 <= h <= 23 and 0 <= m <= 59:
-            out.add(h * 60 + m)
-    return out
 
 
 def _wall_clock_slot(now_ts: float, slot_minutes: int) -> tuple[str, bool, float]:
@@ -199,8 +178,6 @@ def main() -> None:
         },
         flush=True,
     )
-    publish_minutes = _parse_publish_times(AUTO_PUBLISH_TIMES_UTC)
-    published_slots: set[str] = set()
     last_cycle_slot_key = ""
     cycle_thread: threading.Thread | None = None
     cycle_started_at: float | None = None
@@ -245,28 +222,6 @@ def main() -> None:
                 print("[worker] telegram review updates", bot_out, flush=True)
         except Exception as exc:
             print(f"[worker] telegram review poll failed: {exc}", flush=True)
-
-        # Optional fixed times auto-publish (UTC), e.g. "09:00,18:00".
-        if publish_minutes:
-            now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-            minute_of_day = now_utc.hour * 60 + now_utc.minute
-            if minute_of_day in publish_minutes:
-                slot_key = f"{now_utc.date().isoformat()}-{minute_of_day}"
-                if slot_key not in published_slots:
-                    try:
-                        target = pick_hourly_top()
-                        if target:
-                            out = publish_article(int(target), manual=False)
-                            print("[worker] timed publish", {"slot": slot_key, "article_id": target, **out}, flush=True)
-                        else:
-                            print("[worker] timed publish skipped: no candidate", {"slot": slot_key}, flush=True)
-                    except Exception as exc:
-                        print(f"[worker] timed publish failed: {exc}", flush=True)
-                    published_slots.add(slot_key)
-
-            # Keep small in-memory history.
-            if len(published_slots) > 64:
-                published_slots = set(sorted(published_slots)[-32:])
 
         # Poll Telegram frequently for fast inline кнопок реакцию.
         time.sleep(max(0.5, TELEGRAM_POLL_INTERVAL_SECONDS))
