@@ -161,6 +161,12 @@ def publish_article(article_id: int, *, manual: bool = True) -> dict:
             if job:
                 job.status = PublishStatus.SUCCESS
                 job.telegram_message_id = msg_id
+            review_job = session.scalars(
+                select(TelegramReviewJob).where(TelegramReviewJob.article_id == article_id).order_by(TelegramReviewJob.id.desc()).limit(1)
+            ).first()
+            if review_job:
+                review_job.status = "published"
+                review_job.updated_at = datetime.utcnow()
 
         return {"ok": True, "message_id": msg_id}
     except Exception as exc:

@@ -1127,6 +1127,7 @@ def _handle_message(update: dict) -> dict:
             session.add(EditorFeedback(article_id=article_id, explanation_text=f"SCHEDULE(+1h): {safe_text}"))
             job = session.scalars(select(TelegramReviewJob).where(TelegramReviewJob.article_id == article_id)).first()
             if job:
+                job.status = "scheduled"
                 job.decision_reason = safe_text
                 job.updated_at = datetime.utcnow()
         _safe_log_training_event(
@@ -1223,6 +1224,7 @@ def _handle_message(update: dict) -> dict:
             session.add(EditorFeedback(article_id=article_id, explanation_text=f"SCHEDULE(custom): {safe_text}"))
             job = session.scalars(select(TelegramReviewJob).where(TelegramReviewJob.article_id == article_id)).first()
             if job:
+                job.status = "scheduled"
                 job.decision_reason = safe_text
                 job.updated_at = datetime.utcnow()
         _safe_log_training_event(
@@ -1343,7 +1345,7 @@ def _handle_message(update: dict) -> dict:
             )
             job = session.scalars(select(TelegramReviewJob).where(TelegramReviewJob.article_id == article_id)).first()
             if job:
-                job.status = "sent"
+                job.status = "scheduled"
                 job.decision_reason = f"later: {safe_text}"
                 job.updated_at = datetime.utcnow()
         _safe_log_training_event(
