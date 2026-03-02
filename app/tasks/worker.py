@@ -14,7 +14,7 @@ from app.models import TelegramBotKV
 from sqlalchemy import func, select
 from app.services.bootstrap import seed_sources
 from app.services.pipeline import pick_hourly_top, run_hourly_cycle
-from app.services.preference import reclassify_training_reasons_llm, train_editor_choice_model, train_practical_ranking_model
+from app.services.preference import reretag_today_training_event_reasons, train_editor_choice_model
 from app.services.telegram_publisher import publish_scheduled_due
 from app.services.telegram_review import (
     poll_review_updates,
@@ -186,13 +186,11 @@ def _run_daily_ml_maintenance_thread(local_day_key: str) -> None:
     _set_worker_kv("worker_daily_ml_error", "")
     _set_worker_kv("worker_daily_ml_started_at_utc", datetime.now(timezone.utc).isoformat())
     try:
-        reasons_out = reclassify_training_reasons_llm(limit=500, only_null=False, allow_new_tags=True)
-        editor_out = train_editor_choice_model(days_back=30)
-        practical_out = train_practical_ranking_model(days_back=28)
+        reasons_out = reretag_today_training_event_reasons(limit=50, overwrite=False)
+        editor_out = train_editor_choice_model(days_back=1, min_samples=8)
         result = {
-            "reason_reclassify": reasons_out,
+            "reason_retag_today": reasons_out,
             "editor_choice_train": editor_out,
-            "practical_rank_train": practical_out,
         }
         print("[worker] daily ml maintenance", result, flush=True)
         _set_worker_kv("worker_daily_ml_last_run_local_date", local_day_key)

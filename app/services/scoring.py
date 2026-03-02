@@ -12,7 +12,6 @@ from app.core.config import settings
 from app.db import session_scope
 from app.models import Article, ArticleStatus, AuditLog, DailySelection, Score, ScoreParameter, Source
 from app.services.enrichment import enrich_article_in_session
-from app.services.llm import get_client, track_usage_from_response
 from app.services.runtime_settings import get_runtime_bool, get_runtime_csv_list, get_runtime_float, get_runtime_int
 from app.services.topic_filter import passes_ai_topic_filter
 
@@ -405,85 +404,78 @@ def _cluster_stats(session, article: Article) -> tuple[float, float, float, bool
 
 
 def _llm_semantic_features(article: Article, source_name: str) -> dict:
-    fallback = {
-        "significance": 5,
-        "relevance": 5,
-        "virality": 5,
-        "longevity": 5,
-        "scale": 5,
-        "business_it": 5,
-        "domain": "other",
-        "event_type": "incremental_update",
-        "novelty_score": 0.35,
-        "novelty_reason": "Fallback semantic estimate",
+    text = f"{article.title or ''} {article.subtitle or ''} {(article.text or '')[:5000]}".lower()
+    source_low = (source_name or "").strip().lower()
+
+    tool_hits = sum(1 for k in ["tool", "assistant", "copilot", "plugin", "api", "sdk", "agent", "integration"] if k in text)
+    practical_hits = sum(1 for k in ["workflow", "automation", "use case", "how to", "guide", "template", "small business"] if k in text)
+    funding_hits = sum(1 for k in ["funding", "raised", "valuation", "series a", "series b", "billion", "million", "acquisition"] if k in text)
+    infra_hits = sum(1 for k in ["chip", "chips", "gpu", "gpus", "data center", "datacenter", "server", "compute"] if k in text)
+    layoff_hits = sum(1 for k in ["layoff", "layoffs", "cuts jobs", "cut jobs", "slashes staff", "restructuring"] if k in text)
+    scandal_hits = sum(1 for k in ["lawsuit", "feud", "scandal", "probe", "ban", "warning", "controversy", "pentagon"] if k in text)
+    technical_hits = sum(1 for k in GEEK_HEAVY_KEYWORDS if k in text)
+    hot_hits = sum(1 for k in ["today", "now", "launches", "released", "announced", "unveils", "new"] if k in text)
+    company_hits = sum(1 for k in ["openai", "anthropic", "google", "meta", "microsoft", "nvidia", "shopify", "amazon"] if k in text)
+
+    domain = "business_it"
+    if funding_hits > max(tool_hits, practical_hits) and funding_hits >= 1:
+        domain = "finance_investing"
+    elif infra_hits >= 1:
+        domain = "industrial"
+    elif technical_hits >= 2 or source_low in RESEARCH_HEAVY_SOURCES:
+        domain = "research"
+    elif scandal_hits >= 1:
+        domain = "policy"
+
+    if funding_hits >= 1:
+        event_type = "funding_round"
+    elif tool_hits >= 1 and hot_hits >= 1:
+        event_type = "product_iteration"
+    elif practical_hits >= 2:
+        event_type = "market_structure_change"
+    elif technical_hits >= 2:
+        event_type = "research_breakthrough"
+    else:
+        event_type = "incremental_update"
+
+    relevance = 8.0
+    significance = 5.0 + min(2.0, 0.4 * hot_hits) + min(1.0, 0.25 * company_hits)
+    virality = 4.0 + min(2.0, 0.5 * hot_hits) + min(1.0, 0.35 * scandal_hits) + min(1.0, 0.2 * company_hits)
+    longevity = 4.0 + min(2.0, 0.5 * practical_hits) + (1.0 if tool_hits else 0.0) - min(1.5, 0.5 * scandal_hits)
+    scale = 4.0 + min(2.0, 0.3 * company_hits) + min(1.0, 0.35 * infra_hits)
+    business_it = 5.0 + min(2.5, 0.8 * tool_hits) + min(2.0, 0.7 * practical_hits) - min(2.0, 0.8 * funding_hits) - min(2.0, 0.8 * infra_hits) - min(2.0, 0.8 * technical_hits) - min(1.5, 0.7 * layoff_hits) - min(1.0, 0.5 * scandal_hits)
+
+    novelty_base = 0.38 + min(0.18, 0.04 * hot_hits) + (0.10 if tool_hits else 0.0) + (0.08 if practical_hits else 0.0)
+    novelty_base -= min(0.10, 0.04 * funding_hits)
+    novelty_base -= min(0.10, 0.04 * infra_hits)
+    band = EVENT_NOVELTY_BANDS.get(event_type, (0.2, 0.6))
+    novelty_score = _clip01(max(band[0], min(band[1], novelty_base)))
+
+    if tool_hits and practical_hits:
+        novelty_reason = "New practical AI tool or workflow with clear business use."
+    elif funding_hits:
+        novelty_reason = "Mostly funding/investment news with limited practical value."
+    elif infra_hits:
+        novelty_reason = "Mostly infrastructure or chips news, not a direct end-user use case."
+    elif technical_hits:
+        novelty_reason = "Mostly technical/research-heavy article with weak mass-market applicability."
+    elif scandal_hits:
+        novelty_reason = "Scandal/policy signal with unclear practical use for a broad audience."
+    else:
+        novelty_reason = "Heuristic semantic estimate from article text."
+
+    return {
+        "significance": _clip10(significance),
+        "relevance": _clip10(relevance),
+        "virality": _clip10(virality),
+        "longevity": _clip10(longevity),
+        "scale": _clip10(scale),
+        "business_it": _clip10(business_it),
+        "domain": domain,
+        "event_type": event_type,
+        "novelty_score": novelty_score,
+        "novelty_reason": novelty_reason,
     }
-
-    if not settings.openrouter_api_key:
-        return fallback
-    client = get_client()
-    prompt = f"""
-You score AI-channel news. Return JSON only:
-{{
-  "significance": 0-10,
-  "relevance": 0-10,
-  "virality": 0-10,
-  "longevity": 0-10,
-  "scale": 0-10,
-  "business_it": 0-10,
-  "domain": "business_it|automotive|industrial|finance_investing|consumer|research|policy|other",
-  "event_type": "incremental_update|product_iteration|funding_round|research_breakthrough|regulatory_shift|market_structure_change|paradigm_shift",
-  "novelty_score": 0-1,
-  "novelty_reason": "Why is this novel compared to existing AI news?"
-}}
-
-Relevance scoring guide:
-0-3 weak AI link, 4-6 AI mentioned but secondary, 7-8 important AI news, 9-10 core AI event.
-
-business_it guide (channel preference):
-0-3 mostly automotive/industrial/investing/general tech
-4-6 mixed
-7-10 business IT / enterprise software / developer tooling / cloud / AI infrastructure / AI adoption in companies
-
-Channel theme:
-{CHANNEL_THEME}
-
-Source: {source_name}
-Title: {article.title}
-Subtitle: {article.subtitle}
-Text: {article.text[:7000]}
-"""
-    try:
-        resp = client.chat.completions.create(
-            model="openai/gpt-4o-mini",
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": "Return strictly valid JSON with numeric fields."},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.1,
-        )
-        track_usage_from_response(resp, operation="scoring.semantic_features", model="openai/gpt-4o-mini", kind="chat")
-        data = json.loads(resp.choices[0].message.content or "{}")
-        event_type = str(data.get("event_type") or "incremental_update")
-        band = EVENT_NOVELTY_BANDS.get(event_type)
-        novelty_llm = float(data.get("novelty_score", fallback["novelty_score"]))
-        if band:
-            novelty_llm = _clip01(max(band[0], min(band[1], novelty_llm)))
-
-        return {
-            "significance": _clip10(float(data.get("significance", fallback["significance"]))),
-            "relevance": _clip10(float(data.get("relevance", fallback["relevance"]))),
-            "virality": _clip10(float(data.get("virality", fallback["virality"]))),
-            "longevity": _clip10(float(data.get("longevity", fallback["longevity"]))),
-            "scale": _clip10(float(data.get("scale", fallback["scale"]))),
-            "business_it": _clip10(float(data.get("business_it", fallback["business_it"]))),
-            "domain": str(data.get("domain") or fallback["domain"]),
-            "event_type": event_type,
-            "novelty_score": novelty_llm,
-            "novelty_reason": str(data.get("novelty_reason") or fallback["novelty_reason"]),
-        }
-    except Exception:
-        return fallback
 
 
 def _novelty(base_cluster_novelty: float, semantic: dict) -> float:
@@ -492,6 +484,27 @@ def _novelty(base_cluster_novelty: float, semantic: dict) -> float:
 
 def _sigmoid(x: float) -> float:
     return 1.0 / (1.0 + math.exp(-x))
+
+
+def _human_reason_from_features(content_type: str, risk_flags: list[str], practical_value: float, audience_fit: float, actionability: float) -> str:
+    flags = set(risk_flags or [])
+    if "too_technical" in flags:
+        return "Слишком технологическая новость: непонятно, как это использовать широкой аудитории."
+    if "funding_hype" in flags:
+        return "Это в основном новость про инвестиции и оценку компании, а не про практическую пользу."
+    if "infra_noise" in flags:
+        return "Это история про чипы, дата-центры или инфраструктуру, а не про понятный прикладной инструмент."
+    if content_type == "tool":
+        return "Новый инструмент с понятным сценарием применения и быстрой пользой."
+    if content_type == "playbook":
+        return "Практический гайд: видно, как это можно применить в работе."
+    if content_type == "case":
+        return "Понятный кейс внедрения: можно быстро объяснить, где это использовать."
+    if content_type == "hot":
+        return "Горячая новость, но её ценность зависит от того, есть ли практическая польза."
+    if practical_value >= 0.7 and audience_fit >= 0.7 and actionability >= 0.6:
+        return "Практичная новость с понятной пользой для бизнеса и массовой аудитории."
+    return "Слабая практическая ценность: неочевидно, зачем это массовой аудитории или малому бизнесу."
 
 
 def _title_hype_score(title: str) -> float:
@@ -867,6 +880,10 @@ def score_article_in_session(session, article: Article, max_rank: int, editor_st
         "feature_contributions": contributions,
         "probability": p,
         "top_drivers": top_drivers,
+        "title_text": str(article.title or "")[:400],
+        "subtitle_text": str(article.subtitle or "")[:800],
+        "text_excerpt": str(article.text or "")[:1500],
+        "human_reason": _human_reason_from_features(content_type, risk_flags, practical_value, audience_fit, actionability),
     }
     score.uncertainty = round(uncertainty, 6)
 
@@ -987,60 +1004,15 @@ def _ensure_ru_preview(session, article: Article) -> None:
         if raw:
             article.short_hook = raw[: get_runtime_int("max_overview_chars", default=260)]
 
-    # If still missing, ask LLM for RU title + 1-sentence overview.
+    # Cheapest preview mode: do not spend LLM credits on list rows.
     if (article.ru_title or "").strip() and (article.short_hook or "").strip():
         return
-
     max_title = get_runtime_int("max_title_chars", default=130)
     max_overview = get_runtime_int("max_overview_chars", default=260)
-    prompt = f"""
-Ты — редактор русскоязычного AI-канала.
-Нужно быстро дать русскую "превью-версию" статьи для списка.
-
-Сделай:
-1) RU заголовок (до {max_title} символов)
-2) Короткий RU обзор (1 предложение, до {max_overview} символов), без воды, без эмоций, без домыслов.
-
-Правила:
-- Только факты из текста.
-- Сохраняй имена компаний/моделей и цифры.
-- Не делай кликбейт.
-- Никаких эмодзи.
-
-Верни JSON only:
-{{"ru_title":"...", "ru_overview":"..."}}
-
-EN title: {title}
-EN subtitle: {subtitle}
-EN excerpt: {(text[:1200] if text else "")}
-URL: {article.canonical_url}
-""".strip()
-
-    try:
-        client = get_client()
-        resp = client.chat.completions.create(
-            model=settings.llm_text_model,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": "Return strictly valid JSON."},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.2,
-        )
-        track_usage_from_response(resp, operation="content.ru_preview", model=settings.llm_text_model, kind="chat")
-        data = json.loads(resp.choices[0].message.content or "{}")
-        ru_title = (str(data.get("ru_title") or "").strip() or title)[:max_title]
-        ru_overview = (str(data.get("ru_overview") or "").strip() or (subtitle or text[:max_overview]))[:max_overview]
-        if not (article.ru_title or "").strip():
-            article.ru_title = ru_title
-        if not (article.short_hook or "").strip():
-            article.short_hook = ru_overview
-    except Exception:
-        # Best-effort fallback.
-        if not (article.ru_title or "").strip():
-            article.ru_title = title[:max_title]
-        if not (article.short_hook or "").strip() and (subtitle or text):
-            article.short_hook = (subtitle or text[:max_overview]).strip()[:max_overview]
+    if not (article.ru_title or "").strip():
+        article.ru_title = title[:max_title]
+    if not (article.short_hook or "").strip() and (subtitle or text):
+        article.short_hook = (subtitle or text[:max_overview]).strip()[:max_overview]
 
 
 def score_article_by_id(article_id: int) -> dict:

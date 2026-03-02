@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import numpy as np
+from sklearn.feature_extraction.text import HashingVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
 from sqlalchemy import func, select
@@ -29,7 +32,7 @@ from app.models import (
     User,
     UserWorkspace,
 )
-from app.services.runtime_settings import get_runtime_float
+from app.services.runtime_settings import get_runtime_bool, get_runtime_float
 from app.services.llm import get_client, track_usage_from_response
 from app.services.utils import stable_hash
 
@@ -44,61 +47,41 @@ EDITOR_CHOICE_FEATURES = [
     "source_priority",
     "entity_count",
     "number_count",
-    "trend_velocity",
     "coverage",
     "cluster_size",
     "duplicate_flag",
     "has_image",
-    "content_short",
-    "content_medium",
-    "content_long",
-    "significance",
-    "relevance",
-    "virality",
-    "longevity",
-    "scale",
-    "novelty",
     "business_it",
-    "geek_penalty",
+    "practical_value",
+    "audience_fit",
+    "actionability",
+    "risk_penalty",
     "rule_score",
-    "uncertainty",
     "rank_by_rule_score",
     "delta_to_best_rule",
-    "hour_sin",
-    "hour_cos",
     "hours_since_published_norm",
     "published_so_far_today_norm",
-    "hours_left_today_norm",
-    "aud_mass_audience",
-    "aud_business",
-    "aud_future",
-    "aud_hype",
-    "aud_ru_relevance",
-    # reason tags (one-hot)
-    "tag_breakthrough",
-    "tag_funding",
-    "tag_product_release",
-    "tag_benchmark",
-    "tag_regulation",
-    "tag_practical_tool",
-    "tag_global_shift",
-    "tag_hype",
-    "tag_too_local",
-    "tag_duplicate",
-    # polarity-aware reason tags (same tag can be positive or negative in different decisions)
-    "tag_pos_hype",
-    "tag_neg_hype",
-    "tag_pos_mass_audience",
-    "tag_neg_not_mass_audience",
-    "tag_pos_business_impact",
-    "tag_neg_no_business_use",
-    "tag_pos_future_trend",
-    "tag_neg_short_lived",
-    "tag_neg_too_technical",
-    "tag_neg_low_significance",
-    "tag_pos_market_signal",
-    "tag_neg_too_local",
+    "title_length_norm",
+    "text_length_norm",
+    "digit_count_norm",
+    "contains_how_to",
+    "contains_template",
+    "contains_prompt",
+    "contains_pricing",
+    "contains_demo",
+    "contains_github",
+    "content_type_tool",
+    "content_type_case",
+    "content_type_playbook",
+    "content_type_hot",
+    "content_type_trend",
+    "risk_too_technical",
+    "risk_funding_hype",
+    "risk_infra_noise",
+    "risk_weak_source",
+    "risk_wow_but_risky",
 ]
+EDITOR_CHOICE_TEXT_FEATURES = 256
 PRACTICAL_RANKER_FEATURES = [
     "practical_value",
     "audience_fit",
@@ -206,6 +189,56 @@ def _sigmoid(z: float) -> float:
         return float(1.0 / (1.0 + ez))
     ez = np.exp(z)
     return float(ez / (1.0 + ez))
+
+
+def _editor_choice_vectorizer() -> HashingVectorizer:
+    return HashingVectorizer(
+        n_features=EDITOR_CHOICE_TEXT_FEATURES,
+        alternate_sign=False,
+        norm="l2",
+        lowercase=True,
+        token_pattern=r"(?u)\b\w\w+\b",
+    )
+
+
+def _article_text_blob(article: Article | None = None, features: dict | None = None) -> str:
+    feats = dict(features or {})
+    if article is not None:
+        return " \n".join(
+            [
+                str(article.title or ""),
+                str(article.subtitle or ""),
+                str((article.text or "")[:1500]),
+            ]
+        ).strip()
+    return " \n".join(
+        [
+            str(feats.get("title_text") or ""),
+            str(feats.get("subtitle_text") or ""),
+            str(feats.get("text_excerpt") or ""),
+        ]
+    ).strip()
+
+
+def _editor_choice_vector_from_features(features: dict | None) -> np.ndarray:
+    feats = dict(features or {})
+    numeric = np.array([float(feats.get(k, 0.0) or 0.0) for k in EDITOR_CHOICE_FEATURES], dtype=float)
+    text_blob = _article_text_blob(None, feats)
+    text_vec = _editor_choice_vectorizer().transform([text_blob]).toarray()[0] if text_blob else np.zeros(EDITOR_CHOICE_TEXT_FEATURES, dtype=float)
+    return np.concatenate([numeric, text_vec], axis=0)
+
+
+def _today_local_window_utc(tz_name: str = "Europe/Moscow") -> tuple[datetime, datetime]:
+    try:
+        tz = ZoneInfo((tz_name or "Europe/Moscow").strip() or "Europe/Moscow")
+    except Exception:
+        tz = ZoneInfo("Europe/Moscow")
+    now_local = datetime.now(tz)
+    start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_local = start_local + timedelta(days=1)
+    start_utc = start_local.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+    end_utc = end_local.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+    return start_utc, end_utc
 
 
 def _norm01(v: float | int | None, denom: float = 10.0) -> float:
@@ -417,6 +450,8 @@ def _classify_reason_tags_with_llm(
 ) -> dict:
     _ensure_reason_tag_catalog(session)
     base_cls = _guess_reason_tag_polarity(reason_text, decision=decision)
+    if not get_runtime_bool("reason_tagging_llm_enabled", default=False):
+        return base_cls
     if not settings.openrouter_api_key:
         return base_cls
 
@@ -557,31 +592,16 @@ def _feature_snapshot(
         "source_priority": _norm01(f.get("source_priority", 0.0), denom=1.0 if float(f.get("source_priority", 0.0) or 0.0) <= 1.0 else 10.0),
         "entity_count": _norm01(f.get("entity_count", 0.0), denom=1.0 if float(f.get("entity_count", 0.0) or 0.0) <= 1.0 else 10.0),
         "number_count": _norm01(f.get("number_count", 0.0), denom=1.0 if float(f.get("number_count", 0.0) or 0.0) <= 1.0 else 10.0),
-        "trend_velocity": _norm01(f.get("trend_velocity", 0.0), denom=1.0 if float(f.get("trend_velocity", 0.0) or 0.0) <= 1.0 else 10.0),
         "coverage": _norm01(f.get("coverage", f.get("cross_source_coverage", 0.0)), denom=1.0 if float(f.get("coverage", f.get("cross_source_coverage", 0.0)) or 0.0) <= 1.0 else 10.0),
         "cluster_size": _norm01(f.get("cluster_size", 0.0), denom=1.0 if float(f.get("cluster_size", 0.0) or 0.0) <= 1.0 else 10.0),
         "duplicate_flag": 1.0 if article.status.value == "double" or bool(article.double_of_article_id) else 0.0,
         "has_image": 1.0 if (article.image_url or article.generated_image_path) else 0.0,
-        "content_short": content_short,
-        "content_medium": content_medium,
-        "content_long": content_long,
-        "significance": _norm01(f.get("significance", score.significance if score else 0.0)),
-        "relevance": _norm01(f.get("relevance", score.relevance if score else 0.0)),
-        "virality": _norm01(f.get("virality", score.virality if score else 0.0)),
-        "longevity": _norm01(f.get("longevity", score.longevity if score else 0.0)),
-        "scale": _norm01(f.get("scale", score.scale if score else 0.0)),
-        "novelty": _norm01(f.get("novelty", score.uniqueness if score else 0.0)),
         "business_it": _norm01(f.get("business_it", 0.0), denom=1.0 if float(f.get("business_it", 0.0) or 0.0) <= 1.0 else 10.0),
-        "geek_penalty": _norm01(f.get("geek_penalty", 1.0), denom=1.0),
         "rule_score": float(max(0.0, min(10.0, rule_score))) / 10.0,
-        "uncertainty": _norm01(getattr(score, "uncertainty", None), denom=1.0 if float(getattr(score, "uncertainty", 0.0) or 0.0) <= 1.0 else 10.0),
         "rank_by_rule_score": 0.0,
         "delta_to_best_rule": 0.0,
-        "hour_sin": float((np.sin(2.0 * np.pi * (hour / 24.0)) + 1.0) / 2.0),
-        "hour_cos": float((np.cos(2.0 * np.pi * (hour / 24.0)) + 1.0) / 2.0),
         "hours_since_published_norm": float(max(0.0, min(1.0, age_hours / 24.0))),
         "published_so_far_today_norm": 0.0,
-        "hours_left_today_norm": float(max(0.0, min(1.0, hours_left / 23.0 if 23 else 0.0))),
     }
     content_type = str(article.content_type or f.get("content_type") or "other").strip().lower()
     use_cases = [str(x).strip().lower() for x in (f.get("use_cases") or []) if str(x).strip()]
@@ -596,11 +616,18 @@ def _feature_snapshot(
         out[f"use_case_{uc}"] = 1.0 if uc in use_cases else 0.0
     for rf in ["too_technical", "funding_hype", "infra_noise", "weak_source", "wow_but_risky"]:
         out[f"risk_{rf}"] = 1.0 if rf in risk_flags else 0.0
+    out["title_length_norm"] = float(max(0.0, min(1.0, len(article.title or "") / 180.0)))
     out["text_length_norm"] = float(max(0.0, min(1.0, len(article.text or "") / 6000.0)))
     out["digit_count_norm"] = float(max(0.0, min(1.0, len(re.findall(r"\d", article.text or article.subtitle or article.title or "")) / 30.0)))
     out["contains_how_to"] = 1.0 if "how to" in text_body else 0.0
     out["contains_template"] = 1.0 if "template" in text_body else 0.0
     out["contains_prompt"] = 1.0 if "prompt" in text_body else 0.0
+    out["contains_pricing"] = 1.0 if any(x in text_body for x in ["pricing", "free tier", "price", "subscription"]) else 0.0
+    out["contains_demo"] = 1.0 if any(x in text_body for x in ["demo", "try it", "available now", "public beta"]) else 0.0
+    out["contains_github"] = 1.0 if any(x in text_body for x in ["github", "open source", "repository"]) else 0.0
+    out["title_text"] = str(article.title or "")[:400]
+    out["subtitle_text"] = str(article.subtitle or "")[:800]
+    out["text_excerpt"] = str(article.text or "")[:1500]
     out.update(_audience_pref_features_from_tags(audience_tags))
     tags = set(reason_tags or [])
     pos_tags = set(reason_positive_tags or [])
@@ -976,12 +1003,18 @@ def get_active_ranking_artifact() -> dict | None:
 
 
 def build_editor_choice_dataset(days_back: int = 30) -> dict:
-    cutoff = datetime.utcnow() - timedelta(days=max(1, int(days_back or 30)))
+    days_back = max(1, int(days_back or 1))
+    if days_back == 1:
+        start_utc, end_utc = _today_local_window_utc()
+    else:
+        end_utc = datetime.utcnow()
+        start_utc = end_utc - timedelta(days=days_back)
     with session_scope() as session:
         rows = session.scalars(
             select(TrainingEvent)
             .where(
-                TrainingEvent.created_at >= cutoff,
+                TrainingEvent.created_at >= start_utc,
+                TrainingEvent.created_at < end_utc,
                 TrainingEvent.decision.in_(["publish", "hide", "delete", "defer"]),
             )
             .order_by(TrainingEvent.created_at.asc())
@@ -990,40 +1023,27 @@ def build_editor_choice_dataset(days_back: int = 30) -> dict:
     if not rows:
         return {"ok": False, "reason": "no_training_events"}
 
-    X: list[list[float]] = []
+    X: list[np.ndarray] = []
     y: list[int] = []
     meta: list[dict] = []
-    for r in rows:
-        feats = dict(r.features_json or {})
-        # If reason tags were updated later, ensure one-hot is present.
-        raw_tags = r.reason_tags or []
-        if isinstance(raw_tags, str):
-            raw_tags = [raw_tags] if raw_tags.strip() and raw_tags.strip().lower() not in {"null", "none"} else []
-        raw_pos = r.reason_positive_tags or []
-        if isinstance(raw_pos, str):
-            raw_pos = [raw_pos] if raw_pos.strip() and raw_pos.strip().lower() not in {"null", "none"} else []
-        raw_neg = r.reason_negative_tags or []
-        if isinstance(raw_neg, str):
-            raw_neg = [raw_neg] if raw_neg.strip() and raw_neg.strip().lower() not in {"null", "none"} else []
-        union_tags = set([str(x) for x in raw_tags if str(x).strip()])
-        pos_tags = set([str(x) for x in raw_pos if str(x).strip()])
-        neg_tags = set([str(x) for x in raw_neg if str(x).strip()])
-        for tag in _TAGS:
-            feats.setdefault(f"tag_{tag}", 1.0 if tag in union_tags else 0.0)
-            feats.setdefault(f"tag_pos_{tag}", 1.0 if tag in pos_tags else 0.0)
-            feats.setdefault(f"tag_neg_{tag}", 1.0 if tag in neg_tags else 0.0)
-        vec = [float(feats.get(k, 0.0) or 0.0) for k in EDITOR_CHOICE_FEATURES]
-        X.append(vec)
-        # label target for "quality/choose eventually": publish=1, others=0.
-        y.append(int(r.label))
-        meta.append(
-            {
-                "event_id": int(r.id),
-                "created_at": r.created_at.isoformat(),
-                "article_id": int(r.article_id),
-                "decision": r.decision,
-            }
-        )
+    with session_scope() as session:
+        for r in rows:
+            feats = dict(r.features_json or {})
+            article = session.get(Article, int(r.article_id))
+            if article is not None:
+                feats.setdefault("title_text", str(article.title or "")[:400])
+                feats.setdefault("subtitle_text", str(article.subtitle or "")[:800])
+                feats.setdefault("text_excerpt", str(article.text or "")[:1500])
+            X.append(_editor_choice_vector_from_features(feats))
+            y.append(int(r.label))
+            meta.append(
+                {
+                    "event_id": int(r.id),
+                    "created_at": r.created_at.isoformat(),
+                    "article_id": int(r.article_id),
+                    "decision": r.decision,
+                }
+            )
     return {"ok": True, "X": X, "y": y, "meta": meta, "n": len(rows)}
 
 
@@ -1192,7 +1212,7 @@ def predict_practical_ranking_prob(features: dict | None) -> dict:
     return {"ok": True, "prob": prob, "version": artifact.get("_version")}
 
 
-def train_editor_choice_model(days_back: int = 30, min_samples: int = 40) -> dict:
+def train_editor_choice_model(days_back: int = 1, min_samples: int = 8) -> dict:
     ds = build_editor_choice_dataset(days_back=days_back)
     if not ds.get("ok"):
         return ds
@@ -1247,7 +1267,8 @@ def train_editor_choice_model(days_back: int = 30, min_samples: int = 40) -> dic
     ndcg5 = (float(np.mean(ndcg5_vals)) if ndcg5_vals else None)
 
     artifact = {
-        "feature_names": EDITOR_CHOICE_FEATURES,
+        "numeric_feature_names": EDITOR_CHOICE_FEATURES,
+        "hashing_n_features": EDITOR_CHOICE_TEXT_FEATURES,
         "coef": model.coef_[0].tolist(),
         "intercept": float(model.intercept_[0]),
         "trained_at": datetime.utcnow().isoformat(),
@@ -1304,13 +1325,20 @@ def predict_editor_choice_prob(features: dict | None) -> dict:
     artifact = get_active_editor_choice_artifact()
     if not artifact:
         return {"ok": False, "reason": "no_model"}
-    names = artifact.get("feature_names") or []
+    names = artifact.get("numeric_feature_names") or artifact.get("feature_names") or []
     coef = artifact.get("coef") or []
     if not names or not coef or len(names) != len(coef):
-        return {"ok": False, "reason": "bad_artifact"}
+        # Compatibility path for new mixed numeric+text artifacts.
+        total_expected = len(EDITOR_CHOICE_FEATURES) + int(artifact.get("hashing_n_features") or 0)
+        if len(coef) != total_expected:
+            return {"ok": False, "reason": "bad_artifact"}
     feats = dict(features or {})
-    x = np.array([float(feats.get(k, 0.0) or 0.0) for k in names], dtype=float)
-    z = float(np.dot(x, np.array(coef, dtype=float)) + float(artifact.get("intercept") or 0.0))
+    if artifact.get("numeric_feature_names"):
+        x = _editor_choice_vector_from_features(feats)
+    else:
+        x = np.array([float(feats.get(k, 0.0) or 0.0) for k in names], dtype=float)
+    coef_arr = np.array(coef, dtype=float)
+    z = float(np.dot(x, coef_arr) + float(artifact.get("intercept") or 0.0))
     prob = _sigmoid(z)
     uncertainty = float(1.0 - abs(prob - 0.5) * 2.0)
     return {"ok": True, "prob": prob, "uncertainty": uncertainty, "version": artifact.get("_version")}
@@ -1664,6 +1692,59 @@ def reretag_training_event_reasons(limit: int = 50000, overwrite: bool = False) 
         "updated": updated,
         "unchanged": unchanged,
         "skipped_no_text": skipped_no_text,
+        "overwrite": bool(overwrite),
+    }
+
+
+def reretag_today_training_event_reasons(limit: int = 50, overwrite: bool = False) -> dict:
+    start_utc, end_utc = _today_local_window_utc()
+    scanned = 0
+    updated = 0
+    unchanged = 0
+    skipped_no_text = 0
+    with session_scope() as session:
+        rows = session.scalars(
+            select(TrainingEvent)
+            .where(
+                TrainingEvent.created_at >= start_utc,
+                TrainingEvent.created_at < end_utc,
+            )
+            .order_by(TrainingEvent.created_at.asc())
+            .limit(max(1, int(limit)))
+        ).all()
+        for row in rows:
+            scanned += 1
+            text = (row.reason_text or "").strip()
+            if not text:
+                skipped_no_text += 1
+                continue
+            old_tags = list(row.reason_tags or [])
+            has_split = bool((row.reason_positive_tags or []) or (row.reason_negative_tags or []) or (row.reason_sentiment or "").strip())
+            if old_tags and has_split and not overwrite:
+                unchanged += 1
+                continue
+            cls = _guess_reason_tag_polarity(text, decision=row.decision)
+            new_tags = list(cls.get("tags") or [])
+            if (
+                new_tags == old_tags
+                and list(row.reason_positive_tags or []) == list(cls.get("positive_tags") or [])
+                and list(row.reason_negative_tags or []) == list(cls.get("negative_tags") or [])
+                and (row.reason_sentiment or "neutral") == str(cls.get("sentiment") or "neutral")
+            ):
+                unchanged += 1
+                continue
+            row.reason_tags = new_tags or None
+            row.reason_positive_tags = cls.get("positive_tags") or None
+            row.reason_negative_tags = cls.get("negative_tags") or None
+            row.reason_sentiment = str(cls.get("sentiment") or "neutral")
+            updated += 1
+    return {
+        "ok": True,
+        "scanned": scanned,
+        "updated": updated,
+        "unchanged": unchanged,
+        "skipped_no_text": skipped_no_text,
+        "window": "today_local",
         "overwrite": bool(overwrite),
     }
 

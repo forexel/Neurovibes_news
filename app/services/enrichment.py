@@ -185,7 +185,7 @@ def enrich_article_in_session(session, article: Article, force: bool = False) ->
     if row is not None and not force:
         return row
 
-    data = _llm_enrichment(article) or _heuristic_enrichment(article)
+    data = _heuristic_enrichment(article)
     if row is None:
         row = ArticleEnrichment(article_id=int(article.id))
         session.add(row)
