@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import uuid
 from datetime import date, datetime, timedelta, timezone
@@ -80,6 +81,8 @@ app = FastAPI(title="Neurovibes News API", version="0.3.0")
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 app.include_router(v1_router)
 
+WORKING_SET_PAGE_LIMIT = 20
+
 SCORING_JOBS: dict[str, dict] = {}
 SCORING_LOCK = threading.Lock()
 ENRICH_JOBS: dict[str, dict] = {}
@@ -123,6 +126,30 @@ def _require_session_user(request: Request) -> User:
     if user is None:
         raise HTTPException(status_code=401, detail="auth_required")
     return user
+
+
+def _article_search_blob(x: dict) -> str:
+    parts = [
+        str(x.get("id") or ""),
+        str(x.get("title") or ""),
+        str(x.get("ru_title") or ""),
+        str(x.get("subtitle") or ""),
+        str(x.get("short_hook") or ""),
+        str(x.get("text") or ""),
+        str(x.get("ru_summary") or ""),
+        str(x.get("canonical_url") or ""),
+        str(x.get("source_name") or ""),
+    ]
+    return "\n".join(parts).casefold()
+
+
+def _matches_article_query(x: dict, q_norm: str, words: list[str]) -> bool:
+    blob = _article_search_blob(x)
+    if not blob:
+        return False
+    if q_norm and q_norm in blob:
+        return True
+    return bool(words) and all(w in blob for w in words)
 
 
 class FeedbackIn(BaseModel):
@@ -1242,6 +1269,8 @@ def admin_data_articles(
         result: list[dict] = []
         today = date.today()
         selected_day_map: dict[int, date] = {}
+        selected_any_day_ids: list[int] = []
+        selected_today_ids: list[int] = []
         base_query = select(Article)
         if view == "deleted":
             articles = session.scalars(
@@ -1272,9 +1301,11 @@ def admin_data_articles(
             # - selected_hourly
             # - selected_day (any active date)
             # - archived/rejected
-            selected_any_day_ids = session.scalars(
+            selected_any_day_ids = list(
+                int(x) for x in session.scalars(
                 select(DailySelection.article_id).where(DailySelection.active.is_(True))
-            ).all()
+                ).all()
+            )
             base_query = base_query.where(
                 Article.status != ArticleStatus.ARCHIVED,
                 Article.status != ArticleStatus.PUBLISHED,
@@ -1287,23 +1318,123 @@ def admin_data_articles(
         elif view == "no_double":
             base_query = base_query.where(Article.status != ArticleStatus.ARCHIVED)
             articles = session.scalars(base_query.where(Article.status != ArticleStatus.DOUBLE)).all()
-        else:
-            # "All" = broad working list for manual review/history passes.
-            # Keep archived/rejected here too so editor can revisit old deletions and refine reasons.
-            # We still exclude already-published and explicit selections to reduce noise.
-            selected_day_ids = session.scalars(
-                select(DailySelection.article_id).where(
-                    DailySelection.selected_date == today,
-                    DailySelection.active.is_(True),
-                )
-            ).all()
+        elif view == "backlog":
+            selected_today_ids = list(
+                int(x) for x in session.scalars(
+                    select(DailySelection.article_id).where(
+                        DailySelection.selected_date == today,
+                        DailySelection.active.is_(True),
+                    )
+                ).all()
+            )
             base_query = base_query.where(
                 Article.status != ArticleStatus.PUBLISHED,
                 Article.status != ArticleStatus.SELECTED_HOURLY,
             )
-            if selected_day_ids:
-                base_query = base_query.where(Article.id.not_in(selected_day_ids))
+            if selected_today_ids:
+                base_query = base_query.where(Article.id.not_in(selected_today_ids))
             articles = session.scalars(base_query).all()
+        else:
+            # "All" = broad working list for manual review/history passes.
+            # Keep archived/rejected here too so editor can revisit old deletions and refine reasons.
+            # We still exclude already-published and explicit selections to reduce noise.
+            selected_today_ids = list(
+                int(x) for x in session.scalars(
+                    select(DailySelection.article_id).where(
+                    DailySelection.selected_date == today,
+                    DailySelection.active.is_(True),
+                )
+                ).all()
+            )
+            base_query = base_query.where(
+                Article.status != ArticleStatus.PUBLISHED,
+                Article.status != ArticleStatus.SELECTED_HOURLY,
+            )
+            if selected_today_ids:
+                base_query = base_query.where(Article.id.not_in(selected_today_ids))
+            articles = session.scalars(base_query).all()
+
+        if view in {"all", "backlog"}:
+            articles.sort(key=lambda a: (a.created_at or datetime.min), reverse=True)
+            working_limit = WORKING_SET_PAGE_LIMIT * page_size
+            if view == "all":
+                articles = articles[:working_limit]
+            else:
+                articles = articles[working_limit:]
+
+        query_text = str(q or "").strip()
+        if not query_text:
+            fast_query = base_query
+            if hide_double:
+                fast_query = fast_query.where(Article.status != ArticleStatus.DOUBLE)
+
+            if view in {"all", "backlog"}:
+                ordered_ids = [int(a.id) for a in articles]
+                if not ordered_ids:
+                    return {
+                        "items": [],
+                        "total": 0,
+                        "page": page,
+                        "page_size": page_size,
+                        "total_pages": 1,
+                        "view": view,
+                        "q": query_text,
+                    }
+                fast_query = select(Article).where(Article.id.in_(ordered_ids))
+
+            if sort_by == "score":
+                fast_query = fast_query.join(Score, Score.article_id == Article.id, isouter=True)
+                order_col = Score.final_score
+            elif sort_by == "source":
+                fast_query = fast_query.join(Source, Source.id == Article.source_id, isouter=True)
+                order_col = Source.name
+            elif sort_by in {"published_at", "published", "date"}:
+                order_col = func.coalesce(Article.published_at, Article.created_at)
+            else:
+                order_col = Article.created_at
+
+            reverse = sort_dir.lower() != "asc"
+            if reverse:
+                fast_query = fast_query.order_by(order_col.desc().nullslast(), Article.id.desc())
+            else:
+                fast_query = fast_query.order_by(order_col.asc().nullslast(), Article.id.asc())
+
+            if view in {"all", "backlog"}:
+                total = len(articles)
+            else:
+                total = int(session.scalar(select(func.count()).select_from(fast_query.order_by(None).subquery())) or 0)
+            paged_articles = session.scalars(
+                fast_query.offset((page - 1) * page_size).limit(page_size)
+            ).all()
+
+            items: list[dict] = []
+            for article in paged_articles:
+                score = session.get(Score, article.id)
+                source = session.get(Source, article.source_id)
+                item = _serialize_article(article, score, source)
+                if article.id in selected_day_map:
+                    item["selected_date"] = selected_day_map[article.id].isoformat()
+                item["is_selected_day"] = bool(
+                    session.scalar(
+                        select(DailySelection.id).where(
+                            DailySelection.article_id == article.id,
+                            DailySelection.selected_date == today,
+                            DailySelection.active.is_(True),
+                        )
+                    )
+                )
+                items.append(item)
+
+            total_pages = max(1, (total + page_size - 1) // page_size)
+            return {
+                "items": items,
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+                "total_pages": total_pages,
+                "view": view,
+                "q": query_text,
+            }
 
         for a in articles:
             score = session.get(Score, a.id)
@@ -1322,30 +1453,58 @@ def admin_data_articles(
             )
             result.append(item)
 
-    if hide_double:
-        result = [x for x in result if str(x.get("status") or "").upper() != "DOUBLE"]
+        if hide_double:
+            result = [x for x in result if str(x.get("status") or "").upper() != "DOUBLE"]
 
-    query_text = str(q or "").strip()
-    if query_text:
-        q_norm = query_text.casefold()
-        words = [w for w in re.split(r"\s+", q_norm) if w]
+        if query_text:
+            q_norm = query_text.casefold()
+            words = [w for w in re.split(r"\s+", q_norm) if w]
+            local_matches = [x for x in result if _matches_article_query(x, q_norm, words)]
+            result = local_matches
 
-        def _search_blob(x: dict) -> str:
-            parts = [
-                str(x.get("title") or ""),
-                str(x.get("ru_title") or ""),
-                str(x.get("subtitle") or ""),
-                str(x.get("short_hook") or ""),
-                str(x.get("text") or ""),
-                str(x.get("ru_summary") or ""),
-            ]
-            return "\n".join(parts).casefold()
+            # Search by article id should work from any section.
+            if not result and query_text.isdigit():
+                article = session.get(Article, int(query_text))
+                if article is not None:
+                    score = session.get(Score, article.id)
+                    source = session.get(Source, article.source_id)
+                    item = _serialize_article(article, score, source)
+                    if article.id in selected_day_map:
+                        item["selected_date"] = selected_day_map[article.id].isoformat()
+                    item["is_selected_day"] = bool(
+                        session.scalar(
+                            select(DailySelection.id).where(
+                                DailySelection.article_id == article.id,
+                                DailySelection.selected_date == today,
+                                DailySelection.active.is_(True),
+                            )
+                        )
+                    )
+                    result = [item]
 
-        exact_matches = [x for x in result if q_norm in _search_blob(x)]
-        if exact_matches:
-            result = exact_matches
-        elif words:
-            result = [x for x in result if all(w in _search_blob(x) for w in words)]
+            # If nothing was found in the current section, fall back to a global search
+            # so old scheduled / selected items remain reachable from the UI.
+            if not result:
+                all_articles = session.scalars(select(Article).order_by(Article.created_at.desc())).all()
+                fallback: list[dict] = []
+                for article in all_articles:
+                    score = session.get(Score, article.id)
+                    source = session.get(Source, article.source_id)
+                    item = _serialize_article(article, score, source)
+                    if article.id in selected_day_map:
+                        item["selected_date"] = selected_day_map[article.id].isoformat()
+                    item["is_selected_day"] = bool(
+                        session.scalar(
+                            select(DailySelection.id).where(
+                                DailySelection.article_id == article.id,
+                                DailySelection.selected_date == today,
+                                DailySelection.active.is_(True),
+                            )
+                        )
+                    )
+                    if _matches_article_query(item, q_norm, words):
+                        fallback.append(item)
+                result = fallback
 
     reverse = sort_dir.lower() != "asc"
     # Default sort for ALL: newest day first, and within the day show the highest-scored items on top.
@@ -2788,6 +2947,18 @@ def published_page(request: Request):
     return admin_published_page(request)
 
 
+@app.get("/admin/backlog", response_class=HTMLResponse)
+def admin_backlog_page(request: Request):
+    if _get_session_user(request) is None:
+        return RedirectResponse(url="/login", status_code=303)
+    return _render_admin_list_page("backlog")
+
+
+@app.get("/backlog", response_class=HTMLResponse)
+def backlog_page(request: Request):
+    return admin_backlog_page(request)
+
+
 @app.get("/admin/selected-day", response_class=HTMLResponse)
 def admin_selected_day_page(request: Request):
     if _get_session_user(request) is None:
@@ -3228,6 +3399,7 @@ def _render_admin_list_page(view: str) -> str:
         <div class="menu-trigger">Articles</div>
         <div class="menu-panel">
           <a class="menu-item" href="/">All</a>
+          <a class="menu-item" href="/backlog">Backlog</a>
           <a class="menu-item" href="/unsorted">Unsorted</a>
           <a class="menu-item" href="/published">Published</a>
           <a class="menu-item" href="/selected-day">Selected Day</a>
