@@ -16,6 +16,7 @@ RUN python -m playwright install --with-deps chromium
 
 COPY app ./app
 COPY scripts ./scripts
+COPY admin-web/dist ./admin-web/dist
 
 EXPOSE 8000
 

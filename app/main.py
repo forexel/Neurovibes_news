@@ -11,7 +11,7 @@ from html import escape
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -79,6 +79,10 @@ from app.services.runtime_settings import (
 
 app = FastAPI(title="Neurovibes News API", version="0.3.0")
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
+ADMIN_WEB_DIST = Path("admin-web/dist")
+ADMIN_WEB_ASSETS = ADMIN_WEB_DIST / "assets"
+if ADMIN_WEB_ASSETS.exists():
+    app.mount("/assets", StaticFiles(directory=str(ADMIN_WEB_ASSETS)), name="admin_web_assets")
 app.include_router(v1_router)
 
 WORKING_SET_PAGE_LIMIT = 20
@@ -126,6 +130,41 @@ def _require_session_user(request: Request) -> User:
     if user is None:
         raise HTTPException(status_code=401, detail="auth_required")
     return user
+
+
+def _react_admin_index_file() -> Path:
+    index_file = ADMIN_WEB_DIST / "index.html"
+    if not index_file.exists():
+        raise HTTPException(status_code=404, detail="admin_web_dist_not_built")
+    return index_file
+
+
+def _serve_react_admin(request: Request, *, require_auth: bool = True):
+    if require_auth and _get_session_user(request) is None:
+        return RedirectResponse(url="/login", status_code=303)
+    return FileResponse(_react_admin_index_file())
+
+
+def _serve_react_admin_home(request: Request):
+    user = _get_session_user(request)
+    if user is None:
+        return RedirectResponse(url="/login", status_code=303)
+    with session_scope() as session:
+        ws = session.scalars(select(UserWorkspace).where(UserWorkspace.user_id == user.id)).first()
+        if ws is None:
+            ws = UserWorkspace(user_id=user.id, onboarding_step=1, onboarding_completed=False)
+            session.add(ws)
+            session.flush()
+        if not ws.onboarding_completed:
+            articles_cnt = int(session.scalar(select(func.count(Article.id))) or 0)
+            sources_cnt = int(session.scalar(select(func.count(Source.id))) or 0)
+            if articles_cnt > 0 and sources_cnt > 0:
+                ws.onboarding_step = 4
+                ws.onboarding_completed = True
+                ws.updated_at = datetime.utcnow()
+            else:
+                return RedirectResponse(url="/setup", status_code=303)
+    return FileResponse(_react_admin_index_file())
 
 
 def _article_search_blob(x: dict) -> str:
@@ -279,7 +318,8 @@ def health() -> dict[str, str]:
 
 
 @app.get("/login", response_class=HTMLResponse)
-def login_page() -> str:
+def login_page(request: Request):
+    return _serve_react_admin(request, require_auth=False)
     return """
 <!doctype html>
 <html lang='ru'>
@@ -316,7 +356,8 @@ def login_submit(login: str = Form(...), password: str = Form(...)) -> RedirectR
 
 
 @app.get("/register", response_class=HTMLResponse)
-def register_page() -> str:
+def register_page(request: Request):
+    return _serve_react_admin(request, require_auth=False)
     return """
 <!doctype html>
 <html lang='ru'>
@@ -2490,6 +2531,7 @@ def telegram_review_poll(request: Request) -> dict:
 
 @app.get("/admin/score", response_class=HTMLResponse)
 def admin_score_page(request: Request):
+    return _serve_react_admin(request)
     if _get_session_user(request) is None:
         return RedirectResponse(url="/login", status_code=303)
     return """
@@ -2651,11 +2693,12 @@ def admin_score_page(request: Request):
 
 @app.get("/score", response_class=HTMLResponse)
 def score_page(request: Request):
-    return admin_score_page(request)
+    return _serve_react_admin(request)
 
 
 @app.get("/admin/setup", response_class=HTMLResponse)
 def admin_setup_page(request: Request):
+    return _serve_react_admin(request)
     if _get_session_user(request) is None:
         return RedirectResponse(url="/login", status_code=303)
     return """
@@ -2902,124 +2945,100 @@ def admin_setup_page(request: Request):
 
 @app.get("/setup", response_class=HTMLResponse)
 def setup_page(request: Request):
-    return admin_setup_page(request)
+    return _serve_react_admin(request)
+
+
+@app.get("/app", response_class=HTMLResponse)
+@app.get("/app/{path:path}", response_class=HTMLResponse)
+def react_admin_app(request: Request, path: str = ""):
+    target = "/" + str(path or "").lstrip("/")
+    if target == "/":
+        return RedirectResponse(url="/", status_code=303)
+    return RedirectResponse(url=target, status_code=303)
 
 
 @app.get("/admin", response_class=HTMLResponse)
 def admin_page(request: Request):
-    # Keep /admin for backward compatibility, but treat root "/" as the main entrypoint.
     return RedirectResponse(url="/", status_code=303)
 
 
 @app.get("/", response_class=HTMLResponse)
 def home_page(request: Request):
-    # Platform root.
-    user = _get_session_user(request)
-    if user is None:
-        return RedirectResponse(url="/login", status_code=303)
-    with session_scope() as session:
-        ws = session.scalars(select(UserWorkspace).where(UserWorkspace.user_id == user.id)).first()
-        if ws is None:
-            ws = UserWorkspace(user_id=user.id, onboarding_step=1, onboarding_completed=False)
-            session.add(ws)
-            session.flush()
-        if not ws.onboarding_completed:
-            articles_cnt = int(session.scalar(select(func.count(Article.id))) or 0)
-            sources_cnt = int(session.scalar(select(func.count(Source.id))) or 0)
-            if articles_cnt > 0 and sources_cnt > 0:
-                ws.onboarding_step = 4
-                ws.onboarding_completed = True
-                ws.updated_at = datetime.utcnow()
-            else:
-                return RedirectResponse(url="/setup", status_code=303)
-    return _render_admin_list_page("all")
+    return _serve_react_admin_home(request)
 
 
 @app.get("/admin/published", response_class=HTMLResponse)
 def admin_published_page(request: Request):
-    if _get_session_user(request) is None:
-        return RedirectResponse(url="/login", status_code=303)
-    return _render_admin_list_page("published")
+    return _serve_react_admin(request)
 
 
 @app.get("/published", response_class=HTMLResponse)
 def published_page(request: Request):
-    return admin_published_page(request)
+    return _serve_react_admin(request)
 
 
 @app.get("/admin/backlog", response_class=HTMLResponse)
 def admin_backlog_page(request: Request):
-    if _get_session_user(request) is None:
-        return RedirectResponse(url="/login", status_code=303)
-    return _render_admin_list_page("backlog")
+    return _serve_react_admin(request)
 
 
 @app.get("/backlog", response_class=HTMLResponse)
 def backlog_page(request: Request):
-    return admin_backlog_page(request)
+    return _serve_react_admin(request)
 
 
 @app.get("/admin/selected-day", response_class=HTMLResponse)
 def admin_selected_day_page(request: Request):
-    if _get_session_user(request) is None:
-        return RedirectResponse(url="/login", status_code=303)
-    return _render_admin_list_page("selected_day")
+    return _serve_react_admin(request)
 
 
 @app.get("/selected-day", response_class=HTMLResponse)
 def selected_day_page(request: Request):
-    return admin_selected_day_page(request)
+    return _serve_react_admin(request)
 
 
 @app.get("/admin/selected-hour", response_class=HTMLResponse)
 def admin_selected_hour_page(request: Request):
-    if _get_session_user(request) is None:
-        return RedirectResponse(url="/login", status_code=303)
-    return _render_admin_list_page("selected_hour")
+    return _serve_react_admin(request)
 
 
 @app.get("/selected-hour", response_class=HTMLResponse)
 def selected_hour_page(request: Request):
-    return admin_selected_hour_page(request)
+    return _serve_react_admin(request)
 
 @app.get("/admin/unsorted", response_class=HTMLResponse)
 def admin_unsorted_page(request: Request):
-    if _get_session_user(request) is None:
-        return RedirectResponse(url="/login", status_code=303)
-    return _render_admin_list_page("unsorted")
+    return _serve_react_admin(request)
 
 
 @app.get("/unsorted", response_class=HTMLResponse)
 def unsorted_page(request: Request):
-    return admin_unsorted_page(request)
+    return _serve_react_admin(request)
 
 
 @app.get("/admin/no-double", response_class=HTMLResponse)
 def admin_no_double_page(request: Request):
-    if _get_session_user(request) is None:
-        return RedirectResponse(url="/login", status_code=303)
-    return _render_admin_list_page("no_double")
+    return _serve_react_admin(request)
 
 
 @app.get("/no-double", response_class=HTMLResponse)
 def no_double_page(request: Request):
-    return admin_no_double_page(request)
+    return _serve_react_admin(request)
 
 
 @app.get("/admin/deleted", response_class=HTMLResponse)
 def admin_deleted_page(request: Request):
-    if _get_session_user(request) is None:
-        return RedirectResponse(url="/login", status_code=303)
-    return _render_admin_list_page("deleted")
+    return _serve_react_admin(request)
 
 
 @app.get("/deleted", response_class=HTMLResponse)
 def deleted_page(request: Request):
-    return admin_deleted_page(request)
+    return _serve_react_admin(request)
 
 
 @app.get("/admin/sources", response_class=HTMLResponse)
 def admin_sources_page(request: Request):
+    return _serve_react_admin(request)
     if _get_session_user(request) is None:
         return RedirectResponse(url="/login", status_code=303)
     user = _get_session_user(request)
@@ -3188,11 +3207,12 @@ def admin_sources_page(request: Request):
 
 @app.get("/sources", response_class=HTMLResponse)
 def sources_page(request: Request):
-    return admin_sources_page(request)
+    return _serve_react_admin(request)
 
 
 @app.get("/bot", response_class=HTMLResponse)
 def bot_page(request: Request):
+    return _serve_react_admin(request)
     _require_session_user(request)
     user = _get_session_user(request)
     with session_scope() as session:
@@ -3334,6 +3354,7 @@ def bot_page(request: Request):
 
 @app.get("/publish", response_class=HTMLResponse)
 def publish_settings_page(request: Request):
+    return _serve_react_admin(request)
     _require_session_user(request)
     return """
 <!doctype html>
@@ -4281,6 +4302,7 @@ def _render_admin_list_page(view: str) -> str:
 @app.get("/article/{article_id}", response_class=HTMLResponse)
 @app.get("/admin/article/{article_id}", response_class=HTMLResponse)
 def admin_article_page(article_id: int, request: Request):
+    return _serve_react_admin(request)
     if _get_session_user(request) is None:
         return RedirectResponse(url="/login", status_code=303)
     with session_scope() as session:
