@@ -106,7 +106,8 @@ export function TopNavigation() {
                 Действия
               </Button>
               {openMenu === "actions" ? (
-                <div className="absolute left-0 top-full mt-2 w-64 rounded-md border border-border bg-popover p-1 shadow-md">
+                <div className="absolute left-0 top-full w-64 pt-2">
+                  <div className="rounded-md border border-border bg-popover p-1 shadow-md">
                   <div className="px-2 py-1 text-xs text-muted-foreground">Сбор статей</div>
                   <button
                     className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent"
@@ -172,6 +173,7 @@ export function TopNavigation() {
                   >
                     Пересобрать профиль
                   </button>
+                  </div>
                 </div>
               ) : null}
             </div>
@@ -190,7 +192,8 @@ export function TopNavigation() {
                 Инструменты
               </Button>
               {openMenu === "tools" ? (
-                <div className="absolute left-0 top-full mt-2 w-48 rounded-md border border-border bg-popover p-1 shadow-md">
+                <div className="absolute left-0 top-full w-48 pt-2">
+                  <div className="rounded-md border border-border bg-popover p-1 shadow-md">
                   <Link
                     to="/setup"
                     className="flex items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-accent"
@@ -223,6 +226,7 @@ export function TopNavigation() {
                     <Settings className="w-4 h-4" />
                     Оценка
                   </Link>
+                  </div>
                 </div>
               ) : null}
             </div>
@@ -254,7 +258,8 @@ export function TopNavigation() {
             Аккаунт
           </Button>
           {openMenu === "account" ? (
-            <div className="absolute right-0 top-full mt-2 w-48 rounded-md border border-border bg-popover p-1 shadow-md">
+            <div className="absolute right-0 top-full w-48 pt-2">
+              <div className="rounded-md border border-border bg-popover p-1 shadow-md">
               <Link
                 to="/setup"
                 className="flex items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-accent"
@@ -272,6 +277,7 @@ export function TopNavigation() {
                 <LogOut className="w-4 h-4" />
                 Выйти
               </a>
+              </div>
             </div>
           ) : null}
         </div>
