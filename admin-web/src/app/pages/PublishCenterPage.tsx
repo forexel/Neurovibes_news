@@ -13,15 +13,16 @@ import {
 } from "../components/ui/table";
 import { StatusBadge } from "../components/StatusBadge";
 import { ScoreBadge } from "../components/ScoreBadge";
-import { Calendar, CheckCircle2, Clock, Edit, Image as ImageIcon, RefreshCw, Send } from "lucide-react";
+import { CheckCircle2, Clock, Edit, Image as ImageIcon, RefreshCw, Send, Trash2 } from "lucide-react";
 import { api, ApiError, ArticleListItem, formatDateTime, SetupState } from "../lib/api";
 
-type PublishPanel = "actionable" | "scheduled" | "upcoming" | "published";
+type PublishPanel = "actionable" | "scheduled" | "deleted" | "published";
 
 export default function PublishCenterPage() {
   const navigate = useNavigate();
   const [setupState, setSetupState] = useState<SetupState | null>(null);
   const [allArticles, setAllArticles] = useState<ArticleListItem[]>([]);
+  const [deletedArticles, setDeletedArticles] = useState<ArticleListItem[]>([]);
   const [publishedArticles, setPublishedArticles] = useState<ArticleListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
@@ -32,14 +33,16 @@ export default function PublishCenterPage() {
     setLoading(true);
     setError("");
     try {
-      const [setup, allData, publishedData] = await Promise.all([
+      const [setup, allData, publishedData, deletedData] = await Promise.all([
         api.getSetupState(),
         api.listArticles({ view: "all", page: "1", page_size: "300" }),
         api.listArticles({ view: "published", page: "1", page_size: "200" }),
+        api.listArticles({ view: "deleted", page: "1", page_size: "200" }),
       ]);
       setSetupState(setup);
       setAllArticles(allData.items || []);
       setPublishedArticles(publishedData.items || []);
+      setDeletedArticles(deletedData.items || []);
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         navigate("/login", { replace: true });
@@ -68,10 +71,6 @@ export default function PublishCenterPage() {
     }
   }
 
-  const queueArticles = useMemo(
-    () => allArticles.filter((item) => ["ready", "selected_hourly"].includes(item.status)),
-    [allArticles],
-  );
   const scheduledArticles = useMemo(
     () =>
       allArticles
@@ -79,21 +78,26 @@ export default function PublishCenterPage() {
         .sort((a, b) => String(a.scheduled_publish_at || "").localeCompare(String(b.scheduled_publish_at || ""))),
     [allArticles],
   );
-  const upcomingScheduled = useMemo(() => scheduledArticles.slice(0, 3), [scheduledArticles]);
   const draftsArticles = useMemo(
-    () => allArticles.filter((item) => ["review", "scored", "selected_hourly", "ready"].includes(item.status)),
+    () =>
+      allArticles.filter(
+        (item) =>
+          ["review", "scored", "selected_hourly", "ready"].includes(item.status) &&
+          String(item.content_mode || "").toLowerCase() !== "summary_only",
+      ),
     [allArticles],
   );
 
-  const panelMeta = useMemo<Record<PublishPanel, { title: string; items: ArticleListItem[]; emptyTitle: string; emptyText: string; showSchedule?: boolean; showPublishNow?: boolean; showUnschedule?: boolean; emptyIcon: ReactNode }>>(
+  const panelMeta = useMemo<Record<PublishPanel, { title: string; items: ArticleListItem[]; emptyTitle: string; emptyText: string; showSchedule?: boolean; showPublishNow?: boolean; showUnschedule?: boolean; showDelete?: boolean; emptyIcon: ReactNode }>>(
     () => ({
       actionable: {
         title: "Нужно сделать",
         items: draftsArticles,
         emptyTitle: "Нет статей для обработки",
-        emptyText: "Статьи со статусами review, scored, ready или selected_hourly появятся здесь",
+        emptyText: "Здесь статьи, где надо принять решение: дописать RU текст, проверить карточку, опубликовать или удалить",
         emptyIcon: <ImageIcon className="w-12 h-12 text-muted-foreground mx-auto mb-4" />,
         showPublishNow: true,
+        showDelete: true,
       },
       scheduled: {
         title: "Запланированные публикации",
@@ -104,16 +108,14 @@ export default function PublishCenterPage() {
         showSchedule: true,
         showPublishNow: true,
         showUnschedule: true,
+        showDelete: true,
       },
-      upcoming: {
-        title: "Ближайшие публикации",
-        items: upcomingScheduled,
-        emptyTitle: "Нет ближайших публикаций",
-        emptyText: "Следующие отправки в Telegram появятся здесь",
-        emptyIcon: <Calendar className="w-12 h-12 text-muted-foreground mx-auto mb-4" />,
-        showSchedule: true,
-        showPublishNow: true,
-        showUnschedule: true,
+      deleted: {
+        title: "Удалённые и архив",
+        items: deletedArticles,
+        emptyTitle: "Нет удалённых статей",
+        emptyText: "Архивированные и удалённые материалы появятся здесь",
+        emptyIcon: <Trash2 className="w-12 h-12 text-muted-foreground mx-auto mb-4" />,
       },
       published: {
         title: "Уже опубликовано",
@@ -123,7 +125,7 @@ export default function PublishCenterPage() {
         emptyIcon: <Send className="w-12 h-12 text-muted-foreground mx-auto mb-4" />,
       },
     }),
-    [draftsArticles, publishedArticles, scheduledArticles, upcomingScheduled],
+    [deletedArticles, draftsArticles, publishedArticles, scheduledArticles],
   );
 
   const activeList = panelMeta[activePanel];
@@ -195,12 +197,12 @@ export default function PublishCenterPage() {
             onClick={() => setActivePanel("scheduled")}
           />
           <StatCard
-            icon={<Calendar className="w-5 h-5 text-purple-400" />}
-            label="Ближайшие"
-            description="Что произойдёт следующим"
-            value={upcomingScheduled.length}
-            active={activePanel === "upcoming"}
-            onClick={() => setActivePanel("upcoming")}
+            icon={<Trash2 className="w-5 h-5 text-red-400" />}
+            label="Удалённые"
+            description="Архив и удалённые материалы"
+            value={deletedArticles.length}
+            active={activePanel === "deleted"}
+            onClick={() => setActivePanel("deleted")}
           />
           <StatCard
             icon={<CheckCircle2 className="w-5 h-5 text-green-400" />}
@@ -229,6 +231,16 @@ export default function PublishCenterPage() {
           emptyText={activeList.emptyText}
           showSchedule={activeList.showSchedule}
           actionLoading={actionLoading}
+          onOpenArticle={(articleId) => navigate(`/article/${articleId}`)}
+          onDeleteArticle={
+            activeList.showDelete
+              ? (articleId) => {
+                  const reason = window.prompt("Причина удаления статьи", "");
+                  if (!reason || !reason.trim()) return;
+                  void runAction(`Удалить #${articleId}`, () => api.deleteArticle(articleId, reason.trim()));
+                }
+              : undefined
+          }
           onPublishNow={
             activeList.showPublishNow
               ? (articleId) => runAction(`Опубликовать #${articleId}`, () => api.postArticleAction(articleId, "publish"))
@@ -285,6 +297,8 @@ function ArticlesTable({
   emptyText,
   showSchedule = false,
   actionLoading = null,
+  onOpenArticle,
+  onDeleteArticle,
   onPublishNow,
   onUnschedule,
 }: {
@@ -294,6 +308,8 @@ function ArticlesTable({
   emptyText: string;
   showSchedule?: boolean;
   actionLoading?: string | null;
+  onOpenArticle?: (articleId: number) => void;
+  onDeleteArticle?: (articleId: number) => void;
   onPublishNow?: (articleId: number) => void;
   onUnschedule?: (articleId: number) => void;
 }) {
@@ -331,7 +347,7 @@ function ArticlesTable({
               <TableRow
                 key={article.id}
                 className="cursor-pointer hover:bg-muted/50"
-                onClick={() => navigate(`/article/${article.id}`)}
+                onClick={() => onOpenArticle?.(article.id)}
               >
                 <TableCell className="font-mono text-xs text-muted-foreground">#{article.id}</TableCell>
                 <TableCell>
@@ -365,6 +381,20 @@ function ArticlesTable({
                 )}
                 <TableCell>
                   <div className="flex flex-wrap gap-2">
+                    {onDeleteArticle ? (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="px-3 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onDeleteArticle(article.id);
+                        }}
+                        aria-label={`Удалить статью #${article.id}`}
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </Button>
+                    ) : null}
                     {onPublishNow ? (
                       <Button
                         size="sm"

@@ -112,6 +112,7 @@ export default function ArticleEditor() {
 
   const postPreview = useMemo(() => article?.post_preview || "RU текст не готов. Сгенерируй пост и сохрани его.", [article]);
   const selectedScheduleDate = useMemo(() => getScheduleDateValue(scheduleDate), [scheduleDate]);
+  const hasInsufficientContent = String(article.content_mode || "").toLowerCase() === "summary_only";
 
   async function run(label: string, action: () => Promise<Record<string, unknown>>) {
     setLoading(label);
@@ -203,6 +204,12 @@ export default function ArticleEditor() {
             {article.score_reasoning ? <span>• {article.score_reasoning}</span> : null}
           </div>
         </div>
+
+        {hasInsufficientContent ? (
+          <div className="mb-6 rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-4 py-3 text-sm text-yellow-100">
+            Недостаточно контента для публикации. Сейчас в статье только короткий RSS summary. Нажми "Загрузить с сайта", и если сайт не отдаёт полный текст, материал лучше не публиковать.
+          </div>
+        ) : null}
 
         <Tabs defaultValue="linear" className="space-y-6">
           <TabsList>
@@ -431,7 +438,10 @@ export default function ArticleEditor() {
                       <Button variant="outline" onClick={() => run("Prepare + Image", () => api.postArticleAction(articleId, "prepare"))}>
                         Prepare + Image
                       </Button>
-                      <Button onClick={() => run("Publish", () => api.postArticleAction(articleId, "publish"))}>
+                      <Button
+                        onClick={() => run("Publish", () => api.postArticleAction(articleId, "publish"))}
+                        disabled={hasInsufficientContent}
+                      >
                         <Send className="w-4 h-4 mr-2" />
                         Publish
                       </Button>

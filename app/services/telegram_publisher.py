@@ -13,6 +13,8 @@ from app.models import Article, ArticleStatus, PublishJob, PublishStatus, Telegr
 from app.services.content_generation import generate_ru_summary
 from app.services.telegram_context import telegram_bot_token, telegram_channel_id, telegram_signature
 
+_MIN_FULL_TEXT_LEN = 500
+
 
 def send_test_message(text: str = "Neurovibes bot test message") -> dict:
     channel_id = (telegram_channel_id() or settings.telegram_channel_id or "").strip()
@@ -48,6 +50,14 @@ def _has_pending_review(session, article_id: int) -> bool:
     return status in {"sent", "resent"}
 
 
+def _has_sufficient_publish_content(article: Article) -> bool:
+    text_len = len((article.text or "").strip())
+    mode = str(article.content_mode or "summary_only").strip().lower()
+    if mode != "summary_only":
+        return True
+    return text_len >= _MIN_FULL_TEXT_LEN
+
+
 def publish_article(article_id: int, *, manual: bool = True) -> dict:
     # Hard rule: publish only RU posts. If RU content is missing, try to prepare it automatically.
     with session_scope() as session:
@@ -58,6 +68,12 @@ def publish_article(article_id: int, *, manual: bool = True) -> dict:
             return {"ok": False, "error": f"publish_blocked_status:{str(article.status)}"}
         if (not manual) and _has_pending_review(session, article_id):
             return {"ok": False, "error": "publish_blocked_pending_review"}
+        if not _has_sufficient_publish_content(article):
+            return {
+                "ok": False,
+                "error": "publish_blocked_insufficient_content",
+                "hint": "Сайт не дал полный текст. Нужен полноценный материал, а не короткий RSS summary.",
+            }
         has_ru = bool((article.ru_title or "").strip()) and bool((article.ru_summary or "").strip())
     if not has_ru:
         try:
@@ -73,6 +89,12 @@ def publish_article(article_id: int, *, manual: bool = True) -> dict:
             return {"ok": False, "error": f"publish_blocked_status:{str(article.status)}"}
         if (not manual) and _has_pending_review(session, article_id):
             return {"ok": False, "error": "publish_blocked_pending_review"}
+        if not _has_sufficient_publish_content(article):
+            return {
+                "ok": False,
+                "error": "publish_blocked_insufficient_content",
+                "hint": "Сайт не дал полный текст. Нужен полноценный материал, а не короткий RSS summary.",
+            }
         if not (article.ru_title or "").strip() or not (article.ru_summary or "").strip():
             return {"ok": False, "error": "ru_content_required", "hint": "Нажми Generate Post и/или Translate Full, затем сохрани RU текст"}
 
