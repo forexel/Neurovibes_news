@@ -172,7 +172,12 @@ def _resolve_hourly_selection_strategy(now_utc: datetime | None = None) -> str:
         strategy_key = strategy.strip().lower()
         if 0 <= hour_key <= 23 and strategy_key in {"script", "ml", "off"}:
             mapping[hour_key] = strategy_key
-    return mapping.get(hour, default_strategy if default_strategy in {"script", "ml", "off"} else "ml")
+    resolved = mapping.get(hour, default_strategy if default_strategy in {"script", "ml", "off"} else "ml")
+    if resolved == "ml":
+        interval_hours = int(max(1, round(get_runtime_float("ml_review_every_n_hours", default=2.0))))
+        if (int(hour) % interval_hours) != 0:
+            return "off"
+    return resolved
 
 
 def _ml_candidate_score(article: Article, score: Score) -> tuple[float, dict]:
@@ -367,16 +372,24 @@ def pick_hourly_top(strategy: str | None = None) -> int | None:
             "selector_kind": "script",
         }
     elif resolved_strategy == "ml":
+        min_confidence = float(get_runtime_float("ml_review_min_confidence", default=0.72))
         scored_candidates: list[tuple[Article, Score, float, dict]] = []
         for article, score in candidates:
+            if str(article.content_mode or "summary_only").strip().lower() == "summary_only":
+                continue
             ml_score, ml_explain = _ml_candidate_score(article, score)
             scored_candidates.append((article, score, ml_score, ml_explain))
         scored_candidates.sort(key=lambda x: x[2], reverse=True)
-        top3 = [(article, score) for article, score, _, _ in scored_candidates[:3]]
+        gated_candidates = [
+            (article, score, ml_score, ml_explain)
+            for article, score, ml_score, ml_explain in scored_candidates
+            if float(ml_explain.get("confidence") or 0.0) >= min_confidence
+        ]
+        top3 = [(article, score) for article, score, _, _ in gated_candidates[:3]]
         if not top3:
             return None
         selected_id = int(top3[0][0].id)
-        top_ml_meta = scored_candidates[0][3]
+        top_ml_meta = gated_candidates[0][3]
         explain = {
             "mode": "ml",
             "confidence": top_ml_meta.get("confidence"),

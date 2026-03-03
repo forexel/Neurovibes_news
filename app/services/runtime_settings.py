@@ -62,6 +62,8 @@ RUNTIME_DEFAULTS: dict[str, str] = {
     "timezone_name": os.getenv("TIMEZONE_NAME", "Europe/Moscow").strip() or "Europe/Moscow",
     # ML ranking blend (0..0.8). Start low and increase gradually as dataset grows.
     "ml_editor_choice_weight": "0.10",
+    "ml_review_every_n_hours": "2",
+    "ml_review_min_confidence": "0.72",
     # Hour-end article selection strategy.
     # Examples: "09:script,10:ml,11:off"
     "hourly_slot_strategy_csv": os.getenv("HOURLY_SLOT_STRATEGY_CSV", "").strip(),
