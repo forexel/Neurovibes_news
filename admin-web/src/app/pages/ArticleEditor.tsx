@@ -5,6 +5,8 @@ import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Textarea } from "../components/ui/textarea";
 import { Label } from "../components/ui/label";
+import { Calendar as DateCalendar } from "../components/ui/calendar";
+import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
 import { StatusBadge } from "../components/StatusBadge";
 import { ScoreBadge } from "../components/ScoreBadge";
 import { LogPanel } from "../components/LogPanel";
@@ -22,6 +24,8 @@ import {
   Wand2,
 } from "lucide-react";
 import { api, ApiError, ArticleDetails, formatDateTime } from "../lib/api";
+import { format } from "date-fns";
+import { ru } from "date-fns/locale";
 
 type LogEntry = { type: "info" | "success" | "error"; message: string; timestamp?: string };
 
@@ -37,6 +41,23 @@ function toInputDate(value?: string | null) {
 
 function stamp() {
   return new Date().toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+function getScheduleDateValue(value: string): Date | undefined {
+  if (!value) return undefined;
+  const date = new Date(`${value}:00`);
+  return Number.isNaN(date.getTime()) ? undefined : date;
+}
+
+function updateScheduleValue(currentValue: string, nextDate?: Date, nextTime?: string) {
+  const base = getScheduleDateValue(currentValue) || new Date();
+  const datePart = nextDate
+    ? `${nextDate.getFullYear()}-${String(nextDate.getMonth() + 1).padStart(2, "0")}-${String(nextDate.getDate()).padStart(2, "0")}`
+    : `${base.getFullYear()}-${String(base.getMonth() + 1).padStart(2, "0")}-${String(base.getDate()).padStart(2, "0")}`;
+  const timePart =
+    nextTime ??
+    `${String(base.getHours()).padStart(2, "0")}:${String(base.getMinutes()).padStart(2, "0")}`;
+  return `${datePart}T${timePart}`;
 }
 
 export default function ArticleEditor() {
@@ -56,6 +77,7 @@ export default function ArticleEditor() {
   const [imagePrompt, setImagePrompt] = useState("");
   const [feedback, setFeedback] = useState("");
   const [scheduleDate, setScheduleDate] = useState("");
+  const [schedulePopoverOpen, setSchedulePopoverOpen] = useState(false);
 
   function addLog(type: LogEntry["type"], message: string) {
     setLogs((prev) => [...prev, { type, message, timestamp: stamp() }]);
@@ -89,6 +111,7 @@ export default function ArticleEditor() {
   }, [articleId]);
 
   const postPreview = useMemo(() => article?.post_preview || "RU текст не готов. Сгенерируй пост и сохрани его.", [article]);
+  const selectedScheduleDate = useMemo(() => getScheduleDateValue(scheduleDate), [scheduleDate]);
 
   async function run(label: string, action: () => Promise<Record<string, unknown>>) {
     setLoading(label);
@@ -358,7 +381,34 @@ export default function ArticleEditor() {
                   <div className="space-y-4">
                     <div className="space-y-2">
                       <Label htmlFor="schedule">Отложенная публикация</Label>
-                      <Input id="schedule" type="datetime-local" value={scheduleDate} onChange={(e) => setScheduleDate(e.target.value)} />
+                      <div className="flex gap-2">
+                        <Popover open={schedulePopoverOpen} onOpenChange={setSchedulePopoverOpen}>
+                          <PopoverTrigger asChild>
+                            <Button id="schedule" type="button" variant="outline" className="flex-1 justify-start text-left font-normal">
+                              <Calendar className="mr-2 h-4 w-4" />
+                              {selectedScheduleDate
+                                ? format(selectedScheduleDate, "d MMMM yyyy", { locale: ru })
+                                : "Выбрать дату"}
+                            </Button>
+                          </PopoverTrigger>
+                          <PopoverContent className="w-auto p-0" align="start">
+                            <DateCalendar
+                              mode="single"
+                              selected={selectedScheduleDate}
+                              onSelect={(date) => {
+                                setScheduleDate((current) => updateScheduleValue(current, date));
+                                setSchedulePopoverOpen(false);
+                              }}
+                            />
+                          </PopoverContent>
+                        </Popover>
+                        <Input
+                          type="time"
+                          value={scheduleDate ? scheduleDate.slice(11, 16) : ""}
+                          onChange={(e) => setScheduleDate((current) => updateScheduleValue(current, undefined, e.target.value || "10:00"))}
+                          className="w-32"
+                        />
+                      </div>
                     </div>
                     <div className="flex flex-wrap gap-2">
                       <Button
