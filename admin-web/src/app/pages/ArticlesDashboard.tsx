@@ -273,92 +273,6 @@ export default function ArticlesDashboard() {
 
         <div className="mb-6 bg-card border border-border rounded-lg p-4">
           <div className="flex flex-wrap items-center gap-4">
-            <div className="min-w-[420px] flex-1 rounded-lg border border-border bg-background/70 p-4">
-              <div className="flex flex-wrap items-start gap-4">
-                <div className="flex min-w-[220px] items-center gap-3">
-                  <div className="flex h-9 w-9 items-center justify-center rounded-lg border border-blue-500/30 bg-blue-500/10 text-blue-400">
-                    <Download className="h-4 w-4" />
-                  </div>
-                  <div>
-                    <div className="text-sm font-medium">Сбор статей из источников</div>
-                    <div className="text-xs text-muted-foreground">Импорт новых статей из RSS и веб-источников</div>
-                  </div>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-3">
-                  <span className="text-sm text-muted-foreground">Период:</span>
-                  <div className="flex items-center gap-1 rounded-lg bg-muted/50 p-1">
-                    {([
-                      ["hour", "Час"],
-                      ["day", "День"],
-                      ["week", "Неделя"],
-                      ["month", "Месяц"],
-                    ] as const).map(([value, label]) => (
-                      <button
-                        key={value}
-                        type="button"
-                        onClick={() => setAggregatePeriod(value)}
-                        disabled={aggregateLoading}
-                        className={`rounded-md px-3 py-1.5 text-sm font-medium transition-all ${
-                          aggregatePeriod === value
-                            ? "bg-primary text-primary-foreground shadow-sm"
-                            : "text-muted-foreground hover:bg-muted hover:text-foreground"
-                        } ${aggregateLoading ? "cursor-not-allowed opacity-50" : ""}`}
-                      >
-                        {label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <Button type="button" onClick={handleAggregateSync} disabled={aggregateLoading} className="gap-2">
-                  {aggregateLoading ? (
-                    <>
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                      Сбор...
-                    </>
-                  ) : (
-                    <>
-                      <Download className="h-4 w-4" />
-                      Собрать статьи
-                    </>
-                  )}
-                </Button>
-
-                <div className="ml-auto flex flex-wrap items-center gap-4 text-xs">
-                  {lastCollectionTime ? (
-                    <div className="flex items-center gap-2 text-muted-foreground">
-                      <Clock className="h-3.5 w-3.5" />
-                      <span>Последний сбор: {formatDateTime(lastCollectionTime)}</span>
-                    </div>
-                  ) : null}
-                  {collectionResult && !aggregateLoading ? (
-                    <div className="flex items-center gap-2">
-                      <CheckCircle2 className="h-3.5 w-3.5 text-green-400" />
-                      <span className="text-green-300">+{Number(collectionResult.inserted_total || 0)} новых</span>
-                    </div>
-                  ) : null}
-                </div>
-              </div>
-
-              {aggregateLoading || aggregateJob?.status === "running" ? (
-                <div className="mt-4 border-t border-border pt-4">
-                  <div className="mb-2 flex items-center justify-between">
-                    <span className="text-xs text-muted-foreground">
-                      Загрузка статей за {periodLabels[aggregatePeriod].toLowerCase()}
-                      {aggregateJob?.stage_detail ? ` (${aggregateJob.stage_detail})` : "..."}
-                    </span>
-                    <span className="text-xs text-muted-foreground">
-                      {(aggregateJob?.processed || 0) > 0 && (aggregateJob?.total || 0) > 0
-                        ? `${aggregateJob?.processed}/${aggregateJob?.total}`
-                        : "Обработка источников"}
-                    </span>
-                  </div>
-                  <Progress value={aggregateProgress} className="h-1.5" />
-                </div>
-              ) : null}
-            </div>
-
             <div className="flex items-center gap-2">
               <Switch id="no-double" checked={noDoubleFilter} onCheckedChange={setNoDoubleFilter} />
               <Label htmlFor="no-double" className="text-sm cursor-pointer">
@@ -416,6 +330,92 @@ export default function ArticlesDashboard() {
             </div>
           </div>
           {error ? <div className="mt-4 text-sm text-destructive">{error}</div> : null}
+        </div>
+
+        <div className="mb-6 bg-card border border-border rounded-lg p-4">
+          <div className="flex flex-wrap items-center gap-5">
+            <div className="flex min-w-[300px] items-center gap-4">
+              <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-blue-500/30 bg-blue-500/10 text-blue-400">
+                <Download className="h-5 w-5" />
+              </div>
+              <div>
+                <div className="text-[15px] font-semibold">Сбор статей из источников</div>
+                <div className="text-sm text-muted-foreground">Импорт новых статей из RSS и веб-источников</div>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-3">
+              <span className="text-sm text-muted-foreground">Период:</span>
+              <div className="flex items-center gap-1 rounded-xl bg-muted/50 p-1">
+                {([
+                  ["hour", "Час"],
+                  ["day", "День"],
+                  ["week", "Неделя"],
+                  ["month", "Месяц"],
+                ] as const).map(([value, label]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    onClick={() => setAggregatePeriod(value)}
+                    disabled={aggregateLoading}
+                    className={`rounded-lg px-5 py-2 text-sm font-medium transition-all ${
+                      aggregatePeriod === value
+                        ? "bg-primary text-primary-foreground shadow-sm"
+                        : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                    } ${aggregateLoading ? "cursor-not-allowed opacity-50" : ""}`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <Button type="button" onClick={handleAggregateSync} disabled={aggregateLoading} className="gap-2 px-6">
+              {aggregateLoading ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Сбор...
+                </>
+              ) : (
+                <>
+                  <Download className="h-4 w-4" />
+                  Собрать статьи
+                </>
+              )}
+            </Button>
+
+            <div className="ml-auto flex flex-wrap items-center gap-4 text-sm text-muted-foreground">
+              {collectionResult && !aggregateLoading ? (
+                <div className="flex items-center gap-2 text-green-300">
+                  <CheckCircle2 className="h-4 w-4" />
+                  <span>+{Number(collectionResult.inserted_total || 0)} новых</span>
+                </div>
+              ) : null}
+              {lastCollectionTime ? (
+                <div className="flex items-center gap-2">
+                  <Clock className="h-4 w-4" />
+                  <span>Последний сбор: {formatDateTime(lastCollectionTime)}</span>
+                </div>
+              ) : null}
+            </div>
+          </div>
+
+          {aggregateLoading || aggregateJob?.status === "running" ? (
+            <div className="mt-4 border-t border-border pt-4">
+              <div className="mb-2 flex items-center justify-between">
+                <span className="text-xs text-muted-foreground">
+                  Загрузка статей за {periodLabels[aggregatePeriod].toLowerCase()}
+                  {aggregateJob?.stage_detail ? ` (${aggregateJob.stage_detail})` : "..."}
+                </span>
+                <span className="text-xs text-muted-foreground">
+                  {(aggregateJob?.processed || 0) > 0 && (aggregateJob?.total || 0) > 0
+                    ? `${aggregateJob?.processed}/${aggregateJob?.total}`
+                    : "Обработка источников"}
+                </span>
+              </div>
+              <Progress value={aggregateProgress} className="h-1.5" />
+            </div>
+          ) : null}
         </div>
 
         <div className="bg-card border border-border rounded-lg overflow-hidden">
