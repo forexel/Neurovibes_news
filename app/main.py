@@ -3047,6 +3047,11 @@ def home_page(request: Request):
     return _serve_react_admin_home(request)
 
 
+@app.get("/dashboard", response_class=HTMLResponse)
+def dashboard_page(request: Request):
+    return _serve_react_admin(request)
+
+
 @app.get("/admin/published", response_class=HTMLResponse)
 def admin_published_page(request: Request):
     return _serve_react_admin(request)
