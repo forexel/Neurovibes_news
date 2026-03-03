@@ -20,6 +20,7 @@ export function TopNavigation() {
   const navigate = useNavigate();
   const [openMenu, setOpenMenu] = useState<"actions" | "tools" | "account" | null>(null);
   const navRef = useRef<HTMLElement | null>(null);
+  const closeTimerRef = useRef<number | null>(null);
 
   const articlePaths = new Set([
     "/dashboard",
@@ -42,15 +43,30 @@ export function TopNavigation() {
       }
     }
     document.addEventListener("mousedown", handlePointerDown);
-    return () => document.removeEventListener("mousedown", handlePointerDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      if (closeTimerRef.current !== null) {
+        window.clearTimeout(closeTimerRef.current);
+      }
+    };
   }, []);
 
   function openMenuOnHover(menu: "actions" | "tools" | "account") {
+    if (closeTimerRef.current !== null) {
+      window.clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
     setOpenMenu(menu);
   }
 
   function closeMenuOnLeave(menu: "actions" | "tools" | "account") {
-    setOpenMenu((value) => (value === menu ? null : value));
+    if (closeTimerRef.current !== null) {
+      window.clearTimeout(closeTimerRef.current);
+    }
+    closeTimerRef.current = window.setTimeout(() => {
+      setOpenMenu((value) => (value === menu ? null : value));
+      closeTimerRef.current = null;
+    }, 140);
   }
 
   async function runAction(label: string, action: () => Promise<Record<string, unknown>>) {
