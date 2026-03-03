@@ -92,7 +92,7 @@ export default function PublishCenterPage() {
         items: draftsArticles,
         emptyTitle: "Нет статей для обработки",
         emptyText: "Статьи со статусами review, scored, ready или selected_hourly появятся здесь",
-        emptyIcon: <Edit className="w-12 h-12 text-muted-foreground mx-auto mb-4" />,
+        emptyIcon: <ImageIcon className="w-12 h-12 text-muted-foreground mx-auto mb-4" />,
         showPublishNow: true,
       },
       scheduled: {
@@ -328,7 +328,11 @@ function ArticlesTable({
             const publishLabel = `Опубликовать #${article.id}`;
             const unscheduleLabel = `Снять расписание #${article.id}`;
             return (
-              <TableRow key={article.id} className="hover:bg-muted/50">
+              <TableRow
+                key={article.id}
+                className="cursor-pointer hover:bg-muted/50"
+                onClick={() => navigate(`/article/${article.id}`)}
+              >
                 <TableCell className="font-mono text-xs text-muted-foreground">#{article.id}</TableCell>
                 <TableCell>
                   <StatusBadge status={article.status} />
@@ -361,20 +365,29 @@ function ArticlesTable({
                 )}
                 <TableCell>
                   <div className="flex flex-wrap gap-2">
-                    <Button size="sm" variant="outline" asChild>
-                      <Link to={`/article/${article.id}`}>
-                        <Edit className="w-4 h-4 mr-1" />
-                        Открыть
-                      </Link>
-                    </Button>
                     {onPublishNow ? (
-                      <Button size="sm" onClick={() => onPublishNow(article.id)} disabled={actionLoading === publishLabel}>
+                      <Button
+                        size="sm"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onPublishNow(article.id);
+                        }}
+                        disabled={actionLoading === publishLabel}
+                      >
                         <Send className="w-4 h-4 mr-1" />
                         Сейчас
                       </Button>
                     ) : null}
                     {onUnschedule ? (
-                      <Button size="sm" variant="outline" onClick={() => onUnschedule(article.id)} disabled={actionLoading === unscheduleLabel}>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onUnschedule(article.id);
+                        }}
+                        disabled={actionLoading === unscheduleLabel}
+                      >
                         Снять
                       </Button>
                     ) : null}
