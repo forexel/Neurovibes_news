@@ -148,16 +148,27 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
 
 async function postForm(url: string, params: Record<string, string>) {
   const body = new URLSearchParams(params);
-  await fetch(url, {
+  return fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body,
+    credentials: "same-origin",
   });
 }
 
 export const api = {
   async login(login: string, password: string) {
-    await postForm("/login", { login, password });
+    const response = await postForm("/login", { login, password });
+    if (response.redirected) {
+      try {
+        const target = new URL(response.url);
+        if (target.pathname === "/login") {
+          throw new ApiError(401, "Неверный email или пароль.");
+        }
+      } catch {
+        // Ignore URL parsing issues and fall back to setup-state check.
+      }
+    }
     return this.getSetupState();
   },
 

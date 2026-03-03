@@ -69,12 +69,20 @@ export default function LoginPage() {
             </p>
           </div>
 
-          <form onSubmit={handleSubmit} className="space-y-4">
+          <form onSubmit={handleSubmit} className="space-y-4" autoComplete="on">
+            {error && (
+              <div className="text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2">
+                {error}
+              </div>
+            )}
+
             <div className="space-y-2">
               <Label htmlFor="email">Email</Label>
               <Input
                 id="email"
                 type="email"
+                name="username"
+                autoComplete="username"
                 placeholder="editor@ainews.com"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
@@ -88,6 +96,8 @@ export default function LoginPage() {
               <Input
                 id="password"
                 type="password"
+                name="password"
+                autoComplete="current-password"
                 placeholder="••••••••"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
@@ -95,12 +105,6 @@ export default function LoginPage() {
                 className="bg-muted/50"
               />
             </div>
-
-            {error && (
-              <div className="text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2">
-                {error}
-              </div>
-            )}
 
             <Button type="submit" className="w-full" disabled={loading}>
               {loading ? (

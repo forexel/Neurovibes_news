@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router";
 import { TopNavigation } from "../components/TopNavigation";
 import { Button } from "../components/ui/button";
@@ -23,12 +23,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "../components/ui/select";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "../components/ui/dropdown-menu";
 import {
   Dialog,
   DialogContent,
@@ -103,8 +97,20 @@ export default function ArticlesDashboard() {
   const [costs, setCosts] = useState<CostSummary | null>(null);
   const [worker, setWorker] = useState<WorkerStatus | null>(null);
   const [error, setError] = useState("");
+  const [openActionsId, setOpenActionsId] = useState<number | null>(null);
+  const actionsRef = useRef<HTMLDivElement | null>(null);
 
   const totalPages = useMemo(() => Math.max(1, Math.ceil(total / Number(pageSize))), [pageSize, total]);
+
+  useEffect(() => {
+    function handlePointerDown(event: MouseEvent) {
+      if (!actionsRef.current?.contains(event.target as Node)) {
+        setOpenActionsId(null);
+      }
+    }
+    document.addEventListener("mousedown", handlePointerDown);
+    return () => document.removeEventListener("mousedown", handlePointerDown);
+  }, []);
 
   useEffect(() => {
     setSelectedSection(pathToSection[location.pathname] || "all");
@@ -158,6 +164,7 @@ export default function ArticlesDashboard() {
     setError("");
     try {
       await action();
+      setOpenActionsId(null);
       await loadDashboard();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Операция завершилась ошибкой.");
@@ -329,56 +336,78 @@ export default function ArticlesDashboard() {
                     <TableCell className="text-sm text-muted-foreground">
                       {formatDateTime(article.published_at || article.created_at)}
                     </TableCell>
-                    <TableCell onClick={(event) => event.stopPropagation()}>
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <Button variant="ghost" size="sm" className="h-8 w-8 p-0">
-                            <MoreVertical className="w-4 h-4" />
-                          </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end" className="w-52">
-                          <DropdownMenuItem onClick={() => navigate(`/article/${article.id}`)}>
-                            <ExternalLink className="w-4 h-4 mr-2" />
-                            Открыть редактор
-                          </DropdownMenuItem>
-                          <DropdownMenuItem
-                            onClick={() =>
-                              runAction(() =>
-                                api.postArticleAction(article.id, article.is_selected_day ? "unselect-day" : "select-day"),
-                              )
-                            }
-                          >
-                            <Calendar className="w-4 h-4 mr-2" />
-                            {article.is_selected_day ? "Снять с дня" : "Выбрать на день"}
-                          </DropdownMenuItem>
-                          <DropdownMenuItem
-                            onClick={() =>
-                              runAction(() =>
-                                api.postArticleAction(
-                                  article.id,
-                                  String(article.status).toUpperCase() === "SELECTED_HOURLY" ? "unselect-hour" : "status",
-                                  String(article.status).toUpperCase() === "SELECTED_HOURLY" ? undefined : { status: "selected_hourly" },
-                                ),
-                              )
-                            }
-                          >
-                            <RotateCcw className="w-4 h-4 mr-2" />
-                            {String(article.status).toUpperCase() === "SELECTED_HOURLY" ? "Снять с часа" : "Выбрать на час"}
-                          </DropdownMenuItem>
-                          <DropdownMenuItem onClick={() => runAction(() => api.postArticleAction(article.id, "status", { status: "rejected" }))}>
-                            <Archive className="w-4 h-4 mr-2" />
-                            Archive
-                          </DropdownMenuItem>
-                          <DropdownMenuItem onClick={() => promptDelete(article.id)}>
-                            <Trash2 className="w-4 h-4 mr-2" />
-                            Delete
-                          </DropdownMenuItem>
-                          <DropdownMenuItem onClick={() => runAction(() => api.postArticleAction(article.id, "publish"))}>
-                            <Send className="w-4 h-4 mr-2" />
-                            Publish
-                          </DropdownMenuItem>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
+                    <TableCell onClick={(event) => event.stopPropagation()} className="relative">
+                      <div ref={openActionsId === article.id ? actionsRef : null}>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-8 w-8 p-0"
+                          onClick={() => setOpenActionsId((value) => (value === article.id ? null : article.id))}
+                        >
+                          <MoreVertical className="w-4 h-4" />
+                        </Button>
+                        {openActionsId === article.id ? (
+                          <div className="absolute right-0 top-10 z-20 w-56 rounded-md border border-border bg-popover p-1 shadow-md">
+                            <button
+                              className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent"
+                              onClick={() => {
+                                setOpenActionsId(null);
+                                navigate(`/article/${article.id}`);
+                              }}
+                            >
+                              <ExternalLink className="w-4 h-4" />
+                              Открыть редактор
+                            </button>
+                            <button
+                              className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent"
+                              onClick={() =>
+                                runAction(() =>
+                                  api.postArticleAction(article.id, article.is_selected_day ? "unselect-day" : "select-day"),
+                                )
+                              }
+                            >
+                              <Calendar className="w-4 h-4" />
+                              {article.is_selected_day ? "Снять с дня" : "Выбрать на день"}
+                            </button>
+                            <button
+                              className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent"
+                              onClick={() =>
+                                runAction(() =>
+                                  api.postArticleAction(
+                                    article.id,
+                                    String(article.status).toUpperCase() === "SELECTED_HOURLY" ? "unselect-hour" : "status",
+                                    String(article.status).toUpperCase() === "SELECTED_HOURLY" ? undefined : { status: "selected_hourly" },
+                                  ),
+                                )
+                              }
+                            >
+                              <RotateCcw className="w-4 h-4" />
+                              {String(article.status).toUpperCase() === "SELECTED_HOURLY" ? "Снять с часа" : "Выбрать на час"}
+                            </button>
+                            <button
+                              className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent"
+                              onClick={() => runAction(() => api.postArticleAction(article.id, "status", { status: "rejected" }))}
+                            >
+                              <Archive className="w-4 h-4" />
+                              Archive
+                            </button>
+                            <button
+                              className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm text-destructive hover:bg-accent"
+                              onClick={() => promptDelete(article.id)}
+                            >
+                              <Trash2 className="w-4 h-4" />
+                              Delete
+                            </button>
+                            <button
+                              className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent"
+                              onClick={() => runAction(() => api.postArticleAction(article.id, "publish"))}
+                            >
+                              <Send className="w-4 h-4" />
+                              Publish
+                            </button>
+                          </div>
+                        ) : null}
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))
