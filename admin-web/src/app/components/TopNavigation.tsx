@@ -22,14 +22,12 @@ export function TopNavigation() {
   const navRef = useRef<HTMLElement | null>(null);
 
   const articlePaths = new Set([
-    "/",
     "/dashboard",
     "/published",
     "/backlog",
     "/selected-day",
     "/selected-hour",
     "/unsorted",
-    "/no-double",
     "/deleted",
   ]);
 
@@ -46,6 +44,14 @@ export function TopNavigation() {
     document.addEventListener("mousedown", handlePointerDown);
     return () => document.removeEventListener("mousedown", handlePointerDown);
   }, []);
+
+  function openMenuOnHover(menu: "actions" | "tools" | "account") {
+    setOpenMenu(menu);
+  }
+
+  function closeMenuOnLeave(menu: "actions" | "tools" | "account") {
+    setOpenMenu((value) => (value === menu ? null : value));
+  }
 
   async function runAction(label: string, action: () => Promise<Record<string, unknown>>) {
     try {
@@ -80,31 +86,58 @@ export function TopNavigation() {
               size="sm"
               asChild
             >
-              <Link to="/" className="gap-2">
+              <Link to="/dashboard" className="gap-2">
                 <FileText className="w-4 h-4" />
                 Статьи
               </Link>
             </Button>
 
-            <div className="relative">
+            <div
+              className="relative"
+              onMouseEnter={() => openMenuOnHover("actions")}
+              onMouseLeave={() => closeMenuOnLeave("actions")}
+            >
               <Button
                 variant={openMenu === "actions" ? "secondary" : "ghost"}
                 size="sm"
                 className="gap-2"
-                onClick={() => setOpenMenu((value) => (value === "actions" ? null : "actions"))}
               >
                 <Zap className="w-4 h-4" />
                 Действия
               </Button>
               {openMenu === "actions" ? (
-                <div className="absolute left-0 top-full mt-2 w-56 rounded-md border border-border bg-popover p-1 shadow-md">
+                <div className="absolute left-0 top-full mt-2 w-64 rounded-md border border-border bg-popover p-1 shadow-md">
+                  <div className="px-2 py-1 text-xs text-muted-foreground">Сбор статей</div>
                   <button
                     className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent"
-                    onClick={() => runAction("Синхронизация", () => api.startAggregate("day"))}
+                    onClick={() => runAction("Собрать за час", () => api.startAggregate("hour"))}
                   >
                     <Database className="w-4 h-4" />
-                    Синхронизация
+                    Собрать за час
                   </button>
+                  <button
+                    className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent"
+                    onClick={() => runAction("Собрать за день", () => api.startAggregate("day"))}
+                  >
+                    <Database className="w-4 h-4" />
+                    Собрать за день
+                  </button>
+                  <button
+                    className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent"
+                    onClick={() => runAction("Собрать за неделю", () => api.startAggregate("week"))}
+                  >
+                    <Database className="w-4 h-4" />
+                    Собрать за неделю
+                  </button>
+                  <button
+                    className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent"
+                    onClick={() => runAction("Собрать за месяц", () => api.startAggregate("month"))}
+                  >
+                    <Database className="w-4 h-4" />
+                    Собрать за месяц
+                  </button>
+                  <div className="my-1 h-px bg-border" />
+                  <div className="px-2 py-1 text-xs text-muted-foreground">Обработка</div>
                   <button
                     className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent"
                     onClick={() => runAction("Pipeline", () => api.startPipeline(1))}
@@ -129,26 +162,29 @@ export function TopNavigation() {
                   <div className="my-1 h-px bg-border" />
                   <button
                     className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent"
-                    onClick={() => runAction("Prune non-AI", () => api.pruneNonAi(20000))}
+                    onClick={() => runAction("Отсев не-AI", () => api.pruneNonAi(20000))}
                   >
-                    Prune
+                    Отсев не-AI
                   </button>
                   <button
                     className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent"
-                    onClick={() => runAction("Rebuild Profile", () => api.rebuildProfile())}
+                    onClick={() => runAction("Пересобрать профиль", () => api.rebuildProfile())}
                   >
-                    Rebuild Profile
+                    Пересобрать профиль
                   </button>
                 </div>
               ) : null}
             </div>
 
-            <div className="relative">
+            <div
+              className="relative"
+              onMouseEnter={() => openMenuOnHover("tools")}
+              onMouseLeave={() => closeMenuOnLeave("tools")}
+            >
               <Button
                 variant={openMenu === "tools" ? "secondary" : "ghost"}
                 size="sm"
                 className="gap-2"
-                onClick={() => setOpenMenu((value) => (value === "tools" ? null : "tools"))}
               >
                 <Wrench className="w-4 h-4" />
                 Инструменты
@@ -204,12 +240,15 @@ export function TopNavigation() {
           </div>
         </div>
 
-        <div className="relative">
+        <div
+          className="relative"
+          onMouseEnter={() => openMenuOnHover("account")}
+          onMouseLeave={() => closeMenuOnLeave("account")}
+        >
           <Button
             variant={openMenu === "account" ? "secondary" : "ghost"}
             size="sm"
             className="gap-2"
-            onClick={() => setOpenMenu((value) => (value === "account" ? null : "account"))}
           >
             <User className="w-4 h-4" />
             Аккаунт

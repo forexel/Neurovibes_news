@@ -6,7 +6,8 @@ import time
 from datetime import datetime
 from typing import Any, Literal
 
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.db import session_scope
 from app.models import RuntimeSetting
@@ -178,15 +179,18 @@ def _cache_refresh(force: bool = False) -> None:
         if not force and (now - _cache_loaded_at) < _CACHE_TTL_SECONDS:
             return
         new_map: dict[tuple[str, str | None, str], str] = {}
-        with session_scope() as session:
-            rows = session.scalars(select(RuntimeSetting)).all()
-            for row in rows:
-                key = (row.key or "").strip().lower()
-                if not key:
-                    continue
-                scope = (row.scope or "global").strip().lower()
-                topic = _normalize_topic_key(row.topic_key)
-                new_map[(scope, topic, key)] = row.value or ""
+        try:
+            with session_scope() as session:
+                rows = session.scalars(select(RuntimeSetting)).all()
+                for row in rows:
+                    key = (row.key or "").strip().lower()
+                    if not key:
+                        continue
+                    scope = (row.scope or "global").strip().lower()
+                    topic = _normalize_topic_key(row.topic_key)
+                    new_map[(scope, topic, key)] = row.value or ""
+        except SQLAlchemyError:
+            new_map = {}
         _cache_map = new_map
         _cache_loaded_at = now
 
@@ -283,20 +287,31 @@ def get_runtime_csv_list(key: str, topic_key: str | None = None, default: list[s
 
 def list_runtime_settings(scope: Scope | None = None, topic_key: str | None = None) -> list[dict[str, Any]]:
     with session_scope() as session:
-        q = select(RuntimeSetting)
+        where = []
+        params: dict[str, Any] = {}
         if scope:
-            q = q.where(RuntimeSetting.scope == str(scope))
+            where.append("scope = :scope")
+            params["scope"] = str(scope)
         if topic_key is not None:
-            q = q.where(RuntimeSetting.topic_key == _normalize_topic_key(topic_key))
-        rows = session.scalars(q.order_by(RuntimeSetting.scope.asc(), RuntimeSetting.topic_key.asc(), RuntimeSetting.key.asc())).all()
+            where.append("topic_key = :topic_key")
+            params["topic_key"] = _normalize_topic_key(topic_key)
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        rows = session.execute(
+            text(
+                "SELECT id, scope, topic_key, key, value, updated_at "
+                f"FROM public.runtime_settings {where_sql} "
+                "ORDER BY scope ASC, topic_key ASC NULLS FIRST, key ASC"
+            ),
+            params,
+        ).mappings().all()
         return [
             {
-                "id": int(r.id),
-                "scope": r.scope,
-                "topic_key": r.topic_key,
-                "key": r.key,
-                "value": r.value,
-                "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+                "id": int(r["id"]),
+                "scope": r["scope"],
+                "topic_key": r["topic_key"],
+                "key": r["key"],
+                "value": r["value"],
+                "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
             }
             for r in rows
         ]
@@ -312,26 +327,46 @@ def upsert_runtime_setting(key: str, value: str, scope: Scope = "global", topic_
         raise ValueError("topic_key_required_for_topic_scope")
 
     with session_scope() as session:
-        row = session.scalars(
-            select(RuntimeSetting).where(
-                RuntimeSetting.scope == scope_n,
-                RuntimeSetting.topic_key == topic_n,
-                RuntimeSetting.key == key_n,
-            )
+        row = session.execute(
+            text(
+                "SELECT id FROM public.runtime_settings "
+                "WHERE scope = :scope AND key = :key "
+                "AND (topic_key IS NOT DISTINCT FROM :topic_key) "
+                "LIMIT 1"
+            ),
+            {"scope": scope_n, "key": key_n, "topic_key": topic_n},
         ).first()
         if row is None:
-            row = RuntimeSetting(scope=scope_n, topic_key=topic_n, key=key_n, value=str(value or ""))
-            session.add(row)
-            session.flush()
+            created = session.execute(
+                text(
+                    "INSERT INTO public.runtime_settings (scope, topic_key, key, value, updated_at) "
+                    "VALUES (:scope, :topic_key, :key, :value, :updated_at) RETURNING id"
+                ),
+                {
+                    "scope": scope_n,
+                    "topic_key": topic_n,
+                    "key": key_n,
+                    "value": str(value or ""),
+                    "updated_at": datetime.utcnow(),
+                },
+            ).first()
+            row_id = int(created[0])
         else:
-            row.value = str(value or "")
-            row.updated_at = datetime.utcnow()
+            row_id = int(row[0])
+            session.execute(
+                text(
+                    "UPDATE public.runtime_settings "
+                    "SET value = :value, updated_at = :updated_at "
+                    "WHERE id = :id"
+                ),
+                {"id": row_id, "value": str(value or ""), "updated_at": datetime.utcnow()},
+            )
         out = {
-            "id": int(row.id),
-            "scope": row.scope,
-            "topic_key": row.topic_key,
-            "key": row.key,
-            "value": row.value,
+            "id": row_id,
+            "scope": scope_n,
+            "topic_key": topic_n,
+            "key": key_n,
+            "value": str(value or ""),
         }
     clear_runtime_settings_cache()
     return out
@@ -339,9 +374,11 @@ def upsert_runtime_setting(key: str, value: str, scope: Scope = "global", topic_
 
 def delete_runtime_setting(setting_id: int) -> bool:
     with session_scope() as session:
-        row = session.get(RuntimeSetting, setting_id)
+        row = session.execute(
+            text("DELETE FROM public.runtime_settings WHERE id = :id RETURNING id"),
+            {"id": int(setting_id)},
+        ).first()
         if row is None:
             return False
-        session.delete(row)
     clear_runtime_settings_cache()
     return True

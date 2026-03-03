@@ -387,7 +387,7 @@ export default function SetupWizard() {
                 </Button>
                 {bootstrapComplete ? (
                   <Button variant="secondary" onClick={() => navigate("/")}>
-                    Перейти к статьям
+                    Перейти к центру публикаций
                   </Button>
                 ) : null}
               </div>

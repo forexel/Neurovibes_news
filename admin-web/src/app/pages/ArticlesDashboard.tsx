@@ -6,6 +6,7 @@ import { Input } from "../components/ui/input";
 import { Badge } from "../components/ui/badge";
 import { Switch } from "../components/ui/switch";
 import { Label } from "../components/ui/label";
+import { Progress } from "../components/ui/progress";
 import { StatusBadge } from "../components/StatusBadge";
 import { ScoreBadge } from "../components/ScoreBadge";
 import {
@@ -34,17 +35,21 @@ import {
   Activity,
   Archive,
   Calendar,
+  CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  Clock,
   DollarSign,
   ExternalLink,
+  Loader2,
   MoreVertical,
+  Download,
   RotateCcw,
   Search,
   Send,
   Trash2,
 } from "lucide-react";
-import { api, ApiError, ArticleDetails, ArticleListItem, CostSummary, formatDateTime, WorkerStatus } from "../lib/api";
+import { api, AggregateJobStatus, ApiError, ArticleDetails, ArticleListItem, CostSummary, formatDateTime, WorkerStatus } from "../lib/api";
 
 const sections = [
   { id: "all", label: "Все статьи" },
@@ -53,7 +58,6 @@ const sections = [
   { id: "published", label: "Опубликованные" },
   { id: "selected_day", label: "Выбрано на день" },
   { id: "selected_hour", label: "Выбрано на час" },
-  { id: "no_double", label: "Без дублей" },
   { id: "deleted", label: "Удаленные" },
 ] as const;
 
@@ -65,18 +69,17 @@ const pathToSection: Record<string, (typeof sections)[number]["id"]> = {
   "/published": "published",
   "/selected-day": "selected_day",
   "/selected-hour": "selected_hour",
-  "/no-double": "no_double",
+  "/no-double": "all",
   "/deleted": "deleted",
 };
 
 const sectionToPath: Record<(typeof sections)[number]["id"], string> = {
-  all: "/",
+  all: "/dashboard",
   backlog: "/backlog",
   unsorted: "/unsorted",
   published: "/published",
   selected_day: "/selected-day",
   selected_hour: "/selected-hour",
-  no_double: "/no-double",
   deleted: "/deleted",
 };
 
@@ -97,6 +100,11 @@ export default function ArticlesDashboard() {
   const [costs, setCosts] = useState<CostSummary | null>(null);
   const [worker, setWorker] = useState<WorkerStatus | null>(null);
   const [error, setError] = useState("");
+  const [aggregatePeriod, setAggregatePeriod] = useState<"hour" | "day" | "week" | "month">("day");
+  const [aggregateLoading, setAggregateLoading] = useState(false);
+  const [aggregateJob, setAggregateJob] = useState<AggregateJobStatus | null>(null);
+  const [lastCollectionTime, setLastCollectionTime] = useState<string | null>(null);
+  const [collectionResult, setCollectionResult] = useState<AggregateJobStatus["result"] | null>(null);
   const [openActionsId, setOpenActionsId] = useState<number | null>(null);
   const actionsRef = useRef<HTMLDivElement | null>(null);
 
@@ -116,6 +124,31 @@ export default function ArticlesDashboard() {
     setSelectedSection(pathToSection[location.pathname] || "all");
     setCurrentPage(1);
   }, [location.pathname]);
+
+  useEffect(() => {
+    if (!aggregateJob?.job_id || aggregateJob.status === "done" || aggregateJob.status === "error") {
+      return;
+    }
+    const timer = window.setInterval(async () => {
+      try {
+        const nextJob = await api.getAggregateJob(aggregateJob.job_id);
+        setAggregateJob(nextJob);
+        if (nextJob.status === "done") {
+          setAggregateLoading(false);
+          setLastCollectionTime(nextJob.finished_at || nextJob.started_at || new Date().toISOString());
+          setCollectionResult(nextJob.result || null);
+          await loadDashboard();
+        } else if (nextJob.status === "error") {
+          setAggregateLoading(false);
+          setError(nextJob.error || "Сбор статей завершился ошибкой.");
+        }
+      } catch (err) {
+        setAggregateLoading(false);
+        setError(err instanceof Error ? err.message : "Не удалось получить статус сбора.");
+      }
+    }, 1500);
+    return () => window.clearInterval(timer);
+  }, [aggregateJob?.job_id, aggregateJob?.status]);
 
   async function loadDashboard() {
     setLoading(true);
@@ -171,6 +204,44 @@ export default function ArticlesDashboard() {
     }
   }
 
+  async function handleAggregateSync() {
+    setError("");
+    setAggregateLoading(true);
+    setCollectionResult(null);
+    try {
+      const out = await api.startAggregate(aggregatePeriod);
+      const jobId = typeof out.job_id === "string" ? out.job_id : "";
+      if (!jobId) {
+        throw new Error("Не удалось получить job_id для сбора.");
+      }
+      setAggregateJob({
+        job_id: jobId,
+        status: "running",
+        period: aggregatePeriod,
+        stage: "starting",
+        processed: 0,
+        total: 0,
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось запустить сбор статей.");
+      setAggregateLoading(false);
+    }
+  }
+
+  const periodLabels: Record<"hour" | "day" | "week" | "month", string> = {
+    hour: "Час",
+    day: "День",
+    week: "Неделя",
+    month: "Месяц",
+  };
+
+  const aggregateProgress =
+    aggregateJob && (aggregateJob.total || 0) > 0
+      ? Math.max(3, Math.min(100, Math.round(((aggregateJob.processed || 0) / Math.max(1, aggregateJob.total || 1)) * 100)))
+      : aggregateLoading
+        ? 8
+        : 0;
+
   function promptDelete(id: number) {
     const reason = window.prompt(`Почему удалить статью #${id}?`);
     if (!reason || reason.trim().length < 5) return;
@@ -202,6 +273,92 @@ export default function ArticlesDashboard() {
 
         <div className="mb-6 bg-card border border-border rounded-lg p-4">
           <div className="flex flex-wrap items-center gap-4">
+            <div className="min-w-[420px] flex-1 rounded-lg border border-border bg-background/70 p-4">
+              <div className="flex flex-wrap items-start gap-4">
+                <div className="flex min-w-[220px] items-center gap-3">
+                  <div className="flex h-9 w-9 items-center justify-center rounded-lg border border-blue-500/30 bg-blue-500/10 text-blue-400">
+                    <Download className="h-4 w-4" />
+                  </div>
+                  <div>
+                    <div className="text-sm font-medium">Сбор статей из источников</div>
+                    <div className="text-xs text-muted-foreground">Импорт новых статей из RSS и веб-источников</div>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-3">
+                  <span className="text-sm text-muted-foreground">Период:</span>
+                  <div className="flex items-center gap-1 rounded-lg bg-muted/50 p-1">
+                    {([
+                      ["hour", "Час"],
+                      ["day", "День"],
+                      ["week", "Неделя"],
+                      ["month", "Месяц"],
+                    ] as const).map(([value, label]) => (
+                      <button
+                        key={value}
+                        type="button"
+                        onClick={() => setAggregatePeriod(value)}
+                        disabled={aggregateLoading}
+                        className={`rounded-md px-3 py-1.5 text-sm font-medium transition-all ${
+                          aggregatePeriod === value
+                            ? "bg-primary text-primary-foreground shadow-sm"
+                            : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                        } ${aggregateLoading ? "cursor-not-allowed opacity-50" : ""}`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <Button type="button" onClick={handleAggregateSync} disabled={aggregateLoading} className="gap-2">
+                  {aggregateLoading ? (
+                    <>
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      Сбор...
+                    </>
+                  ) : (
+                    <>
+                      <Download className="h-4 w-4" />
+                      Собрать статьи
+                    </>
+                  )}
+                </Button>
+
+                <div className="ml-auto flex flex-wrap items-center gap-4 text-xs">
+                  {lastCollectionTime ? (
+                    <div className="flex items-center gap-2 text-muted-foreground">
+                      <Clock className="h-3.5 w-3.5" />
+                      <span>Последний сбор: {formatDateTime(lastCollectionTime)}</span>
+                    </div>
+                  ) : null}
+                  {collectionResult && !aggregateLoading ? (
+                    <div className="flex items-center gap-2">
+                      <CheckCircle2 className="h-3.5 w-3.5 text-green-400" />
+                      <span className="text-green-300">+{Number(collectionResult.inserted_total || 0)} новых</span>
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+
+              {aggregateLoading || aggregateJob?.status === "running" ? (
+                <div className="mt-4 border-t border-border pt-4">
+                  <div className="mb-2 flex items-center justify-between">
+                    <span className="text-xs text-muted-foreground">
+                      Загрузка статей за {periodLabels[aggregatePeriod].toLowerCase()}
+                      {aggregateJob?.stage_detail ? ` (${aggregateJob.stage_detail})` : "..."}
+                    </span>
+                    <span className="text-xs text-muted-foreground">
+                      {(aggregateJob?.processed || 0) > 0 && (aggregateJob?.total || 0) > 0
+                        ? `${aggregateJob?.processed}/${aggregateJob?.total}`
+                        : "Обработка источников"}
+                    </span>
+                  </div>
+                  <Progress value={aggregateProgress} className="h-1.5" />
+                </div>
+              ) : null}
+            </div>
+
             <div className="flex items-center gap-2">
               <Switch id="no-double" checked={noDoubleFilter} onCheckedChange={setNoDoubleFilter} />
               <Label htmlFor="no-double" className="text-sm cursor-pointer">

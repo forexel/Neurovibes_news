@@ -141,7 +141,7 @@ export default function ArticleEditor() {
         <div className="max-w-7xl mx-auto px-6 py-12 text-center">
           <h1 className="text-2xl font-semibold mb-4">Статья не найдена</h1>
           <Button asChild>
-            <Link to="/">Вернуться к списку</Link>
+            <Link to="/dashboard">Вернуться к списку</Link>
           </Button>
         </div>
       </div>
@@ -158,7 +158,7 @@ export default function ArticleEditor() {
         <div className="mb-6">
           <div className="flex items-center gap-3 mb-4">
             <Button variant="ghost" size="sm" asChild>
-              <Link to="/">
+              <Link to="/dashboard">
                 <ArrowLeft className="w-4 h-4 mr-2" />
                 К списку
               </Link>
@@ -425,7 +425,7 @@ export default function ArticleEditor() {
                           setLoading("delete");
                           try {
                             await api.deleteArticle(articleId, reason.trim());
-                            navigate("/");
+                            navigate("/dashboard");
                           } catch (err) {
                             addLog("error", err instanceof Error ? err.message : "Delete failed");
                           } finally {

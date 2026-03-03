@@ -5,7 +5,7 @@ import { Button } from "../components/ui/button";
 import { Badge } from "../components/ui/badge";
 import { LogPanel } from "../components/LogPanel";
 import { Activity, AlertCircle, CheckCircle2, Clock, Loader2, Send } from "lucide-react";
-import { api, ApiError, formatDateTime, SetupState, WorkerStatus } from "../lib/api";
+import { api, ApiError, formatDateTime, SetupState, TelegramReviewJob, WorkerStatus } from "../lib/api";
 
 type LogEntry = { type: "info" | "success" | "error"; message: string; timestamp?: string };
 
@@ -17,6 +17,7 @@ export default function BotControlPage() {
   const navigate = useNavigate();
   const [setupState, setSetupState] = useState<SetupState | null>(null);
   const [worker, setWorker] = useState<WorkerStatus | null>(null);
+  const [jobs, setJobs] = useState<TelegramReviewJob[]>([]);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -30,15 +31,45 @@ export default function BotControlPage() {
     setLoading(true);
     setError("");
     try {
-      const [setup, workerData] = await Promise.all([api.getSetupState(), api.getWorkerStatus()]);
-      setSetupState(setup);
-      setWorker(workerData);
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 401) {
+      const [setupResult, workerResult, jobsResult] = await Promise.allSettled([
+        api.getSetupState(),
+        api.getWorkerStatus(),
+        api.getTelegramReviewJobs(12),
+      ]);
+
+      const authError = [setupResult, workerResult, jobsResult].find(
+        (result) => result.status === "rejected" && result.reason instanceof ApiError && result.reason.status === 401,
+      );
+      if (authError) {
         navigate("/login", { replace: true });
         return;
       }
-      setError(err instanceof Error ? err.message : "Не удалось загрузить статус Telegram.");
+
+      if (setupResult.status === "fulfilled") {
+        setSetupState(setupResult.value);
+      }
+      if (workerResult.status === "fulfilled") {
+        setWorker(workerResult.value);
+      }
+      if (jobsResult.status === "fulfilled") {
+        setJobs(jobsResult.value.items || []);
+        setLogs(
+          (jobsResult.value.items || []).map((job) => ({
+            type:
+              job.status === "error" ? "error" : job.status === "sent" || job.status === "approved" ? "success" : "info",
+            message: `job #${job.id} · article ${job.article_id ?? "—"} · ${job.status || "unknown"}`,
+            timestamp: job.updated_at || job.created_at || undefined,
+          })),
+        );
+      }
+
+      const errors = [setupResult, workerResult, jobsResult]
+        .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+        .map((result) => (result.reason instanceof Error ? result.reason.message : "request failed"));
+
+      if (errors.length > 0) {
+        setError(errors[0]);
+      }
     } finally {
       setLoading(false);
     }
@@ -154,6 +185,30 @@ export default function BotControlPage() {
                   Перейти в Setup
                 </Button>
               </div>
+            </div>
+
+            <div className="bg-card border border-border rounded-lg p-6">
+              <h3 className="font-semibold mb-4">Review queue</h3>
+              {jobs.length === 0 ? (
+                <div className="text-sm text-muted-foreground">Нет последних review jobs.</div>
+              ) : (
+                <div className="space-y-3">
+                  {jobs.slice(0, 6).map((job) => (
+                    <div key={job.id} className="flex items-center justify-between gap-4 rounded-md border border-border px-3 py-2 text-sm">
+                      <div className="min-w-0">
+                        <div className="font-medium">job #{job.id}</div>
+                        <div className="text-muted-foreground">
+                          article {job.article_id ?? "—"} · chat {job.chat_id || "—"}
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <Badge variant="outline">{job.status || "unknown"}</Badge>
+                        <div className="mt-1 text-xs text-muted-foreground">{formatDateTime(job.updated_at || job.created_at)}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             {worker?.worker_last_cycle_error ? (

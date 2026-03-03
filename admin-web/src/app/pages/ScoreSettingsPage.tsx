@@ -32,6 +32,8 @@ export default function ScoreSettingsPage() {
   const [runtimeSettings, setRuntimeSettings] = useState<RuntimeSetting[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [paramsLoading, setParamsLoading] = useState(true);
+  const [runtimeLoading, setRuntimeLoading] = useState(true);
 
   const [editParam, setEditParam] = useState<Partial<ScoreParameter>>({
     key: "",
@@ -52,10 +54,43 @@ export default function ScoreSettingsPage() {
   async function loadData() {
     setLoading(true);
     setError("");
+    setParamsLoading(true);
+    setRuntimeLoading(true);
     try {
-      const [params, runtime] = await Promise.all([api.getScoreParameters(), api.getRuntimeSettings()]);
-      setParameters(params);
-      setRuntimeSettings(runtime.items || []);
+      const [paramsResult, runtimeResult] = await Promise.allSettled([
+        api.getScoreParameters(),
+        api.getRuntimeSettings(),
+      ]);
+
+      let nextError = "";
+
+      if (paramsResult.status === "fulfilled") {
+        setParameters(paramsResult.value);
+      } else {
+        const err = paramsResult.reason;
+        if (err instanceof ApiError && err.status === 401) {
+          navigate("/login", { replace: true });
+          return;
+        }
+        setParameters([]);
+        nextError = err instanceof Error ? err.message : "Не удалось загрузить параметры оценки.";
+      }
+      setParamsLoading(false);
+
+      if (runtimeResult.status === "fulfilled") {
+        setRuntimeSettings(runtimeResult.value.items || []);
+      } else {
+        const err = runtimeResult.reason;
+        if (err instanceof ApiError && err.status === 401) {
+          navigate("/login", { replace: true });
+          return;
+        }
+        setRuntimeSettings([]);
+        nextError = nextError || (err instanceof Error ? err.message : "Не удалось загрузить runtime-настройки.");
+      }
+      setRuntimeLoading(false);
+
+      setError(nextError);
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         navigate("/login", { replace: true });
@@ -227,10 +262,16 @@ export default function ScoreSettingsPage() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {loading ? (
+                  {paramsLoading ? (
                     <TableRow>
                       <TableCell colSpan={8} className="h-24 text-center text-muted-foreground">
                         Загрузка...
+                      </TableCell>
+                    </TableRow>
+                  ) : !parameters.length ? (
+                    <TableRow>
+                      <TableCell colSpan={8} className="h-24 text-center text-muted-foreground">
+                        Параметры оценки не найдены.
                       </TableCell>
                     </TableRow>
                   ) : (
@@ -322,20 +363,34 @@ export default function ScoreSettingsPage() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {runtimeSettings.map((setting) => (
-                    <TableRow key={setting.id} className="hover:bg-muted/50">
-                      <TableCell>{setting.id}</TableCell>
-                      <TableCell>{setting.scope}</TableCell>
-                      <TableCell>{setting.topic_key || "—"}</TableCell>
-                      <TableCell className="font-mono text-xs">{setting.key}</TableCell>
-                      <TableCell>{setting.value}</TableCell>
-                      <TableCell>
-                        <Button size="sm" variant="destructive" onClick={() => handleDeleteRuntime(setting.id)}>
-                          <Trash2 className="w-4 h-4" />
-                        </Button>
+                  {runtimeLoading ? (
+                    <TableRow>
+                      <TableCell colSpan={6} className="h-24 text-center text-muted-foreground">
+                        Загрузка...
                       </TableCell>
                     </TableRow>
-                  ))}
+                  ) : !runtimeSettings.length ? (
+                    <TableRow>
+                      <TableCell colSpan={6} className="h-24 text-center text-muted-foreground">
+                        Runtime-настройки не найдены.
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    runtimeSettings.map((setting) => (
+                      <TableRow key={setting.id} className="hover:bg-muted/50">
+                        <TableCell>{setting.id}</TableCell>
+                        <TableCell>{setting.scope}</TableCell>
+                        <TableCell>{setting.topic_key || "—"}</TableCell>
+                        <TableCell className="font-mono text-xs">{setting.key}</TableCell>
+                        <TableCell>{setting.value}</TableCell>
+                        <TableCell>
+                          <Button size="sm" variant="destructive" onClick={() => handleDeleteRuntime(setting.id)}>
+                            <Trash2 className="w-4 h-4" />
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))
+                  )}
                 </TableBody>
               </Table>
             </div>

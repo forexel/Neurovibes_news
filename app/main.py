@@ -14,7 +14,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from app.core.config import settings
 from app.db import init_db, session_scope
@@ -32,6 +32,7 @@ from app.models import (
     Source,
     LLMUsageLog,
     TelegramBotKV,
+    TelegramReviewJob,
     User,
     UserWorkspace,
 )
@@ -57,7 +58,7 @@ from app.services.embedding_dedup import process_embeddings_and_dedup
 from app.services.scoring import prune_bad_articles, prune_non_ai_articles, run_scoring, score_article_by_id
 from app.services.topic_filter import passes_ai_topic_filter
 from app.services.preference import rebuild_preference_profile
-from app.services.telegram_publisher import publish_article, send_test_message
+from app.services.telegram_publisher import publish_article, publish_scheduled_due, send_test_message
 from app.services.telegram_review import (
     poll_review_updates,
     send_hourly_backfill_for_review,
@@ -66,6 +67,7 @@ from app.services.telegram_review import (
 )
 from app.services.audit import audit
 from app.services.auth import create_access_token, decode_token, hash_password, verify_password
+from app.services.auth import get_user_by_email, get_user_by_id
 from app.services.llm import get_client, get_workspace_api_key, set_user_api_key, track_usage_from_response
 from app.services.user_secrets import encrypt_secret
 from app.services.telegram_context import load_workspace_telegram_context
@@ -73,9 +75,12 @@ from app.services.runtime_settings import (
     RUNTIME_DEFAULTS,
     delete_runtime_setting,
     get_runtime_float,
+    get_runtime_str,
     list_runtime_settings,
     upsert_runtime_setting,
 )
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Neurovibes News API", version="0.3.0")
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
@@ -99,7 +104,7 @@ AGGREGATE_JOBS: dict[str, dict] = {}
 AGGREGATE_LOCK = threading.Lock()
 
 
-def _get_session_user(request: Request) -> User | None:
+def _get_session_user(request: Request):
     token = (request.cookies.get("nv_session") or "").strip()
     if not token:
         return None
@@ -108,8 +113,10 @@ def _get_session_user(request: Request) -> User | None:
         user_id = int(payload.get("sub"))
     except Exception:
         return None
-    with session_scope() as session:
-        return session.scalars(select(User).where(User.id == user_id, User.is_active.is_(True))).first()
+    user = get_user_by_id(user_id)
+    if user and user.is_active:
+        return user
+    return None
 
 
 @app.middleware("http")
@@ -117,11 +124,17 @@ async def _user_llm_key_middleware(request: Request, call_next):
     user = _get_session_user(request)
     if user is None:
         set_user_api_key(None)
-        load_workspace_telegram_context(None)
+        try:
+            load_workspace_telegram_context(None)
+        except Exception as exc:
+            logger.warning("telegram context preload skipped for anonymous request: %s", exc)
         return await call_next(request)
     # Load API key once per request and set it for get_client().
     set_user_api_key(get_workspace_api_key(user.id))
-    load_workspace_telegram_context(user.id)
+    try:
+        load_workspace_telegram_context(user.id)
+    except Exception as exc:
+        logger.warning("telegram context preload skipped for user %s: %s", user.id, exc)
     return await call_next(request)
 
 
@@ -309,7 +322,10 @@ class SetupTelegramIn(BaseModel):
 @app.on_event("startup")
 def on_startup() -> None:
     init_db()
-    seed_sources()
+    try:
+        seed_sources()
+    except Exception as exc:
+        logger.warning("seed_sources skipped during startup: %s", exc)
 
 
 @app.get("/health")
@@ -345,8 +361,7 @@ def login_page(request: Request):
 @app.post("/login")
 def login_submit(login: str = Form(...), password: str = Form(...)) -> RedirectResponse:
     email = (login or "").strip().lower()
-    with session_scope() as session:
-        user = session.scalars(select(User).where(User.email == email, User.is_active.is_(True))).first()
+    user = get_user_by_email(email)
     if not user or not verify_password(password, user.password_hash):
         return RedirectResponse(url="/login", status_code=303)
     token = create_access_token(user)
@@ -387,13 +402,27 @@ def register_submit(login: str = Form(...), password: str = Form(...)) -> Redire
     if len(password or "") < 6:
         return RedirectResponse(url="/register", status_code=303)
     with session_scope() as session:
-        exists = session.scalars(select(User).where(User.email == email)).first()
+        exists = session.execute(
+            text("SELECT id FROM public.users WHERE lower(email) = :email LIMIT 1"),
+            {"email": email},
+        ).first()
         if exists:
             return RedirectResponse(url="/login", status_code=303)
-        user = User(email=email, password_hash=hash_password(password), is_active=True)
-        session.add(user)
-        session.flush()
-        session.add(UserWorkspace(user_id=user.id, onboarding_step=1, onboarding_completed=False))
+        user_row = session.execute(
+            text(
+                "INSERT INTO public.users (email, password_hash, role, is_active, created_at) "
+                "VALUES (:email, :password_hash, :role, :is_active, NOW()) "
+                "RETURNING id"
+            ),
+            {
+                "email": email,
+                "password_hash": hash_password(password),
+                "role": "editor",
+                "is_active": True,
+            },
+        ).first()
+        user_id = int(user_row[0])
+        session.add(UserWorkspace(user_id=user_id, onboarding_step=1, onboarding_completed=False))
     return RedirectResponse(url="/login", status_code=303)
 
 
@@ -1314,15 +1343,14 @@ def admin_data_articles(
         selected_today_ids: list[int] = []
         base_query = select(Article)
         if view == "deleted":
-            articles = session.scalars(
-                base_query.where(Article.status.in_([ArticleStatus.ARCHIVED, ArticleStatus.REJECTED]))
-            ).all()
+            base_query = base_query.where(Article.status.in_([ArticleStatus.ARCHIVED, ArticleStatus.REJECTED]))
+            articles = session.scalars(base_query).all()
         elif view == "published":
-            base_query = base_query.where(Article.status != ArticleStatus.ARCHIVED)
-            articles = session.scalars(base_query.where(Article.status == ArticleStatus.PUBLISHED)).all()
+            base_query = base_query.where(Article.status == ArticleStatus.PUBLISHED)
+            articles = session.scalars(base_query).all()
         elif view == "selected_hour":
-            base_query = base_query.where(Article.status != ArticleStatus.ARCHIVED)
-            articles = session.scalars(base_query.where(Article.status == ArticleStatus.SELECTED_HOURLY)).all()
+            base_query = base_query.where(Article.status == ArticleStatus.SELECTED_HOURLY)
+            articles = session.scalars(base_query).all()
         elif view == "selected_day":
             rows = session.execute(
                 select(DailySelection.article_id, DailySelection.selected_date).where(
@@ -1334,8 +1362,8 @@ def admin_data_articles(
                 if prev is None or sdate > prev:
                     selected_day_map[int(aid)] = sdate
             ids = list(selected_day_map.keys())
-            base_query = base_query.where(Article.status != ArticleStatus.ARCHIVED)
-            articles = session.scalars(base_query.where(Article.id.in_(ids))).all() if ids else []
+            base_query = base_query.where(Article.id.in_(ids)) if ids else base_query.where(Article.id == -1)
+            articles = session.scalars(base_query).all()
         elif view == "unsorted":
             # Unsorted = editor inbox excluding anything that was already "sent somewhere":
             # - published
@@ -1357,8 +1385,11 @@ def admin_data_articles(
                 base_query = base_query.where(Article.id.not_in(list(set(int(x) for x in selected_any_day_ids))))
             articles = session.scalars(base_query).all()
         elif view == "no_double":
-            base_query = base_query.where(Article.status != ArticleStatus.ARCHIVED)
-            articles = session.scalars(base_query.where(Article.status != ArticleStatus.DOUBLE)).all()
+            base_query = base_query.where(
+                Article.status != ArticleStatus.ARCHIVED,
+                Article.status != ArticleStatus.DOUBLE,
+            )
+            articles = session.scalars(base_query).all()
         elif view == "backlog":
             selected_today_ids = list(
                 int(x) for x in session.scalars(
@@ -1734,7 +1765,11 @@ def admin_data_worker_status(request: Request) -> dict:
             row = session.get(TelegramBotKV, k)
             out[k] = (row.value if row else "") or ""
         ws = session.scalars(select(UserWorkspace).where(UserWorkspace.user_id == user.id)).first()
-        out["tz"] = (getattr(ws, "timezone_name", "") or "").strip() or "Europe/Moscow"
+        out["tz"] = (
+            (getattr(ws, "timezone_name", "") or "").strip()
+            or get_runtime_str("timezone_name")
+            or "Europe/Moscow"
+        )
     out["now_utc"] = datetime.utcnow().isoformat()
     out["ok"] = True
     return out
@@ -1824,16 +1859,21 @@ def delete_source(source_id: int, request: Request) -> dict:
 def admin_data_score_params(request: Request) -> list[dict]:
     _require_session_user(request)
     with session_scope() as session:
-        rows = session.scalars(select(ScoreParameter).order_by(ScoreParameter.id.asc())).all()
+        rows = session.execute(
+            text(
+                "SELECT id, key, title, description, weight, influence_rule, is_active "
+                "FROM public.score_parameters ORDER BY id ASC"
+            )
+        ).mappings().all()
         return [
             {
-                "id": r.id,
-                "key": r.key,
-                "title": r.title,
-                "description": r.description,
-                "weight": float(r.weight or 0.0),
-                "influence_rule": r.influence_rule,
-                "is_active": bool(r.is_active),
+                "id": int(r["id"]),
+                "key": r["key"],
+                "title": r["title"],
+                "description": r["description"],
+                "weight": float(r["weight"] or 0.0),
+                "influence_rule": r["influence_rule"],
+                "is_active": bool(r["is_active"]),
             }
             for r in rows
         ]
@@ -1846,28 +1886,54 @@ def score_params_upsert(body: ScoreParamUpsertIn, request: Request) -> dict:
     if not key:
         raise HTTPException(status_code=400, detail="key_required")
     with session_scope() as session:
-        row = session.scalars(select(ScoreParameter).where(ScoreParameter.key == key)).first()
-        if row is None:
-            row = ScoreParameter(key=key)
-            session.add(row)
-        row.title = body.title.strip()
-        row.description = (body.description or "").strip()
-        row.weight = float(body.weight)
-        row.influence_rule = (body.influence_rule or "").strip()
-        row.is_active = bool(body.is_active)
-        row.updated_at = datetime.utcnow()
-        session.flush()
-        return {"ok": True, "id": int(row.id), "key": row.key}
+        existing = session.execute(
+            text("SELECT id FROM public.score_parameters WHERE key = :key LIMIT 1"),
+            {"key": key},
+        ).first()
+        params = {
+            "key": key,
+            "title": body.title.strip(),
+            "description": (body.description or "").strip(),
+            "weight": float(body.weight),
+            "influence_rule": (body.influence_rule or "").strip(),
+            "is_active": bool(body.is_active),
+            "updated_at": datetime.utcnow(),
+        }
+        if existing is None:
+            row = session.execute(
+                text(
+                    "INSERT INTO public.score_parameters "
+                    "(key, title, description, weight, influence_rule, is_active, updated_at) "
+                    "VALUES (:key, :title, :description, :weight, :influence_rule, :is_active, :updated_at) "
+                    "RETURNING id"
+                ),
+                params,
+            ).first()
+            row_id = int(row[0])
+        else:
+            row_id = int(existing[0])
+            session.execute(
+                text(
+                    "UPDATE public.score_parameters "
+                    "SET title = :title, description = :description, weight = :weight, "
+                    "influence_rule = :influence_rule, is_active = :is_active, updated_at = :updated_at "
+                    "WHERE id = :id"
+                ),
+                {**params, "id": row_id},
+            )
+        return {"ok": True, "id": row_id, "key": key}
 
 
 @app.delete("/score-params/{param_id}")
 def score_params_delete(param_id: int, request: Request) -> dict:
     _require_session_user(request)
     with session_scope() as session:
-        row = session.get(ScoreParameter, param_id)
+        row = session.execute(
+            text("DELETE FROM public.score_parameters WHERE id = :id RETURNING id"),
+            {"id": int(param_id)},
+        ).first()
         if not row:
             raise HTTPException(status_code=404, detail="score_param_not_found")
-        session.delete(row)
     return {"ok": True, "deleted_id": param_id}
 
 
@@ -1918,6 +1984,12 @@ def setup_state(request: Request) -> dict:
                 ws.onboarding_step = 4
                 ws.onboarding_completed = True
                 ws.updated_at = datetime.utcnow()
+        openrouter_api_key_set = bool((ws.openrouter_api_key_enc or "").strip()) or bool((settings.openrouter_api_key or "").strip())
+        telegram_bot_token_set = bool((ws.telegram_bot_token_enc or "").strip()) or bool((settings.telegram_bot_token or "").strip())
+        telegram_review_chat_id = (ws.telegram_review_chat_id or "").strip() or (get_runtime_str("telegram_review_chat_id") or settings.telegram_review_chat_id or "").strip()
+        telegram_channel_id = (ws.telegram_channel_id or "").strip() or (get_runtime_str("telegram_channel_id") or settings.telegram_channel_id or "").strip()
+        telegram_signature = (ws.telegram_signature or "").strip() or (get_runtime_str("telegram_signature") or settings.telegram_signature or "@neuro_vibes_future").strip()
+        timezone_name = (ws.timezone_name or "").strip() or (get_runtime_str("timezone_name") or "Europe/Moscow").strip()
         return {
             "user_id": user.id,
             "email": user.email,
@@ -1926,12 +1998,12 @@ def setup_state(request: Request) -> dict:
             "sources_text": ws.sources_text or "",
             "audience_description": ws.audience_description or "",
             "scoring_notes": ws.scoring_notes or "",
-            "openrouter_api_key_set": bool((ws.openrouter_api_key_enc or "").strip()),
-            "telegram_bot_token_set": bool((ws.telegram_bot_token_enc or "").strip()),
-            "telegram_review_chat_id": ws.telegram_review_chat_id or "",
-            "telegram_channel_id": ws.telegram_channel_id or "",
-            "telegram_signature": ws.telegram_signature or "",
-            "timezone_name": ws.timezone_name or "Europe/Moscow",
+            "openrouter_api_key_set": openrouter_api_key_set,
+            "telegram_bot_token_set": telegram_bot_token_set,
+            "telegram_review_chat_id": telegram_review_chat_id,
+            "telegram_channel_id": telegram_channel_id,
+            "telegram_signature": telegram_signature,
+            "timezone_name": timezone_name,
             "onboarding_step": int(ws.onboarding_step or 1),
             "onboarding_completed": bool(ws.onboarding_completed),
         }
@@ -2468,6 +2540,14 @@ def unschedule_publish(article_id: int, request: Request) -> dict:
         article.scheduled_publish_at = None
         article.updated_at = datetime.utcnow()
     return {"ok": True, "article_id": article_id, "scheduled_publish_at": None}
+
+
+@app.post("/publish/process-due")
+def publish_process_due(request: Request, limit: int = 20) -> dict:
+    user = _require_session_user(request)
+    load_workspace_telegram_context(user.id)
+    n = max(1, min(int(limit), 100))
+    return publish_scheduled_due(limit=n)
 
 
 @app.post("/telegram/test")

@@ -109,6 +109,39 @@ export interface WorkerStatus {
   worker_last_cycle_error?: string;
 }
 
+export interface AggregateJobStatus {
+  job_id: string;
+  status: string;
+  period?: "hour" | "day" | "week" | "month";
+  stage?: string | null;
+  stage_detail?: string | null;
+  processed?: number;
+  total?: number;
+  eta_seconds?: number | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  error?: string | null;
+  result?: {
+    ok?: boolean;
+    period?: string;
+    inserted_total?: number;
+    by_source?: Record<string, number>;
+    dedup_processed?: number;
+    enrich_summary_only?: number;
+    scored?: number;
+  } | null;
+}
+
+export interface TelegramReviewJob {
+  id: number;
+  article_id?: number | null;
+  chat_id?: string | null;
+  review_message_id?: string | null;
+  status?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
 export interface CostSummary {
   ok: boolean;
   estimated_cost_usd_total: number;
@@ -359,12 +392,24 @@ export const api = {
     );
   },
 
+  getTelegramReviewJobs(limit = 20) {
+    return requestJson<{ ok: boolean; items: TelegramReviewJob[] }>(`/telegram/review/jobs?limit=${limit}`);
+  },
+
+  publishScheduledDue(limit = 20) {
+    return requestJson<Record<string, unknown>>(`/publish/process-due?limit=${limit}`, { method: "POST" });
+  },
+
   startAggregate(period: "hour" | "day" | "week" | "month") {
     return requestJson<Record<string, unknown>>("/ingestion/aggregate-start", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ period }),
     });
+  },
+
+  getAggregateJob(jobId: string) {
+    return requestJson<AggregateJobStatus>(`/ingestion/jobs/${jobId}`);
   },
 
   startPipeline(backfill_days: number) {
