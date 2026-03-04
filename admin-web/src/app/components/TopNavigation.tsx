@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router";
 import { Button } from "./ui/button";
 import {
@@ -24,6 +25,8 @@ import { api, ApiError } from "../lib/api";
 export function TopNavigation() {
   const location = useLocation();
   const navigate = useNavigate();
+  const [openMenu, setOpenMenu] = useState<"actions" | "tools" | "account" | null>(null);
+  const closeTimerRef = useRef<number | null>(null);
 
   const articlePaths = new Set([
     "/dashboard",
@@ -38,6 +41,33 @@ export function TopNavigation() {
   const isArticlesRoute =
     articlePaths.has(location.pathname) || location.pathname.startsWith("/article/");
   const isActive = (path: string) => location.pathname === path || location.pathname.startsWith(`${path}/`);
+
+  function clearCloseTimer() {
+    if (closeTimerRef.current !== null) {
+      window.clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
+  }
+
+  function openMenuHover(menu: "actions" | "tools" | "account") {
+    clearCloseTimer();
+    setOpenMenu(menu);
+  }
+
+  function closeMenuHover(menu: "actions" | "tools" | "account") {
+    clearCloseTimer();
+    closeTimerRef.current = window.setTimeout(() => {
+      setOpenMenu((current) => (current === menu ? null : current));
+      closeTimerRef.current = null;
+    }, 120);
+  }
+
+  useEffect(
+    () => () => {
+      clearCloseTimer();
+    },
+    [],
+  );
 
   async function runAction(label: string, action: () => Promise<Record<string, unknown>>) {
     try {
@@ -73,14 +103,26 @@ export function TopNavigation() {
               </Link>
             </Button>
 
-            <DropdownMenu>
+            <DropdownMenu open={openMenu === "actions"} onOpenChange={(open) => setOpenMenu(open ? "actions" : null)}>
               <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="sm" className="gap-2">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="gap-2"
+                  onMouseEnter={() => openMenuHover("actions")}
+                  onMouseLeave={() => closeMenuHover("actions")}
+                >
                   <Zap className="w-4 h-4" />
                   Действия
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="w-56">
+              <DropdownMenuContent
+                align="start"
+                sideOffset={0}
+                className="w-56"
+                onMouseEnter={() => openMenuHover("actions")}
+                onMouseLeave={() => closeMenuHover("actions")}
+              >
                 <DropdownMenuItem onClick={() => runAction("Собрать за час", () => api.startAggregate("hour"))}>
                   <Database className="w-4 h-4 mr-2" />
                   Собрать за час
@@ -120,14 +162,26 @@ export function TopNavigation() {
               </DropdownMenuContent>
             </DropdownMenu>
 
-            <DropdownMenu>
+            <DropdownMenu open={openMenu === "tools"} onOpenChange={(open) => setOpenMenu(open ? "tools" : null)}>
               <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="sm" className="gap-2">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="gap-2"
+                  onMouseEnter={() => openMenuHover("tools")}
+                  onMouseLeave={() => closeMenuHover("tools")}
+                >
                   <Wrench className="w-4 h-4" />
                   Инструменты
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="w-48">
+              <DropdownMenuContent
+                align="start"
+                sideOffset={0}
+                className="w-48"
+                onMouseEnter={() => openMenuHover("tools")}
+                onMouseLeave={() => closeMenuHover("tools")}
+              >
                 <DropdownMenuItem asChild>
                   <Link to="/bot" className="cursor-pointer">
                     <Bot className="w-4 h-4 mr-2" />
@@ -158,14 +212,26 @@ export function TopNavigation() {
           </div>
         </div>
 
-        <DropdownMenu>
+        <DropdownMenu open={openMenu === "account"} onOpenChange={(open) => setOpenMenu(open ? "account" : null)}>
           <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="sm" className="gap-2">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="gap-2"
+              onMouseEnter={() => openMenuHover("account")}
+              onMouseLeave={() => closeMenuHover("account")}
+            >
               <User className="w-4 h-4" />
               Аккаунт
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-48">
+          <DropdownMenuContent
+            align="end"
+            sideOffset={0}
+            className="w-48"
+            onMouseEnter={() => openMenuHover("account")}
+            onMouseLeave={() => closeMenuHover("account")}
+          >
             <DropdownMenuItem asChild>
               <Link to="/setup" className="cursor-pointer">
                 <Settings className="w-4 h-4 mr-2" />
