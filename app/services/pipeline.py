@@ -167,29 +167,22 @@ def _resolve_hourly_selection_strategy(now_utc: datetime | None = None) -> str:
 
 
 def _ml_candidate_score(article: Article, score: Score) -> tuple[float, dict]:
-    rule_score = _rule_adjusted_score(article, score)
     features = score.features if isinstance(score.features, dict) else {}
-    editorial_mult, editorial_reasons = _editorial_score_multiplier(article, score)
     ml_meta = predict_editor_choice_prob(features)
     if not ml_meta.get("ok"):
-        return float(rule_score / 10.0), {
-            "mode": "ml_fallback_rule",
+        # Strict ML mode: if model is not ready, candidate is not eligible.
+        return 0.0, {
+            "mode": "ml_unavailable",
             "confidence": None,
             "ml_meta": ml_meta,
-            "editorial_multiplier": editorial_mult,
-            "editorial_reasons": editorial_reasons,
+            "eligible": False,
         }
     ml_prob = float(ml_meta.get("prob") or 0.0)
-    # Keep a small rule component so ML ties still prefer stronger articles.
-    combined = (0.85 * ml_prob) + (0.15 * float(max(0.0, min(10.0, rule_score)) / 10.0))
-    combined *= editorial_mult
-    return combined, {
-        "mode": "ml",
+    return ml_prob, {
+        "mode": "ml_strict",
         "confidence": ml_prob,
         "ml_meta": ml_meta,
-        "rule_score": rule_score,
-        "editorial_multiplier": editorial_mult,
-        "editorial_reasons": editorial_reasons,
+        "eligible": True,
     }
 
 
@@ -364,6 +357,8 @@ def pick_hourly_top(strategy: str | None = None) -> int | None:
             if str(article.content_mode or "summary_only").strip().lower() == "summary_only":
                 continue
             ml_score, ml_explain = _ml_candidate_score(article, score)
+            if not bool(ml_explain.get("eligible", True)):
+                continue
             scored_candidates.append((article, score, ml_score, ml_explain))
         scored_candidates.sort(key=lambda x: x[2], reverse=True)
         gated_candidates = [
