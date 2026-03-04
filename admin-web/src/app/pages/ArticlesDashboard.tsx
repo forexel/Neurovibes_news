@@ -473,15 +473,7 @@ export default function ArticlesDashboard() {
                     <TableCell>{article.score_10 != null ? <ScoreBadge score={article.score_10} size="sm" /> : "—"}</TableCell>
                     <TableCell>
                       <div className="space-y-1 max-w-lg">
-                        <div className="font-medium line-clamp-1">
-                          <Link
-                            to={`/article/${article.id}`}
-                            className="hover:underline"
-                            onClick={(event) => event.stopPropagation()}
-                          >
-                            {article.ru_title || article.title}
-                          </Link>
-                        </div>
+                        <div className="font-medium line-clamp-1">{article.ru_title || article.title}</div>
                         {article.short_hook || article.subtitle ? (
                           <div className="text-sm text-muted-foreground line-clamp-2">
                             {article.short_hook || article.subtitle}
