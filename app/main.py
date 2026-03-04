@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import threading
 import uuid
@@ -221,6 +222,11 @@ def _matches_article_query(x: dict, q_norm: str, words: list[str]) -> bool:
 
 class FeedbackIn(BaseModel):
     explanation_text: str = Field(min_length=5, max_length=5000)
+
+
+class MlVerdictIn(BaseModel):
+    confirmed: bool
+    comment: str = Field(default="", max_length=4000)
 
 
 class RunPipelineIn(BaseModel):
@@ -1322,8 +1328,37 @@ def article_details(article_id: int) -> dict:
         data["ru_summary"] = article.ru_summary
         data["short_hook"] = article.short_hook
         data["generated_image_path"] = article.generated_image_path
+        image_web = ""
+        image_raw = article.generated_image_path or ""
+        if image_raw:
+            image_web = image_raw
+            if image_web.startswith(("http://", "https://")):
+                pass
+            elif image_web.startswith("app/static/"):
+                image_web = "/static/" + image_web.removeprefix("app/static/")
+            elif not image_web.startswith("/"):
+                image_web = "/" + image_web
+        data["image_web"] = image_web
         data["post_preview"] = _build_post_preview_text(article)
         data["image_prompt"] = _latest_image_prompt(session, article_id)
+        data["archived_kind"] = article.archived_kind
+        data["archived_reason"] = article.archived_reason
+        data["archived_at"] = _dt_to_utc_z(article.archived_at)
+        emb = session.scalars(
+            select(ArticleEmbedding)
+            .where(ArticleEmbedding.article_id == article_id)
+            .order_by(ArticleEmbedding.id.desc())
+            .limit(1)
+        ).first()
+        if emb and emb.embedding:
+            vec = list(emb.embedding or [])
+            data["embedding_dim"] = len(vec)
+            data["embedding_preview"] = [round(float(x), 6) for x in vec[:24]]
+            data["article_vector_model"] = settings.embedding_model
+        else:
+            data["embedding_dim"] = None
+            data["embedding_preview"] = None
+            data["article_vector_model"] = None
         latest_feedback = session.scalars(
             select(EditorFeedback.explanation_text)
             .where(EditorFeedback.article_id == article_id)
@@ -2428,6 +2463,19 @@ def save_feedback(article_id: int, body: FeedbackIn) -> dict:
             raise HTTPException(status_code=404, detail="Article not found")
         session.add(EditorFeedback(article_id=article_id, explanation_text=text))
     return {"ok": True, "feedback": text}
+
+
+@app.post("/articles/{article_id}/ml-verdict")
+def save_ml_verdict(article_id: int, body: MlVerdictIn) -> dict:
+    comment = (body.comment or "").strip()
+    with session_scope() as session:
+        article = session.get(Article, article_id)
+        if not article:
+            raise HTTPException(status_code=404, detail="Article not found")
+        article.ml_verdict_confirmed = bool(body.confirmed)
+        article.ml_verdict_comment = comment or None
+        article.ml_verdict_updated_at = datetime.utcnow()
+    return {"ok": True, "confirmed": bool(body.confirmed), "comment": comment}
 
 
 @app.post("/articles/{article_id}/status")
@@ -5130,6 +5178,11 @@ updateSaveButtons();
 
 def _serialize_article(article: Article, score: Score | None, source: Source | None) -> dict:
     final_score = score.final_score if score else None
+    try:
+        if final_score is not None and not math.isfinite(float(final_score)):
+            final_score = None
+    except Exception:
+        final_score = None
     return {
         "id": article.id,
         "status": article.status,
@@ -5153,6 +5206,12 @@ def _serialize_article(article: Article, score: Score | None, source: Source | N
         "ml_recommendation_reason": article.ml_recommendation_reason,
         "ml_model_version": article.ml_model_version,
         "ml_recommendation_at": _dt_to_utc_z(article.ml_recommendation_at),
+        "archived_kind": article.archived_kind,
+        "archived_reason": article.archived_reason,
+        "archived_at": _dt_to_utc_z(article.archived_at),
+        "ml_verdict_confirmed": article.ml_verdict_confirmed,
+        "ml_verdict_comment": article.ml_verdict_comment,
+        "ml_verdict_updated_at": _dt_to_utc_z(article.ml_verdict_updated_at),
     }
 
 
@@ -5185,5 +5244,11 @@ def _dt_to_utc_z(dt: datetime | None) -> str | None:
 def _score_to_10(score: Score | None) -> float | None:
     if score is None or score.final_score is None:
         return None
-    value = max(0.0, min(10.0, float(score.final_score) * 10.0))
+    try:
+        base = float(score.final_score)
+    except Exception:
+        return None
+    if not math.isfinite(base):
+        return None
+    value = max(0.0, min(10.0, base * 10.0))
     return round(value, 1)

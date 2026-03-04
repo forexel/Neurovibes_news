@@ -59,7 +59,7 @@ export function TopNavigation() {
     closeTimerRef.current = window.setTimeout(() => {
       setOpenMenu((current) => (current === menu ? null : current));
       closeTimerRef.current = null;
-    }, 260);
+    }, 420);
   }
 
   useEffect(
@@ -109,6 +109,7 @@ export function TopNavigation() {
                   variant="ghost"
                   size="sm"
                   className="gap-2"
+                  onClick={() => setOpenMenu((value) => (value === "actions" ? null : "actions"))}
                   onMouseEnter={() => openMenuHover("actions")}
                   onMouseLeave={() => closeMenuHover("actions")}
                 >
@@ -120,6 +121,7 @@ export function TopNavigation() {
                 align="start"
                 sideOffset={0}
                 className="w-56"
+                collisionPadding={8}
                 onMouseEnter={() => openMenuHover("actions")}
                 onMouseLeave={() => closeMenuHover("actions")}
               >
@@ -168,6 +170,7 @@ export function TopNavigation() {
                   variant="ghost"
                   size="sm"
                   className="gap-2"
+                  onClick={() => setOpenMenu((value) => (value === "tools" ? null : "tools"))}
                   onMouseEnter={() => openMenuHover("tools")}
                   onMouseLeave={() => closeMenuHover("tools")}
                 >
@@ -179,6 +182,7 @@ export function TopNavigation() {
                 align="start"
                 sideOffset={0}
                 className="w-48"
+                collisionPadding={8}
                 onMouseEnter={() => openMenuHover("tools")}
                 onMouseLeave={() => closeMenuHover("tools")}
               >
@@ -218,6 +222,7 @@ export function TopNavigation() {
               variant="ghost"
               size="sm"
               className="gap-2"
+              onClick={() => setOpenMenu((value) => (value === "account" ? null : "account"))}
               onMouseEnter={() => openMenuHover("account")}
               onMouseLeave={() => closeMenuHover("account")}
             >
@@ -229,6 +234,7 @@ export function TopNavigation() {
             align="end"
             sideOffset={0}
             className="w-48"
+            collisionPadding={8}
             onMouseEnter={() => openMenuHover("account")}
             onMouseLeave={() => closeMenuHover("account")}
           >

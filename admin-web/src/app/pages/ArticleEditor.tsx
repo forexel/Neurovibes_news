@@ -5,6 +5,7 @@ import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Textarea } from "../components/ui/textarea";
 import { Label } from "../components/ui/label";
+import { Switch } from "../components/ui/switch";
 import { Calendar as DateCalendar } from "../components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
 import { StatusBadge } from "../components/StatusBadge";
@@ -76,6 +77,8 @@ export default function ArticleEditor() {
   const [ruSummary, setRuSummary] = useState("");
   const [imagePrompt, setImagePrompt] = useState("");
   const [feedback, setFeedback] = useState("");
+  const [mlVerdictConfirmed, setMlVerdictConfirmed] = useState(false);
+  const [mlVerdictComment, setMlVerdictComment] = useState("");
   const [scheduleDate, setScheduleDate] = useState("");
   const [schedulePopoverOpen, setSchedulePopoverOpen] = useState(false);
 
@@ -94,6 +97,8 @@ export default function ArticleEditor() {
       setRuSummary(data.ru_summary || "");
       setImagePrompt(data.image_prompt || "");
       setFeedback(data.feedback || "");
+      setMlVerdictConfirmed(Boolean(data.ml_verdict_confirmed));
+      setMlVerdictComment(data.ml_verdict_comment || "");
       setScheduleDate(toInputDate(data.scheduled_publish_at));
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
@@ -131,6 +136,24 @@ export default function ArticleEditor() {
       navigate("/dashboard");
     } catch (err) {
       addLog("error", err instanceof Error ? err.message : "Delete failed");
+    } finally {
+      setLoading(null);
+    }
+  }
+
+  async function saveMlVerdict() {
+    if (!article) return;
+    setLoading("ml-verdict");
+    addLog("info", "Сохранение ML-вердикта...");
+    try {
+      await api.saveMlVerdict(article.id, {
+        confirmed: mlVerdictConfirmed,
+        comment: mlVerdictComment.trim(),
+      });
+      addLog("success", "ML-вердикт сохранен");
+      await loadArticle();
+    } catch (err) {
+      addLog("error", err instanceof Error ? err.message : "Не удалось сохранить ML-вердикт");
     } finally {
       setLoading(null);
     }
@@ -232,6 +255,32 @@ export default function ArticleEditor() {
             Недостаточно контента для публикации. Сейчас в статье только короткий RSS summary. Нажми "Загрузить с сайта", и если сайт не отдаёт полный текст, материал лучше не публиковать.
           </div>
         ) : null}
+
+        <div className="mb-6 rounded-lg border border-border bg-card p-4">
+          <div className="mb-3 text-sm font-medium">ML-вердикт</div>
+          <div className="mb-3 flex items-center gap-3">
+            <Switch id="ml-verdict-confirmed" checked={mlVerdictConfirmed} onCheckedChange={setMlVerdictConfirmed} />
+            <Label htmlFor="ml-verdict-confirmed" className="cursor-pointer">
+              Согласен с рекомендацией ML
+            </Label>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="ml-verdict-comment">Комментарий</Label>
+            <Textarea
+              id="ml-verdict-comment"
+              value={mlVerdictComment}
+              onChange={(e) => setMlVerdictComment(e.target.value)}
+              rows={3}
+              placeholder="Почему согласен / не согласен с выбором модели"
+            />
+          </div>
+          <div className="mt-3">
+            <Button size="sm" variant="secondary" onClick={saveMlVerdict} disabled={loading === "ml-verdict"}>
+              {loading === "ml-verdict" ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Save className="w-4 h-4 mr-2" />}
+              Сохранить ML-вердикт
+            </Button>
+          </div>
+        </div>
 
         <Tabs defaultValue="linear" className="space-y-6">
           <TabsList>

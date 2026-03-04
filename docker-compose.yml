@@ -7,6 +7,8 @@ services:
       - .env
     ports:
       - "18100:8000"
+    volumes:
+      - model_artifacts:/app/app/static/models
     networks:
       - apps-net
     restart: unless-stopped
@@ -20,6 +22,8 @@ services:
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
     ports:
       - "18101:8000"
+    volumes:
+      - model_artifacts:/app/app/static/models
     networks:
       - apps-net
     restart: unless-stopped
@@ -31,6 +35,8 @@ services:
     env_file:
       - .env
     command: ["python", "-m", "app.tasks.worker"]
+    volumes:
+      - model_artifacts:/app/app/static/models
     networks:
       - apps-net
     restart: unless-stopped
@@ -83,6 +89,7 @@ volumes:
   postgres_data:
   minio_data:
   neurovibes_pg:
+  model_artifacts:
 
 networks:
   apps-net:

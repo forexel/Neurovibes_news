@@ -117,6 +117,9 @@ class Article(Base):
     ml_recommendation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     ml_model_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
     ml_recommendation_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    ml_verdict_confirmed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    ml_verdict_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ml_verdict_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     scheduled_publish_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # Hour bucket (UTC, naive) for Selected Hour backfill/dedup.
     selected_hour_bucket_utc: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

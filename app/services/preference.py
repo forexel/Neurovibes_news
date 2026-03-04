@@ -37,7 +37,7 @@ from app.services.llm import get_client, track_usage_from_response
 from app.services.utils import stable_hash
 
 
-MODEL_DIR = Path("app/static/models")
+MODEL_DIR = Path(settings.model_artifacts_dir or "app/static/models")
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 EDITOR_CHOICE_MODEL_NAME = "editor_choice"
@@ -70,6 +70,9 @@ EDITOR_CHOICE_FEATURES = [
     "contains_pricing",
     "contains_demo",
     "contains_github",
+    "rejected_similar_cluster_recent",
+    "rejected_similar_source_recent",
+    "rejected_similar_cluster_or_source_recent",
     "content_type_tool",
     "content_type_case",
     "content_type_playbook",
@@ -108,8 +111,14 @@ PRACTICAL_RANKER_FEATURES = [
     "contains_how_to",
     "contains_template",
     "contains_prompt",
+    "rejected_similar_cluster_or_source_recent",
     "rule_score",
 ]
+
+NOISE_BINARY_SCALE = 0.30
+PRACTICAL_VALUE_BOOST = 1.30
+AUDIENCE_FIT_BOOST = 1.25
+ACTIONABILITY_BOOST = 1.35
 _TAGS = [
     "breakthrough",
     "funding",
@@ -201,6 +210,19 @@ def _editor_choice_vectorizer() -> HashingVectorizer:
     )
 
 
+def _resolve_artifact_path(stored_path: str | None) -> Path | None:
+    raw = str(stored_path or "").strip()
+    if not raw:
+        return None
+    p = Path(raw)
+    if p.exists():
+        return p
+    fallback = MODEL_DIR / p.name
+    if fallback.exists():
+        return fallback
+    return None
+
+
 def _article_text_blob(article: Article | None = None, features: dict | None = None) -> str:
     feats = dict(features or {})
     if article is not None:
@@ -220,11 +242,30 @@ def _article_text_blob(article: Article | None = None, features: dict | None = N
     ).strip()
 
 
-def _editor_choice_vector_from_features(features: dict | None) -> np.ndarray:
+def _editor_choice_vector_from_features(
+    features: dict | None,
+    numeric_feature_names: list[str] | None = None,
+    hashing_n_features: int | None = None,
+) -> np.ndarray:
     feats = dict(features or {})
-    numeric = np.array([float(feats.get(k, 0.0) or 0.0) for k in EDITOR_CHOICE_FEATURES], dtype=float)
+    names = list(numeric_feature_names or EDITOR_CHOICE_FEATURES)
+    hash_size = int(hashing_n_features or EDITOR_CHOICE_TEXT_FEATURES)
+    numeric = np.array([float(feats.get(k, 0.0) or 0.0) for k in names], dtype=float)
     text_blob = _article_text_blob(None, feats)
-    text_vec = _editor_choice_vectorizer().transform([text_blob]).toarray()[0] if text_blob else np.zeros(EDITOR_CHOICE_TEXT_FEATURES, dtype=float)
+    if text_blob:
+        if hash_size == EDITOR_CHOICE_TEXT_FEATURES:
+            vec = _editor_choice_vectorizer()
+        else:
+            vec = HashingVectorizer(
+                n_features=hash_size,
+                alternate_sign=False,
+                norm="l2",
+                lowercase=True,
+                token_pattern=r"(?u)\b\w\w+\b",
+            )
+        text_vec = vec.transform([text_blob]).toarray()[0]
+    else:
+        text_vec = np.zeros(hash_size, dtype=float)
     return np.concatenate([numeric, text_vec], axis=0)
 
 
@@ -567,7 +608,55 @@ def _audience_pref_features_from_tags(tags: list[str] | None) -> dict[str, float
     }
 
 
+def _recent_rejection_signals(session, article: Article) -> tuple[float, float, float]:
+    if session is None:
+        return 0.0, 0.0, 0.0
+    since = datetime.utcnow() - timedelta(days=30)
+    source_id = int(article.source_id or 0)
+    cluster_key = str(article.cluster_key or "").strip()
+
+    def _ratio(base_filter) -> float:
+        neg = (
+            session.scalar(
+                select(func.count())
+                .select_from(TrainingEvent)
+                .join(Article, Article.id == TrainingEvent.article_id)
+                .where(
+                    base_filter,
+                    TrainingEvent.created_at >= since,
+                    TrainingEvent.decision.in_(["hide", "delete", "defer", "skip"]),
+                    TrainingEvent.label == 0,
+                )
+            )
+            or 0
+        )
+        pos = (
+            session.scalar(
+                select(func.count())
+                .select_from(TrainingEvent)
+                .join(Article, Article.id == TrainingEvent.article_id)
+                .where(
+                    base_filter,
+                    TrainingEvent.created_at >= since,
+                    TrainingEvent.decision.in_(["publish", "top_pick"]),
+                    TrainingEvent.label == 1,
+                )
+            )
+            or 0
+        )
+        total = int(neg) + int(pos)
+        if total <= 0:
+            return 0.0
+        return float(max(0.0, min(1.0, float(neg) / float(total))))
+
+    source_signal = _ratio(Article.source_id == source_id) if source_id > 0 else 0.0
+    cluster_signal = _ratio(Article.cluster_key == cluster_key) if cluster_key else 0.0
+    combined = max(source_signal, cluster_signal)
+    return cluster_signal, source_signal, combined
+
+
 def _feature_snapshot(
+    session,
     article: Article,
     score: Score | None,
     reason_tags: list[str] | None = None,
@@ -607,9 +696,22 @@ def _feature_snapshot(
     use_cases = [str(x).strip().lower() for x in (f.get("use_cases") or []) if str(x).strip()]
     risk_flags = [str(x).strip().lower() for x in (f.get("risk_flags") or []) if str(x).strip()]
     text_body = " ".join([(article.title or ""), (article.subtitle or ""), (article.text or "")]).lower()
-    out["practical_value"] = _norm01(getattr(article, "practical_value", 0), denom=10.0)
-    out["audience_fit"] = _norm01(getattr(article, "audience_fit", 0), denom=10.0)
-    out["actionability"] = _norm01(f.get("actionability", 0.0), denom=1.0 if float(f.get("actionability", 0.0) or 0.0) <= 1.0 else 10.0)
+    out["practical_value"] = float(
+        min(1.0, _norm01(getattr(article, "practical_value", 0), denom=10.0) * PRACTICAL_VALUE_BOOST)
+    )
+    out["audience_fit"] = float(
+        min(1.0, _norm01(getattr(article, "audience_fit", 0), denom=10.0) * AUDIENCE_FIT_BOOST)
+    )
+    out["actionability"] = float(
+        min(
+            1.0,
+            _norm01(
+                f.get("actionability", 0.0),
+                denom=1.0 if float(f.get("actionability", 0.0) or 0.0) <= 1.0 else 10.0,
+            )
+            * ACTIONABILITY_BOOST,
+        )
+    )
     for ct in ["tool", "case", "playbook", "hot", "trend"]:
         out[f"content_type_{ct}"] = 1.0 if content_type == ct else 0.0
     for uc in ["marketing", "sales", "support", "operations", "founder"]:
@@ -619,12 +721,16 @@ def _feature_snapshot(
     out["title_length_norm"] = float(max(0.0, min(1.0, len(article.title or "") / 180.0)))
     out["text_length_norm"] = float(max(0.0, min(1.0, len(article.text or "") / 6000.0)))
     out["digit_count_norm"] = float(max(0.0, min(1.0, len(re.findall(r"\d", article.text or article.subtitle or article.title or "")) / 30.0)))
-    out["contains_how_to"] = 1.0 if "how to" in text_body else 0.0
-    out["contains_template"] = 1.0 if "template" in text_body else 0.0
-    out["contains_prompt"] = 1.0 if "prompt" in text_body else 0.0
-    out["contains_pricing"] = 1.0 if any(x in text_body for x in ["pricing", "free tier", "price", "subscription"]) else 0.0
-    out["contains_demo"] = 1.0 if any(x in text_body for x in ["demo", "try it", "available now", "public beta"]) else 0.0
-    out["contains_github"] = 1.0 if any(x in text_body for x in ["github", "open source", "repository"]) else 0.0
+    out["contains_how_to"] = NOISE_BINARY_SCALE if "how to" in text_body else 0.0
+    out["contains_template"] = NOISE_BINARY_SCALE if "template" in text_body else 0.0
+    out["contains_prompt"] = NOISE_BINARY_SCALE if "prompt" in text_body else 0.0
+    out["contains_pricing"] = NOISE_BINARY_SCALE if any(x in text_body for x in ["pricing", "free tier", "price", "subscription"]) else 0.0
+    out["contains_demo"] = NOISE_BINARY_SCALE if any(x in text_body for x in ["demo", "try it", "available now", "public beta"]) else 0.0
+    out["contains_github"] = NOISE_BINARY_SCALE if any(x in text_body for x in ["github", "open source", "repository"]) else 0.0
+    cluster_signal, source_signal, combined_signal = _recent_rejection_signals(session, article)
+    out["rejected_similar_cluster_recent"] = cluster_signal
+    out["rejected_similar_source_recent"] = source_signal
+    out["rejected_similar_cluster_or_source_recent"] = combined_signal
     out["title_text"] = str(article.title or "")[:400]
     out["subtitle_text"] = str(article.subtitle or "")[:800]
     out["text_excerpt"] = str(article.text or "")[:1500]
@@ -697,6 +803,7 @@ def log_training_event(
         audience_desc, audience_tags = _latest_workspace_audience(session, user_id=local_user_id)
         _ = audience_desc  # reserved for future use in feature engineering
         features = _feature_snapshot(
+            session,
             article,
             score,
             tags,
@@ -977,7 +1084,7 @@ def train_ranking_model(batch_id: str) -> dict:
             ModelArtifact(
                 name="ranking",
                 version=version,
-                artifact_path=str(path),
+                artifact_path=path.name,
                 metrics={"auc_train": auc, "n": len(rows)},
                 active=True,
             )
@@ -996,8 +1103,8 @@ def get_active_ranking_artifact() -> dict | None:
         ).first()
     if not model:
         return None
-    path = Path(model.artifact_path)
-    if not path.exists():
+    path = _resolve_artifact_path(model.artifact_path)
+    if not path or not path.exists():
         return None
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -1171,7 +1278,7 @@ def train_practical_ranking_model(days_back: int = 28, min_pairs: int = 40) -> d
             ModelArtifact(
                 name=PRACTICAL_RANKER_MODEL_NAME,
                 version=version,
-                artifact_path=str(path),
+                artifact_path=path.name,
                 metrics=artifact["metrics"] | {"n_train": len(train_rows), "n_val": len(val_rows)},
                 active=True,
             )
@@ -1189,8 +1296,8 @@ def get_active_practical_ranking_artifact() -> dict | None:
         ).first()
     if not row:
         return None
-    p = Path(row.artifact_path)
-    if not p.exists():
+    p = _resolve_artifact_path(row.artifact_path)
+    if not p or not p.exists():
         return None
     data = json.loads(p.read_text(encoding="utf-8"))
     data["_version"] = row.version
@@ -1295,7 +1402,7 @@ def train_editor_choice_model(days_back: int = 1, min_samples: int = 8) -> dict:
             ModelArtifact(
                 name=EDITOR_CHOICE_MODEL_NAME,
                 version=version,
-                artifact_path=str(path),
+                artifact_path=path.name,
                 metrics=artifact["metrics"] | {"n_train": len(y_train), "n_val": len(y_val)},
                 active=True,
             )
@@ -1313,8 +1420,8 @@ def get_active_editor_choice_artifact() -> dict | None:
         ).first()
     if not row:
         return None
-    p = Path(row.artifact_path)
-    if not p.exists():
+    p = _resolve_artifact_path(row.artifact_path)
+    if not p or not p.exists():
         return None
     data = json.loads(p.read_text(encoding="utf-8"))
     data["_version"] = row.version
@@ -1327,14 +1434,15 @@ def predict_editor_choice_prob(features: dict | None) -> dict:
         return {"ok": False, "reason": "no_model"}
     names = artifact.get("numeric_feature_names") or artifact.get("feature_names") or []
     coef = artifact.get("coef") or []
-    if not names or not coef or len(names) != len(coef):
-        # Compatibility path for new mixed numeric+text artifacts.
-        total_expected = len(EDITOR_CHOICE_FEATURES) + int(artifact.get("hashing_n_features") or 0)
-        if len(coef) != total_expected:
-            return {"ok": False, "reason": "bad_artifact"}
+    hash_n = int(artifact.get("hashing_n_features") or 0)
+    if not names or not coef:
+        return {"ok": False, "reason": "bad_artifact"}
+    expected = len(names) + (hash_n if hash_n > 0 else 0)
+    if expected != len(coef):
+        return {"ok": False, "reason": "bad_artifact"}
     feats = dict(features or {})
-    if artifact.get("numeric_feature_names"):
-        x = _editor_choice_vector_from_features(feats)
+    if hash_n > 0:
+        x = _editor_choice_vector_from_features(feats, numeric_feature_names=list(names), hashing_n_features=hash_n)
     else:
         x = np.array([float(feats.get(k, 0.0) or 0.0) for k in names], dtype=float)
     coef_arr = np.array(coef, dtype=float)
@@ -1486,6 +1594,7 @@ def backfill_training_and_restore_unreasoned_archived(
                     _aud_desc, aud_tags = _latest_workspace_audience(session, user_id=None)
                     cls = _guess_reason_tag_polarity(reason, decision=decision)
                     features = _feature_snapshot(
+                        session,
                         a,
                         score,
                         cls.get("tags"),
@@ -1588,6 +1697,7 @@ def backfill_training_and_restore_unreasoned_archived(
                 tags = list(cls.get("tags") or [])
                 _aud_desc, aud_tags = _latest_workspace_audience(session, user_id=None)
                 features = _feature_snapshot(
+                    session,
                     a,
                     score,
                     tags,

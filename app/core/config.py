@@ -31,6 +31,7 @@ class Settings:
 
     dedup_similarity_threshold: float = float(os.getenv("DEDUP_SIMILARITY_THRESHOLD", "0.86"))
     source_trust_default: float = float(os.getenv("SOURCE_TRUST_DEFAULT", "7.0"))
+    model_artifacts_dir: str = os.getenv("MODEL_ARTIFACTS_DIR", "app/static/models")
 
     score_significance_weight: float = float(os.getenv("W_SIGNIFICANCE", "0.25"))
     score_freshness_weight: float = float(os.getenv("W_FRESHNESS", "0.15"))

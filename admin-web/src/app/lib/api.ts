@@ -48,6 +48,12 @@ export interface ArticleListItem {
   ml_model_version?: string | null;
   ml_recommendation_at?: string | null;
   is_selected_day?: boolean;
+  archived_kind?: string | null;
+  archived_reason?: string | null;
+  archived_at?: string | null;
+  ml_verdict_confirmed?: boolean | null;
+  ml_verdict_comment?: string | null;
+  ml_verdict_updated_at?: string | null;
 }
 
 export interface ArticleListResponse {
@@ -72,6 +78,12 @@ export interface ArticleDetails extends ArticleListItem {
   post_preview?: string | null;
   image_prompt?: string | null;
   feedback?: string | null;
+  embedding_preview?: number[] | null;
+  embedding_dim?: number | null;
+  article_vector_model?: string | null;
+  ml_verdict_confirmed?: boolean | null;
+  ml_verdict_comment?: string | null;
+  ml_verdict_updated_at?: string | null;
 }
 
 export interface SourceItem {
@@ -292,6 +304,14 @@ export const api = {
       method: "DELETE",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ reason }),
+    });
+  },
+
+  saveMlVerdict(id: number, body: { confirmed: boolean; comment?: string }) {
+    return requestJson<{ ok: boolean; confirmed: boolean; comment: string }>(`/articles/${id}/ml-verdict`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
     });
   },
 

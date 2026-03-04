@@ -104,6 +104,39 @@ function mlRecommendationLabel(article: ArticleListItem) {
   return null;
 }
 
+function sanitizePreviewHtml(input: string): string {
+  if (!input) return "";
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(input, "text/html");
+  const allowed = new Set(["b", "strong", "i", "em", "u", "a", "br", "p", "ul", "ol", "li"]);
+
+  function clean(node: Element) {
+    const tag = node.tagName.toLowerCase();
+    if (!allowed.has(tag)) {
+      const text = document.createTextNode(node.textContent || "");
+      node.replaceWith(text);
+      return;
+    }
+    for (const attr of Array.from(node.attributes)) {
+      if (tag === "a" && attr.name === "href") continue;
+      node.removeAttribute(attr.name);
+    }
+    if (tag === "a") {
+      const href = (node.getAttribute("href") || "").trim();
+      if (!/^https?:\/\//i.test(href)) {
+        node.removeAttribute("href");
+      } else {
+        node.setAttribute("target", "_blank");
+        node.setAttribute("rel", "noreferrer noopener");
+      }
+    }
+    for (const child of Array.from(node.children)) clean(child);
+  }
+
+  for (const el of Array.from(doc.body.children)) clean(el);
+  return doc.body.innerHTML;
+}
+
 export default function ArticlesDashboard() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -127,6 +160,7 @@ export default function ArticlesDashboard() {
   const [lastCollectionTime, setLastCollectionTime] = useState<string | null>(null);
   const [collectionResult, setCollectionResult] = useState<AggregateJobStatus["result"] | null>(null);
   const [openActionsId, setOpenActionsId] = useState<number | null>(null);
+  const [previewActionLoading, setPreviewActionLoading] = useState<"publish" | "delete" | null>(null);
   const actionsRef = useRef<HTMLDivElement | null>(null);
 
   const totalPages = useMemo(() => Math.max(1, Math.ceil(total / Number(pageSize))), [pageSize, total]);
@@ -175,21 +209,19 @@ export default function ArticlesDashboard() {
     setLoading(true);
     setError("");
     try {
-      const [articleData, costData, workerData] = await Promise.all([
-        api.listArticles({
-          view: selectedSection,
-          page: String(currentPage),
-          page_size: pageSize,
-          q: searchQuery.trim(),
-          ...(noDoubleFilter ? { hide_double: "1" } : {}),
-        }),
-        api.getCosts(),
-        api.getWorkerStatus(),
-      ]);
+      const articleData = await api.listArticles({
+        view: selectedSection,
+        page: String(currentPage),
+        page_size: pageSize,
+        q: searchQuery.trim(),
+        ...(noDoubleFilter ? { hide_double: "1" } : {}),
+      });
       setArticles(articleData.items || []);
       setTotal(articleData.total || 0);
-      setCosts(costData);
-      setWorker(workerData);
+
+      const [costResult, workerResult] = await Promise.allSettled([api.getCosts(), api.getWorkerStatus()]);
+      if (costResult.status === "fulfilled") setCosts(costResult.value);
+      if (workerResult.status === "fulfilled") setWorker(workerResult.value);
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         navigate("/login", { replace: true });
@@ -263,19 +295,31 @@ export default function ArticlesDashboard() {
         ? 8
         : 0;
 
-  function promptDelete(id: number) {
+  async function promptDelete(id: number) {
     const reason = window.prompt(`Почему удалить статью #${id}?`);
     if (!reason || reason.trim().length < 5) return;
-    runAction(() => api.deleteArticle(id, reason.trim()));
+    setPreviewActionLoading("delete");
+    try {
+      await runAction(() => api.deleteArticle(id, reason.trim()));
+      setPreviewArticle(null);
+    } finally {
+      setPreviewActionLoading(null);
+    }
   }
 
-  function promptPublish(id: number) {
+  async function promptPublish(id: number) {
     const reason = window.prompt(`Почему публикуем статью #${id}?`);
     if (!reason || reason.trim().length < 5) return;
-    runAction(async () => {
-      await api.postArticleAction(id, "feedback", { explanation_text: reason.trim() });
-      await api.postArticleAction(id, "publish");
-    });
+    setPreviewActionLoading("publish");
+    try {
+      await runAction(async () => {
+        await api.postArticleAction(id, "feedback", { explanation_text: reason.trim() });
+        await api.postArticleAction(id, "publish");
+      });
+      setPreviewArticle(null);
+    } finally {
+      setPreviewActionLoading(null);
+    }
   }
 
   return (
@@ -627,31 +671,100 @@ export default function ArticlesDashboard() {
       </div>
 
       <Dialog open={Boolean(previewArticle)} onOpenChange={(open) => !open && setPreviewArticle(null)}>
-        <DialogContent className="max-w-4xl">
+        <DialogContent className="max-w-4xl [&>button]:right-5 [&>button]:top-5 [&>button]:h-9 [&>button]:w-9 [&>button]:rounded-md [&>button]:border [&>button]:border-border">
           <DialogHeader>
-            <DialogTitle>{previewArticle?.ru_title || previewArticle?.title}</DialogTitle>
+            <DialogTitle className="pr-12 leading-tight">{previewArticle?.ru_title || previewArticle?.title}</DialogTitle>
             <DialogDescription className="flex items-center gap-2 flex-wrap">
               {previewArticle ? <StatusBadge status={previewArticle.status} /> : null}
               {previewArticle?.score_10 != null ? <ScoreBadge score={previewArticle.score_10} size="sm" /> : null}
               <span>{previewArticle?.source_name}</span>
+              <span>•</span>
+              <span>{formatDateTime(previewArticle?.published_at || previewArticle?.created_at)}</span>
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
-            <div className="text-sm text-muted-foreground whitespace-pre-wrap">
-              {previewArticle?.post_preview || previewArticle?.ru_summary || previewArticle?.subtitle || "Превью пока не готово."}
-            </div>
+            <div
+              className="text-sm leading-7 text-foreground/90 whitespace-pre-wrap break-words [&_a]:text-blue-500 [&_a]:underline [&_b]:font-semibold [&_strong]:font-semibold"
+              dangerouslySetInnerHTML={{
+                __html: sanitizePreviewHtml(
+                  previewArticle?.post_preview || previewArticle?.ru_summary || previewArticle?.subtitle || "Превью пока не готово.",
+                ),
+              }}
+            />
+            {previewArticle?.archived_reason ? (
+              <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-sm">
+                <div className="font-medium text-red-300">Причина удаления</div>
+                <div className="mt-1 text-red-200/90">{previewArticle.archived_reason}</div>
+              </div>
+            ) : null}
+            {previewArticle?.ml_recommendation_reason ? (
+              <div className="rounded-lg border border-border bg-muted/40 p-3 text-sm">
+                <div className="font-medium">Причина от ML</div>
+                <div className="mt-1 text-muted-foreground whitespace-pre-wrap">{previewArticle.ml_recommendation_reason}</div>
+              </div>
+            ) : null}
+            {previewArticle?.feedback ? (
+              <div className="rounded-lg border border-border bg-muted/40 p-3 text-sm">
+                <div className="font-medium">Комментарий редактора</div>
+                <div className="mt-1 text-muted-foreground whitespace-pre-wrap">{previewArticle.feedback}</div>
+              </div>
+            ) : null}
+            {previewArticle?.ml_verdict_updated_at ? (
+              <div className="rounded-lg border border-border bg-muted/40 p-3 text-sm">
+                <div className="font-medium">
+                  Валидация ML: {previewArticle.ml_verdict_confirmed ? "согласен" : "не согласен"}
+                </div>
+                {previewArticle.ml_verdict_comment ? (
+                  <div className="mt-1 text-muted-foreground whitespace-pre-wrap">{previewArticle.ml_verdict_comment}</div>
+                ) : null}
+              </div>
+            ) : null}
+            {previewArticle?.embedding_preview && previewArticle.embedding_preview.length > 0 ? (
+              <div className="rounded-lg border border-border bg-muted/40 p-3 text-xs">
+                <div className="font-medium text-sm">
+                  Вектор статьи ({previewArticle.article_vector_model || "embedding"})
+                  {typeof previewArticle.embedding_dim === "number" ? ` · dim ${previewArticle.embedding_dim}` : ""}
+                </div>
+                <div className="mt-1 text-muted-foreground break-all">
+                  [{previewArticle.embedding_preview.map((v) => Number(v).toFixed(4)).join(", ")}]
+                </div>
+              </div>
+            ) : null}
             {previewArticle?.image_web ? (
               <img src={previewArticle.image_web} alt="" className="rounded-lg border border-border max-h-80 object-cover" />
             ) : null}
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
               {previewArticle ? (
                 <Button asChild>
-                  <Link to={`/article/${previewArticle.id}`}>Открыть редактор</Link>
+                  <Link to={`/article/${previewArticle.id}`}>Открыть в редакторе</Link>
+                </Button>
+              ) : null}
+              {previewArticle && String(previewArticle.status || "").toUpperCase() !== "PUBLISHED" ? (
+                <Button
+                  variant="outline"
+                  className="gap-2"
+                  onClick={() => promptPublish(previewArticle.id)}
+                  disabled={previewActionLoading === "publish"}
+                >
+                  {previewActionLoading === "publish" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                  Опубликовать
+                </Button>
+              ) : null}
+              {previewArticle && !["ARCHIVED", "REJECTED"].includes(String(previewArticle.status || "").toUpperCase()) ? (
+                <Button
+                  variant="outline"
+                  className="gap-2 border-red-500/30 text-red-300 hover:bg-red-500/10"
+                  onClick={() => promptDelete(previewArticle.id)}
+                  disabled={previewActionLoading === "delete"}
+                >
+                  {previewActionLoading === "delete" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+                  Удалить
                 </Button>
               ) : null}
               {previewArticle?.canonical_url ? (
                 <Button variant="outline" asChild>
-                  <a href={previewArticle.canonical_url} target="_blank" rel="noreferrer">
+                  <a href={previewArticle.canonical_url} target="_blank" rel="noreferrer" className="gap-2">
+                    <ExternalLink className="h-4 w-4" />
                     Original source
                   </a>
                 </Button>
