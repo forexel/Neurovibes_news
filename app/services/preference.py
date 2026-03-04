@@ -200,6 +200,12 @@ def _sigmoid(z: float) -> float:
     return float(ez / (1.0 + ez))
 
 
+def _safe_logit(p: np.ndarray | float) -> np.ndarray | float:
+    eps = 1e-6
+    clipped = np.clip(p, eps, 1.0 - eps)
+    return np.log(clipped / (1.0 - clipped))
+
+
 def _editor_choice_vectorizer() -> HashingVectorizer:
     return HashingVectorizer(
         n_features=EDITOR_CHOICE_TEXT_FEATURES,
@@ -1345,6 +1351,31 @@ def train_editor_choice_model(days_back: int = 1, min_samples: int = 8) -> dict:
     auc_train = float(roc_auc_score(y_train, p_train)) if len(np.unique(y_train)) > 1 else 0.5
     auc_val = float(roc_auc_score(y_val, p_val)) if (len(y_val) and len(np.unique(y_val)) > 1) else None
 
+    calibration: dict | None = None
+    if len(p_val) >= 30 and len(np.unique(y_val)) > 1:
+        try:
+            val_logits = _safe_logit(p_val).reshape(-1, 1)
+            cal = LogisticRegression(max_iter=1000, class_weight="balanced")
+            cal.fit(val_logits, y_val)
+            a = float(cal.coef_[0][0])
+            b = float(cal.intercept_[0])
+            z_cal = (a * _safe_logit(p_val)) + b
+            p_val_cal = 1.0 / (1.0 + np.exp(-z_cal))
+            brier_raw = float(np.mean((p_val - y_val) ** 2))
+            brier_cal = float(np.mean((p_val_cal - y_val) ** 2))
+            use_calibration = brier_cal <= (brier_raw * 1.03)
+            calibration = {
+                "kind": "platt",
+                "a": a,
+                "b": b,
+                "n_val": int(len(y_val)),
+                "brier_raw": brier_raw,
+                "brier_calibrated": brier_cal,
+                "enabled": bool(use_calibration),
+            }
+        except Exception:
+            calibration = None
+
     # Simple precision@1 and ndcg@5 over hourly groups from meta timestamps
     meta = ds.get("meta") or []
     val_meta = meta[split:]
@@ -1382,6 +1413,7 @@ def train_editor_choice_model(days_back: int = 1, min_samples: int = 8) -> dict:
         "days_back": int(days_back),
         "n_train": int(len(y_train)),
         "n_val": int(len(y_val)),
+        "calibration": calibration,
         "metrics": {
             "roc_auc_train": auc_train,
             "roc_auc_val": auc_val,
@@ -1447,9 +1479,25 @@ def predict_editor_choice_prob(features: dict | None) -> dict:
         x = np.array([float(feats.get(k, 0.0) or 0.0) for k in names], dtype=float)
     coef_arr = np.array(coef, dtype=float)
     z = float(np.dot(x, coef_arr) + float(artifact.get("intercept") or 0.0))
-    prob = _sigmoid(z)
+    prob_raw = _sigmoid(z)
+    prob = prob_raw
+    cal = artifact.get("calibration") if isinstance(artifact, dict) else None
+    if isinstance(cal, dict) and str(cal.get("kind") or "") == "platt" and bool(cal.get("enabled", True)):
+        try:
+            a = float(cal.get("a"))
+            b = float(cal.get("b"))
+            prob = _sigmoid((a * float(_safe_logit(prob_raw))) + b)
+        except Exception:
+            prob = prob_raw
     uncertainty = float(1.0 - abs(prob - 0.5) * 2.0)
-    return {"ok": True, "prob": prob, "uncertainty": uncertainty, "version": artifact.get("_version")}
+    return {
+        "ok": True,
+        "prob": prob,
+        "prob_raw": prob_raw,
+        "uncertainty": uncertainty,
+        "version": artifact.get("_version"),
+        "calibration": cal,
+    }
 
 
 def blended_editor_score(rule_score_0_10: float, features: dict | None) -> dict:
