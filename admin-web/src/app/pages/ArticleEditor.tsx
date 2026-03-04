@@ -112,7 +112,7 @@ export default function ArticleEditor() {
 
   const postPreview = useMemo(() => article?.post_preview || "RU текст не готов. Сгенерируй пост и сохрани его.", [article]);
   const selectedScheduleDate = useMemo(() => getScheduleDateValue(scheduleDate), [scheduleDate]);
-  const hasInsufficientContent = String(article.content_mode || "").toLowerCase() === "summary_only";
+  const hasInsufficientContent = String(article?.content_mode || "").toLowerCase() === "summary_only";
 
   async function publishWithReason() {
     const reason = window.prompt(`Почему публикуем статью #${articleId}?`, feedback || "");
