@@ -112,6 +112,11 @@ class Article(Base):
     practical_value: Mapped[int | None] = mapped_column(Integer, nullable=True)
     audience_fit: Mapped[int | None] = mapped_column(Integer, nullable=True)
     ml_prob: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ml_recommendation: Mapped[str | None] = mapped_column(String(32), nullable=True)  # publish_candidate|delete_candidate|review|unknown
+    ml_recommendation_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ml_recommendation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ml_model_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    ml_recommendation_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     scheduled_publish_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # Hour bucket (UTC, naive) for Selected Hour backfill/dedup.
     selected_hour_bucket_utc: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

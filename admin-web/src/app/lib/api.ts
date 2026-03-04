@@ -42,6 +42,11 @@ export interface ArticleListItem {
   canonical_url: string;
   generated_image_path?: string | null;
   scheduled_publish_at?: string | null;
+  ml_recommendation?: "publish_candidate" | "delete_candidate" | "review" | "unknown" | null;
+  ml_recommendation_confidence?: number | null;
+  ml_recommendation_reason?: string | null;
+  ml_model_version?: string | null;
+  ml_recommendation_at?: string | null;
   is_selected_day?: boolean;
 }
 
@@ -296,6 +301,15 @@ export const api = {
 
   getWorkerStatus() {
     return requestJson<WorkerStatus>("/admin-data/worker-status");
+  },
+
+  refreshMlRecommendations(limit = 2000, onlyMissing = true) {
+    return requestJson<{ ok: boolean; scanned: number; updated: number }>(
+      `/admin-actions/ml-recommendations/refresh?limit=${encodeURIComponent(String(limit))}&only_missing=${onlyMissing ? "1" : "0"}`,
+      {
+        method: "POST",
+      },
+    );
   },
 
   getSources() {

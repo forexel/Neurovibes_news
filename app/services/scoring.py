@@ -732,6 +732,105 @@ def _is_low_mass_audience(semantic: dict, source_name: str | None, article: Arti
     return False
 
 
+def refresh_ml_recommendation_in_session(session, article: Article, score: Score | None) -> dict:
+    """
+    Persist ML recommendation for an article:
+    - publish_candidate
+    - delete_candidate
+    - review
+    - unknown (model unavailable)
+    """
+    now = datetime.utcnow()
+    if score is None:
+        article.ml_prob = None
+        article.ml_recommendation = "unknown"
+        article.ml_recommendation_confidence = None
+        article.ml_model_version = None
+        article.ml_recommendation_reason = "score_missing"
+        article.ml_recommendation_at = now
+        return {"ok": False, "reason": "score_missing"}
+
+    features = score.features if isinstance(score.features, dict) else {}
+    try:
+        # Local import avoids hard coupling at module-import time.
+        from app.services.preference import predict_editor_choice_prob
+    except Exception:
+        article.ml_prob = None
+        article.ml_recommendation = "unknown"
+        article.ml_recommendation_confidence = None
+        article.ml_model_version = None
+        article.ml_recommendation_reason = "predictor_import_failed"
+        article.ml_recommendation_at = now
+        return {"ok": False, "reason": "predictor_import_failed"}
+
+    ml_meta = predict_editor_choice_prob(features)
+    if not bool(ml_meta.get("ok")):
+        article.ml_prob = None
+        article.ml_recommendation = "unknown"
+        article.ml_recommendation_confidence = None
+        article.ml_model_version = None
+        article.ml_recommendation_reason = str(ml_meta.get("reason") or "model_unavailable")
+        article.ml_recommendation_at = now
+        return {"ok": False, "reason": str(ml_meta.get("reason") or "model_unavailable")}
+
+    prob = float(max(0.0, min(1.0, float(ml_meta.get("prob") or 0.0))))
+    publish_threshold = float(max(0.0, min(1.0, get_runtime_float("ml_recommend_publish_threshold", default=0.72))))
+    delete_threshold = float(max(0.0, min(1.0, get_runtime_float("ml_recommend_delete_threshold", default=0.28))))
+    if delete_threshold > publish_threshold:
+        delete_threshold = max(0.0, publish_threshold - 0.05)
+
+    if prob >= publish_threshold:
+        recommendation = "publish_candidate"
+    elif prob <= delete_threshold:
+        recommendation = "delete_candidate"
+    else:
+        recommendation = "review"
+
+    human_reason = str((features or {}).get("human_reason") or "").strip()
+    top_drivers = (features or {}).get("top_drivers") or []
+    reason_parts = [f"ml_prob={prob:.3f}", f"publish>={publish_threshold:.2f}", f"delete<={delete_threshold:.2f}"]
+    if human_reason:
+        reason_parts.append(human_reason)
+    if isinstance(top_drivers, list) and top_drivers:
+        reason_parts.append("drivers: " + ", ".join(str(x) for x in top_drivers[:3]))
+
+    article.ml_prob = prob
+    article.ml_recommendation = recommendation
+    article.ml_recommendation_confidence = prob
+    article.ml_model_version = str(ml_meta.get("version") or "")[:64] or None
+    article.ml_recommendation_reason = " | ".join(reason_parts)[:4000]
+    article.ml_recommendation_at = now
+    return {
+        "ok": True,
+        "recommendation": recommendation,
+        "confidence": prob,
+        "model_version": article.ml_model_version,
+    }
+
+
+def refresh_ml_recommendations(limit: int = 1000, only_missing: bool = False) -> dict:
+    updated = 0
+    scanned = 0
+    with session_scope() as session:
+        q = (
+            select(Article)
+            .join(Score, Score.article_id == Article.id, isouter=False)
+            .where(Article.status != ArticleStatus.DOUBLE)
+            .order_by(Article.created_at.desc())
+            .limit(max(1, min(int(limit or 1), 20000)))
+        )
+        if only_missing:
+            q = q.where(Article.ml_recommendation.is_(None))
+        rows = session.scalars(q).all()
+        for article in rows:
+            scanned += 1
+            score = session.get(Score, article.id)
+            out = refresh_ml_recommendation_in_session(session, article, score)
+            if out.get("ok"):
+                updated += 1
+    return {"ok": True, "scanned": scanned, "updated": updated}
+
+
 def score_article_in_session(session, article: Article, max_rank: int, editor_style_profile: dict | None = None) -> dict:
     """
     Score a single article inside an existing DB session/transaction.
@@ -767,6 +866,12 @@ def score_article_in_session(session, article: Article, max_rank: int, editor_st
         score.reasoning = "Non-AI article by topical gate"
         score.features = {"topical_gate": "failed"}
         score.uncertainty = 0.0
+        article.ml_prob = 0.0
+        article.ml_recommendation = "delete_candidate"
+        article.ml_recommendation_confidence = 1.0
+        article.ml_model_version = None
+        article.ml_recommendation_reason = "topical_gate_failed: non_ai"
+        article.ml_recommendation_at = datetime.utcnow()
         article.status = ArticleStatus.ARCHIVED
         article.archived_kind = "filter"
         article.archived_reason = "non_ai"
@@ -970,6 +1075,9 @@ def score_article_in_session(session, article: Article, max_rank: int, editor_st
     # This is intentionally cheaper than Generate Post and helps browsing.
     if article.status not in {ArticleStatus.ARCHIVED, ArticleStatus.DOUBLE}:
         _ensure_ru_preview(session, article)
+
+    # Persist ML recommendation for editor review / correction / later retraining.
+    refresh_ml_recommendation_in_session(session, article, score)
 
     return {
         "ok": True,

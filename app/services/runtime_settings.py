@@ -64,6 +64,8 @@ RUNTIME_DEFAULTS: dict[str, str] = {
     "ml_editor_choice_weight": "0.10",
     "ml_review_every_n_hours": "2",
     "ml_review_min_confidence": "0.72",
+    "ml_recommend_publish_threshold": "0.72",
+    "ml_recommend_delete_threshold": "0.28",
     # Hour-end article selection strategy.
     # Examples: "09:script,10:ml,11:off"
     "hourly_slot_strategy_csv": os.getenv("HOURLY_SLOT_STRATEGY_CSV", "").strip(),

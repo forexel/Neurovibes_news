@@ -83,6 +83,27 @@ const sectionToPath: Record<(typeof sections)[number]["id"], string> = {
   deleted: "/deleted",
 };
 
+function mlRecommendationLabel(article: ArticleListItem) {
+  const value = String(article.ml_recommendation || "").toLowerCase();
+  const conf =
+    typeof article.ml_recommendation_confidence === "number"
+      ? `${Math.round(article.ml_recommendation_confidence * 100)}%`
+      : null;
+  if (value === "publish_candidate") {
+    return { text: conf ? `ML: к публикации (${conf})` : "ML: к публикации", className: "bg-green-500/20 text-green-300 border-green-500/30" };
+  }
+  if (value === "delete_candidate") {
+    return { text: conf ? `ML: к удалению (${conf})` : "ML: к удалению", className: "bg-red-500/20 text-red-300 border-red-500/30" };
+  }
+  if (value === "review") {
+    return { text: conf ? `ML: на проверку (${conf})` : "ML: на проверку", className: "bg-yellow-500/20 text-yellow-300 border-yellow-500/30" };
+  }
+  if (value === "unknown") {
+    return { text: "ML: нет модели", className: "bg-gray-500/20 text-gray-300 border-gray-500/30" };
+  }
+  return null;
+}
+
 export default function ArticlesDashboard() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -455,7 +476,9 @@ export default function ArticlesDashboard() {
                   </TableCell>
                 </TableRow>
               ) : (
-                articles.map((article) => (
+                articles.map((article) => {
+                  const mlLabel = mlRecommendationLabel(article);
+                  return (
                   <TableRow
                     key={article.id}
                     className="hover:bg-muted/50 cursor-pointer group"
@@ -463,7 +486,14 @@ export default function ArticlesDashboard() {
                   >
                     <TableCell className="font-mono text-xs text-muted-foreground">#{article.id}</TableCell>
                     <TableCell>
-                      <StatusBadge status={article.status} />
+                      <div className="space-y-1">
+                        <StatusBadge status={article.status} />
+                        {mlLabel ? (
+                          <Badge variant="outline" className={`text-[10px] ${mlLabel.className}`}>
+                            {mlLabel.text}
+                          </Badge>
+                        ) : null}
+                      </div>
                     </TableCell>
                     <TableCell>
                       <Badge variant="outline" className="text-xs">
@@ -568,7 +598,7 @@ export default function ArticlesDashboard() {
                       </div>
                     </TableCell>
                   </TableRow>
-                ))
+                )})
               )}
             </TableBody>
           </Table>

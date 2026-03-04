@@ -55,7 +55,13 @@ from app.services.ingestion import (
     run_ingestion_fast,
 )
 from app.services.embedding_dedup import process_embeddings_and_dedup
-from app.services.scoring import prune_bad_articles, prune_non_ai_articles, run_scoring, score_article_by_id
+from app.services.scoring import (
+    prune_bad_articles,
+    prune_non_ai_articles,
+    refresh_ml_recommendations,
+    run_scoring,
+    score_article_by_id,
+)
 from app.services.topic_filter import passes_ai_topic_filter
 from app.services.preference import rebuild_preference_profile
 from app.services.telegram_publisher import publish_article, publish_scheduled_due, send_test_message
@@ -240,6 +246,12 @@ def score_single(article_id: int) -> dict:
             raise HTTPException(status_code=404, detail="Article not found")
         raise HTTPException(status_code=400, detail=str(out.get("error") or "score_failed"))
     return out
+
+
+@app.post("/admin-actions/ml-recommendations/refresh")
+def admin_refresh_ml_recommendations(request: Request, limit: int = 2000, only_missing: bool = True) -> dict:
+    _require_session_user(request)
+    return refresh_ml_recommendations(limit=limit, only_missing=only_missing)
 
 class EnrichFullTextIn(BaseModel):
     days_back: int = Field(default=30, ge=1, le=365)
@@ -5136,6 +5148,11 @@ def _serialize_article(article: Article, score: Score | None, source: Source | N
         "canonical_url": article.canonical_url,
         "generated_image_path": article.generated_image_path,
         "scheduled_publish_at": _dt_to_utc_z(article.scheduled_publish_at),
+        "ml_recommendation": article.ml_recommendation,
+        "ml_recommendation_confidence": article.ml_recommendation_confidence,
+        "ml_recommendation_reason": article.ml_recommendation_reason,
+        "ml_model_version": article.ml_model_version,
+        "ml_recommendation_at": _dt_to_utc_z(article.ml_recommendation_at),
     }
 
 
