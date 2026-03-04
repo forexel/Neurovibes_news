@@ -1,5 +1,6 @@
 import { createBrowserRouter } from "react-router";
 import Root from "./components/Root";
+import RouteErrorPage from "./components/RouteErrorPage";
 import LoginPage from "./pages/LoginPage";
 import RegisterPage from "./pages/RegisterPage";
 import SetupWizard from "./pages/SetupWizard";
@@ -15,6 +16,7 @@ export const router = createBrowserRouter(
     {
       path: "/",
       Component: Root,
+      errorElement: <RouteErrorPage />,
       children: [
         { index: true, Component: PublishCenterPage },
         { path: "login", Component: LoginPage },

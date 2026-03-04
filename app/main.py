@@ -152,10 +152,19 @@ def _react_admin_index_file() -> Path:
     return index_file
 
 
+def _react_admin_index_headers() -> dict[str, str]:
+    # Always revalidate SPA shell to avoid stale index -> missing asset hash mismatch.
+    return {
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Pragma": "no-cache",
+        "Expires": "0",
+    }
+
+
 def _serve_react_admin(request: Request, *, require_auth: bool = True):
     if require_auth and _get_session_user(request) is None:
         return RedirectResponse(url="/login", status_code=303)
-    return FileResponse(_react_admin_index_file())
+    return FileResponse(_react_admin_index_file(), headers=_react_admin_index_headers())
 
 
 def _serve_react_admin_home(request: Request):
@@ -177,7 +186,7 @@ def _serve_react_admin_home(request: Request):
                 ws.updated_at = datetime.utcnow()
             else:
                 return RedirectResponse(url="/setup", status_code=303)
-    return FileResponse(_react_admin_index_file())
+    return FileResponse(_react_admin_index_file(), headers=_react_admin_index_headers())
 
 
 def _article_search_blob(x: dict) -> str:
