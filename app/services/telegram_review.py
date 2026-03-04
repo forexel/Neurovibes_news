@@ -306,6 +306,7 @@ def _build_review_text(article: Article, window: tuple[datetime, datetime, str] 
         meta = meta + "\n" + escape("Источник: " + source_name)
 
     selector_line = ""
+    criteria_lines: list[str] = []
     with session_scope() as session:
         selection = session.scalars(
             select(SelectionDecision)
@@ -313,18 +314,45 @@ def _build_review_text(article: Article, window: tuple[datetime, datetime, str] 
             .order_by(SelectionDecision.created_at.desc())
             .limit(1)
         ).first()
-    if selection is not None:
-        selector_kind = (selection.selector_kind or "").strip().lower()
-        if selector_kind == "ml":
-            selector_line = "Выбор: ML-кандидат на публикацию"
-            if selection.confidence is not None:
-                selector_line += f" (confidence {float(selection.confidence):.3f})"
-        elif selector_kind == "script":
-            selector_line = "Выбор: скрипт/правила"
-        elif selector_kind:
-            selector_line = f"Выбор: {selector_kind}"
+        score = session.get(Score, int(article.id))
+        if selection is not None:
+            selector_kind = (selection.selector_kind or "").strip().lower()
+            if selector_kind == "ml":
+                selector_line = "Выбор: ML-кандидат на публикацию"
+                if selection.confidence is not None:
+                    selector_line += f" (confidence {float(selection.confidence):.3f})"
+                    criteria_lines.append(f"Вероятность публикации: {float(selection.confidence):.3f}")
+                if (selection.model_version or "").strip():
+                    criteria_lines.append(f"Версия модели: {str(selection.model_version).strip()}")
+            elif selector_kind == "script":
+                selector_line = "Выбор: скрипт/правила"
+            elif selector_kind:
+                selector_line = f"Выбор: {selector_kind}"
+
+            chosen = None
+            for cand in list(selection.candidates or []):
+                try:
+                    if int(cand.get("article_id") or 0) == int(article.id):
+                        chosen = cand
+                        break
+                except Exception:
+                    continue
+            if isinstance(chosen, dict):
+                top_drivers = [str(x).strip() for x in list(chosen.get("top_drivers") or []) if str(x).strip()]
+                if top_drivers:
+                    criteria_lines.append("Факторы: " + "; ".join(top_drivers[:3]))
+                novelty_reason = str(chosen.get("novelty_reason") or "").strip()
+                if novelty_reason:
+                    criteria_lines.append("Комментарий: " + novelty_reason[:180])
+        if score is not None and score.final_score is not None:
+            criteria_lines.append(f"Скор статьи: {max(0.0, min(10.0, float(score.final_score) * 10.0)):.1f}/10")
+
     if selector_line:
         meta = meta + "\n" + escape(selector_line)
+    if criteria_lines:
+        meta = meta + "\n" + escape("Критерии ML:")
+        for line in criteria_lines:
+            meta = meta + "\n" + escape(f"• {line}")
 
     if window is None:
         start_local, end_local, tz_label = _window_for_article_local(article, tz)
