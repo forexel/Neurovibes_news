@@ -114,6 +114,14 @@ export default function ArticleEditor() {
   const selectedScheduleDate = useMemo(() => getScheduleDateValue(scheduleDate), [scheduleDate]);
   const hasInsufficientContent = String(article.content_mode || "").toLowerCase() === "summary_only";
 
+  async function publishWithReason() {
+    const reason = window.prompt(`Почему публикуем статью #${articleId}?`, feedback || "");
+    if (!reason || reason.trim().length < 5) return;
+    await api.postArticleAction(articleId, "feedback", { explanation_text: reason.trim() });
+    setFeedback(reason.trim());
+    await api.postArticleAction(articleId, "publish");
+  }
+
   async function run(label: string, action: () => Promise<Record<string, unknown>>) {
     setLoading(label);
     addLog("info", `${label}...`);
@@ -439,7 +447,7 @@ export default function ArticleEditor() {
                         Prepare + Image
                       </Button>
                       <Button
-                        onClick={() => run("Publish", () => api.postArticleAction(articleId, "publish"))}
+                        onClick={() => run("Publish", publishWithReason)}
                         disabled={hasInsufficientContent}
                       >
                         <Send className="w-4 h-4 mr-2" />

@@ -71,6 +71,13 @@ export default function PublishCenterPage() {
     }
   }
 
+  async function publishWithReason(articleId: number) {
+    const reason = window.prompt("Почему публикуем эту статью?", "");
+    if (!reason || reason.trim().length < 5) return;
+    await api.postArticleAction(articleId, "feedback", { explanation_text: reason.trim() });
+    await api.postArticleAction(articleId, "publish");
+  }
+
   const scheduledArticles = useMemo(
     () =>
       allArticles
@@ -243,7 +250,7 @@ export default function PublishCenterPage() {
           }
           onPublishNow={
             activeList.showPublishNow
-              ? (articleId) => runAction(`Опубликовать #${articleId}`, () => api.postArticleAction(articleId, "publish"))
+              ? (articleId) => runAction(`Опубликовать #${articleId}`, () => publishWithReason(articleId))
               : undefined
           }
           onUnschedule={

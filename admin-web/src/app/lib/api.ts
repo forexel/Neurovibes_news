@@ -176,6 +176,11 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
     throw new ApiError(response.status, detail);
   }
 
+  if (payload && typeof payload === "object" && "ok" in (payload as Record<string, unknown>) && (payload as Record<string, unknown>).ok === false) {
+    const data = payload as Record<string, unknown>;
+    throw new ApiError(response.status, String(data.hint || data.error || data.detail || "Action failed"));
+  }
+
   return payload as T;
 }
 

@@ -248,6 +248,15 @@ export default function ArticlesDashboard() {
     runAction(() => api.deleteArticle(id, reason.trim()));
   }
 
+  function promptPublish(id: number) {
+    const reason = window.prompt(`Почему публикуем статью #${id}?`);
+    if (!reason || reason.trim().length < 5) return;
+    runAction(async () => {
+      await api.postArticleAction(id, "feedback", { explanation_text: reason.trim() });
+      await api.postArticleAction(id, "publish");
+    });
+  }
+
   return (
     <div className="min-h-screen bg-background">
       <TopNavigation />
@@ -557,7 +566,7 @@ export default function ArticlesDashboard() {
                             </button>
                             <button
                               className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent"
-                              onClick={() => runAction(() => api.postArticleAction(article.id, "publish"))}
+                              onClick={() => promptPublish(article.id)}
                             >
                               <Send className="w-4 h-4" />
                               Publish
