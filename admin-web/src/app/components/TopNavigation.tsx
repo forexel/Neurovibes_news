@@ -59,7 +59,7 @@ export function TopNavigation() {
     closeTimerRef.current = window.setTimeout(() => {
       setOpenMenu((current) => (current === menu ? null : current));
       closeTimerRef.current = null;
-    }, 120);
+    }, 260);
   }
 
   useEffect(

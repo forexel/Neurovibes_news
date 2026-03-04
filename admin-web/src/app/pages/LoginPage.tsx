@@ -7,8 +7,8 @@ import { FileText, Loader2 } from "lucide-react";
 import { api, ApiError } from "../lib/api";
 
 export default function LoginPage() {
-  const [email, setEmail] = useState("admin@local");
-  const [password, setPassword] = useState("admin123");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const navigate = useNavigate();
@@ -70,12 +70,6 @@ export default function LoginPage() {
           </div>
 
           <form onSubmit={handleSubmit} className="space-y-4" autoComplete="on">
-            {error && (
-              <div className="text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2">
-                {error}
-              </div>
-            )}
-
             <div className="space-y-2">
               <Label htmlFor="email">Email</Label>
               <Input
@@ -105,6 +99,12 @@ export default function LoginPage() {
                 className="bg-muted/50"
               />
             </div>
+
+            {error && (
+              <div className="text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2">
+                {error}
+              </div>
+            )}
 
             <Button type="submit" className="w-full" disabled={loading}>
               {loading ? (

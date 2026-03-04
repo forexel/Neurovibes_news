@@ -23,8 +23,8 @@ export default function RegisterPage() {
       return;
     }
 
-    if (password.length < 6) {
-      setError("Пароль должен содержать минимум 6 символов");
+    if (password.length < 8) {
+      setError("Пароль должен содержать минимум 8 символов");
       return;
     }
 
@@ -89,7 +89,7 @@ export default function RegisterPage() {
                 required
                 className="bg-muted/50"
               />
-              <p className="text-xs text-muted-foreground">Минимум 6 символов</p>
+              <p className="text-xs text-muted-foreground">Минимум 8 символов</p>
             </div>
 
             <div className="space-y-2">

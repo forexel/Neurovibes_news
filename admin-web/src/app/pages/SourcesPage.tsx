@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { TopNavigation } from "../components/TopNavigation";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -28,7 +28,14 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "../components/ui/dialog";
-import { CheckCircle2, ExternalLink, Loader2, MoreVertical, Plus, Power, RefreshCw, Trash2 } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "../components/ui/dropdown-menu";
+import { ExternalLink, Loader2, MoreVertical, Plus, Power, RefreshCw, Trash2 } from "lucide-react";
 import { api, ApiError, formatDateTime, SourceItem } from "../lib/api";
 import { useNavigate } from "react-router";
 
@@ -46,8 +53,6 @@ export default function SourcesPage() {
   });
   const [checkingSource, setCheckingSource] = useState<number | null>(null);
   const [togglingSource, setTogglingSource] = useState<number | null>(null);
-  const [openActionsId, setOpenActionsId] = useState<number | null>(null);
-  const actionsRef = useRef<HTMLDivElement | null>(null);
 
   async function loadSources() {
     setLoading(true);
@@ -69,16 +74,6 @@ export default function SourcesPage() {
   useEffect(() => {
     loadSources();
   }, [navigate]);
-
-  useEffect(() => {
-    function handlePointerDown(event: MouseEvent) {
-      if (!actionsRef.current?.contains(event.target as Node)) {
-        setOpenActionsId(null);
-      }
-    }
-    document.addEventListener("mousedown", handlePointerDown);
-    return () => document.removeEventListener("mousedown", handlePointerDown);
-  }, []);
 
   async function handleAddSource() {
     try {
@@ -116,7 +111,6 @@ export default function SourcesPage() {
     setCheckingSource(id);
     try {
       await api.checkSource(id);
-      setOpenActionsId(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Проверка источника завершилась ошибкой.");
     } finally {
@@ -139,7 +133,6 @@ export default function SourcesPage() {
         kind: source.kind,
         is_active: source.is_active,
       });
-      setOpenActionsId(null);
       await loadSources();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не удалось обновить источник.");
@@ -150,7 +143,6 @@ export default function SourcesPage() {
     if (!window.confirm(`Удалить источник #${id}?`)) return;
     try {
       await api.deleteSource(id);
-      setOpenActionsId(null);
       await loadSources();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не удалось удалить источник.");
@@ -292,56 +284,67 @@ export default function SourcesPage() {
                       <Badge variant="outline">{source.articles_count}</Badge>
                     </TableCell>
                     <TableCell className="text-sm text-muted-foreground">{formatDateTime(source.latest_published_at)}</TableCell>
-                    <TableCell className="relative">
-                      <div ref={openActionsId === source.id ? actionsRef : null}>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-8 w-8 p-0"
-                          onClick={() => setOpenActionsId((value) => (value === source.id ? null : source.id))}
-                        >
-                          <MoreVertical className="w-4 h-4" />
-                        </Button>
-                        {openActionsId === source.id ? (
-                          <div className="absolute right-0 top-10 z-20 w-48 rounded-md border border-border bg-popover p-1 shadow-md">
-                            <button
-                              className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent"
-                              onClick={() => handleCheckSource(source.id)}
-                              disabled={checkingSource === source.id}
-                            >
-                              {checkingSource === source.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-                              Check
-                            </button>
-                            <button
-                              className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent"
-                              onClick={() => handleEditSource(source)}
-                            >
-                              <CheckCircle2 className="w-4 h-4" />
-                              Edit
-                            </button>
-                            <button
-                              className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent"
-                              onClick={() => handleToggleActive(source.id, !source.is_active)}
-                            >
-                              <Power className="w-4 h-4" />
-                              {source.is_active ? "Disable" : "Enable"}
-                            </button>
-                            <button
-                              className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm text-destructive hover:bg-accent"
-                              onClick={() => handleDeleteSource(source.id)}
-                            >
-                              <Trash2 className="w-4 h-4" />
-                              Delete
-                            </button>
-                          </div>
-                        ) : null}
-                      </div>
+                    <TableCell>
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button variant="ghost" size="sm" className="h-8 w-8 p-0">
+                            <MoreVertical className="w-4 h-4" />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end" className="w-48">
+                          <DropdownMenuItem onClick={() => handleCheckSource(source.id)} disabled={checkingSource === source.id}>
+                            {checkingSource === source.id ? (
+                              <>
+                                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                                Проверка...
+                              </>
+                            ) : (
+                              <>
+                                <RefreshCw className="w-4 h-4 mr-2" />
+                                Проверить сейчас
+                              </>
+                            )}
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => handleEditSource(source)}>
+                            Редактировать
+                          </DropdownMenuItem>
+                          <DropdownMenuSeparator />
+                          <DropdownMenuItem onClick={() => handleToggleActive(source.id, !source.is_active)}>
+                            <Power className="w-4 h-4 mr-2" />
+                            {source.is_active ? "Отключить" : "Включить"}
+                          </DropdownMenuItem>
+                          <DropdownMenuSeparator />
+                          <DropdownMenuItem onClick={() => handleDeleteSource(source.id)} className="text-destructive">
+                            <Trash2 className="w-4 h-4 mr-2" />
+                            Удалить
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
                     </TableCell>
                   </TableRow>
                 ))
               )}
             </TableBody>
           </Table>
+        </div>
+
+        <div className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="bg-card border border-border rounded-lg p-6">
+            <div className="text-sm text-muted-foreground mb-1">Всего источников</div>
+            <div className="text-3xl font-semibold">{sources.length}</div>
+          </div>
+          <div className="bg-card border border-border rounded-lg p-6">
+            <div className="text-sm text-muted-foreground mb-1">Активных</div>
+            <div className="text-3xl font-semibold text-green-400">
+              {sources.filter((s) => s.is_active).length}
+            </div>
+          </div>
+          <div className="bg-card border border-border rounded-lg p-6">
+            <div className="text-sm text-muted-foreground mb-1">Всего статей</div>
+            <div className="text-3xl font-semibold">
+              {sources.reduce((sum, s) => sum + (s.articles_count || 0), 0)}
+            </div>
+          </div>
         </div>
       </div>
     </div>

@@ -38,7 +38,7 @@ export default function ScoreSettingsPage() {
   const [editParam, setEditParam] = useState<Partial<ScoreParameter>>({
     key: "",
     title: "",
-    weight: 0.1,
+    weight: 1.0,
     description: "",
     influence_rule: "",
     is_active: true,
@@ -119,7 +119,7 @@ export default function ScoreSettingsPage() {
       setEditParam({
         key: "",
         title: "",
-        weight: 0.1,
+        weight: 1.0,
         description: "",
         influence_rule: "",
         is_active: true,
@@ -137,6 +137,22 @@ export default function ScoreSettingsPage() {
       await loadData();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не удалось удалить параметр.");
+    }
+  }
+
+  async function handleToggleParameter(param: ScoreParameter) {
+    try {
+      await api.upsertScoreParameter({
+        key: param.key,
+        title: param.title,
+        weight: Number(param.weight),
+        description: param.description || "",
+        influence_rule: param.influence_rule || "",
+        is_active: !param.is_active,
+      });
+      await loadData();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось переключить параметр.");
     }
   }
 
@@ -172,7 +188,9 @@ export default function ScoreSettingsPage() {
       <div className="max-w-7xl mx-auto px-6 py-6">
         <div className="mb-6">
           <h1 className="text-2xl font-semibold mb-1">Настройки оценки</h1>
-          <p className="text-sm text-muted-foreground">Управление параметрами скоринга и runtime-логикой.</p>
+          <p className="text-sm text-muted-foreground">
+            Управление параметрами скоринга и алгоритмами ранжирования
+          </p>
         </div>
 
         {error ? <div className="mb-4 text-sm text-destructive">{error}</div> : null}
@@ -189,20 +207,30 @@ export default function ScoreSettingsPage() {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <Label htmlFor="param-key">Ключ</Label>
-                  <Input id="param-key" value={editParam.key} onChange={(e) => setEditParam({ ...editParam, key: e.target.value })} />
+                  <Input
+                    id="param-key"
+                    placeholder="technical_depth"
+                    value={editParam.key}
+                    onChange={(e) => setEditParam({ ...editParam, key: e.target.value })}
+                  />
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="param-title">Название</Label>
-                  <Input id="param-title" value={editParam.title} onChange={(e) => setEditParam({ ...editParam, title: e.target.value })} />
+                  <Input
+                    id="param-title"
+                    placeholder="Техническая глубина"
+                    value={editParam.title}
+                    onChange={(e) => setEditParam({ ...editParam, title: e.target.value })}
+                  />
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="param-weight">Вес</Label>
                   <Input
                     id="param-weight"
                     type="number"
-                    step="0.01"
+                    step="0.1"
                     min="0"
-                    max="1"
+                    max="10"
                     value={editParam.weight}
                     onChange={(e) => setEditParam({ ...editParam, weight: Number(e.target.value) })}
                   />
@@ -211,6 +239,7 @@ export default function ScoreSettingsPage() {
                   <Label htmlFor="param-rule">Правило влияния</Label>
                   <Input
                     id="param-rule"
+                    placeholder="nlp_score * weight"
                     value={editParam.influence_rule}
                     onChange={(e) => setEditParam({ ...editParam, influence_rule: e.target.value })}
                   />
@@ -220,6 +249,7 @@ export default function ScoreSettingsPage() {
                   <Textarea
                     id="param-description"
                     rows={3}
+                    placeholder="Описание параметра и его влияния на оценку..."
                     value={editParam.description}
                     onChange={(e) => setEditParam({ ...editParam, description: e.target.value })}
                   />
@@ -242,7 +272,7 @@ export default function ScoreSettingsPage() {
                 </Button>
                 <Button variant="outline" onClick={loadData}>
                   <RefreshCw className="w-4 h-4 mr-2" />
-                  Reload
+                  Перезагрузить
                 </Button>
               </div>
             </div>
@@ -251,14 +281,13 @@ export default function ScoreSettingsPage() {
               <Table>
                 <TableHeader>
                   <TableRow className="hover:bg-transparent border-b border-border">
-                    <TableHead>ID</TableHead>
-                    <TableHead>Key</TableHead>
-                    <TableHead>Title</TableHead>
-                    <TableHead>Weight</TableHead>
-                    <TableHead>Active</TableHead>
-                    <TableHead>Description</TableHead>
-                    <TableHead>Rule</TableHead>
-                    <TableHead className="w-28">Action</TableHead>
+                    <TableHead className="w-16">ID</TableHead>
+                    <TableHead className="w-24">Статус</TableHead>
+                    <TableHead className="w-48">Ключ</TableHead>
+                    <TableHead>Название</TableHead>
+                    <TableHead className="w-24">Вес</TableHead>
+                    <TableHead>Правило</TableHead>
+                    <TableHead className="w-32">Действия</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -277,21 +306,53 @@ export default function ScoreSettingsPage() {
                   ) : (
                     parameters.map((param) => (
                       <TableRow key={param.id} className="hover:bg-muted/50">
-                        <TableCell>{param.id}</TableCell>
-                        <TableCell className="font-mono text-xs">{param.key}</TableCell>
-                        <TableCell>{param.title}</TableCell>
-                        <TableCell>{Number(param.weight).toFixed(2)}</TableCell>
-                        <TableCell>
-                          <Badge variant="outline">{param.is_active ? "yes" : "no"}</Badge>
+                        <TableCell className="font-mono text-xs text-muted-foreground">
+                          #{param.id}
                         </TableCell>
-                        <TableCell className="max-w-sm text-sm text-muted-foreground">{param.description}</TableCell>
-                        <TableCell className="max-w-sm text-xs text-muted-foreground">{param.influence_rule}</TableCell>
                         <TableCell>
-                          <div className="flex gap-2">
-                            <Button size="sm" variant="outline" onClick={() => setEditParam(param)}>
-                              <Plus className="w-4 h-4" />
+                          <div className="flex items-center gap-2">
+                            <Switch
+                              checked={param.is_active}
+                              onCheckedChange={() => handleToggleParameter(param)}
+                            />
+                            <Badge
+                              variant="outline"
+                              className={
+                                param.is_active
+                                  ? "bg-green-500/20 text-green-300 border-green-500/30"
+                                  : "bg-gray-500/20 text-gray-400 border-gray-500/30"
+                              }
+                            >
+                              {param.is_active ? "Активен" : "Выключен"}
+                            </Badge>
+                          </div>
+                        </TableCell>
+                        <TableCell className="font-mono text-sm">{param.key}</TableCell>
+                        <TableCell>
+                          <div>
+                            <div className="font-medium">{param.title}</div>
+                            <div className="text-sm text-muted-foreground line-clamp-1">
+                              {param.description}
+                            </div>
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant="secondary" className="font-mono">
+                            {Number(param.weight).toFixed(1)}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="font-mono text-xs text-muted-foreground">{param.influence_rule}</TableCell>
+                        <TableCell>
+                          <div className="flex items-center gap-2">
+                            <Button variant="ghost" size="sm" onClick={() => setEditParam(param)}>
+                              Изменить
                             </Button>
-                            <Button size="sm" variant="destructive" onClick={() => handleDeleteParameter(param.id)}>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="text-destructive hover:text-destructive"
+                              onClick={() => handleDeleteParameter(param.id)}
+                            >
                               <Trash2 className="w-4 h-4" />
                             </Button>
                           </div>
@@ -302,50 +363,84 @@ export default function ScoreSettingsPage() {
                 </TableBody>
               </Table>
             </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="bg-card border border-border rounded-lg p-6">
+                <div className="text-sm text-muted-foreground mb-1">Всего параметров</div>
+                <div className="text-3xl font-semibold">{parameters.length}</div>
+              </div>
+              <div className="bg-card border border-border rounded-lg p-6">
+                <div className="text-sm text-muted-foreground mb-1">Активных</div>
+                <div className="text-3xl font-semibold text-green-400">
+                  {parameters.filter((p) => p.is_active).length}
+                </div>
+              </div>
+              <div className="bg-card border border-border rounded-lg p-6">
+                <div className="text-sm text-muted-foreground mb-1">Суммарный вес</div>
+                <div className="text-3xl font-semibold">
+                  {parameters
+                    .filter((p) => p.is_active)
+                    .reduce((sum, p) => sum + Number(p.weight), 0)
+                    .toFixed(1)}
+                </div>
+              </div>
+            </div>
           </TabsContent>
 
           <TabsContent value="runtime" className="space-y-6">
             <div className="bg-card border border-border rounded-lg p-6">
-              <h3 className="font-semibold mb-4">Добавить runtime setting</h3>
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+              <h3 className="font-semibold mb-4">Добавить runtime настройку</h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="space-y-2">
-                  <Label htmlFor="runtime-key">Key</Label>
-                  <Input id="runtime-key" value={newSetting.key} onChange={(e) => setNewSetting({ ...newSetting, key: e.target.value })} />
+                  <Label htmlFor="runtime-key">Ключ</Label>
+                  <Input
+                    id="runtime-key"
+                    placeholder="min_score_threshold"
+                    value={newSetting.key}
+                    onChange={(e) => setNewSetting({ ...newSetting, key: e.target.value })}
+                  />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="runtime-scope">Scope</Label>
+                  <Label htmlFor="runtime-scope">Область действия</Label>
                   <Select value={newSetting.scope} onValueChange={(value) => setNewSetting({ ...newSetting, scope: value as "global" | "topic" })}>
                     <SelectTrigger id="runtime-scope">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="global">global</SelectItem>
-                      <SelectItem value="topic">topic</SelectItem>
+                      <SelectItem value="global">Global</SelectItem>
+                      <SelectItem value="topic">Topic</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
+                {newSetting.scope === "topic" ? (
+                  <div className="space-y-2">
+                    <Label htmlFor="runtime-topic">Topic Key</Label>
+                    <Input
+                      id="runtime-topic"
+                      placeholder="ai"
+                      value={newSetting.topic_key}
+                      onChange={(e) => setNewSetting({ ...newSetting, topic_key: e.target.value })}
+                    />
+                  </div>
+                ) : null}
                 <div className="space-y-2">
-                  <Label htmlFor="runtime-topic">Topic key</Label>
+                  <Label htmlFor="runtime-value">Значение</Label>
                   <Input
-                    id="runtime-topic"
-                    value={newSetting.topic_key}
-                    onChange={(e) => setNewSetting({ ...newSetting, topic_key: e.target.value })}
-                    disabled={newSetting.scope !== "topic"}
+                    id="runtime-value"
+                    placeholder="3.0"
+                    value={newSetting.value}
+                    onChange={(e) => setNewSetting({ ...newSetting, value: e.target.value })}
                   />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="runtime-value">Value</Label>
-                  <Input id="runtime-value" value={newSetting.value} onChange={(e) => setNewSetting({ ...newSetting, value: e.target.value })} />
                 </div>
               </div>
               <div className="flex gap-2 mt-4">
                 <Button onClick={handleSaveRuntime} disabled={!newSetting.key.trim()}>
-                  <Save className="w-4 h-4 mr-2" />
-                  Сохранить
+                  <Plus className="w-4 h-4 mr-2" />
+                  Добавить настройку
                 </Button>
                 <Button variant="outline" onClick={loadData}>
                   <RefreshCw className="w-4 h-4 mr-2" />
-                  Reload
+                  Перезагрузить
                 </Button>
               </div>
             </div>
@@ -354,12 +449,12 @@ export default function ScoreSettingsPage() {
               <Table>
                 <TableHeader>
                   <TableRow className="hover:bg-transparent border-b border-border">
-                    <TableHead>ID</TableHead>
-                    <TableHead>Scope</TableHead>
-                    <TableHead>Topic</TableHead>
-                    <TableHead>Key</TableHead>
-                    <TableHead>Value</TableHead>
-                    <TableHead className="w-24">Action</TableHead>
+                    <TableHead className="w-16">ID</TableHead>
+                    <TableHead>Ключ</TableHead>
+                    <TableHead className="w-32">Область</TableHead>
+                    <TableHead className="w-32">Topic</TableHead>
+                    <TableHead>Значение</TableHead>
+                    <TableHead className="w-24">Действия</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -378,13 +473,24 @@ export default function ScoreSettingsPage() {
                   ) : (
                     runtimeSettings.map((setting) => (
                       <TableRow key={setting.id} className="hover:bg-muted/50">
-                        <TableCell>{setting.id}</TableCell>
-                        <TableCell>{setting.scope}</TableCell>
-                        <TableCell>{setting.topic_key || "—"}</TableCell>
-                        <TableCell className="font-mono text-xs">{setting.key}</TableCell>
-                        <TableCell>{setting.value}</TableCell>
+                        <TableCell className="font-mono text-xs text-muted-foreground">
+                          #{setting.id}
+                        </TableCell>
+                        <TableCell className="font-mono text-sm">{setting.key}</TableCell>
                         <TableCell>
-                          <Button size="sm" variant="destructive" onClick={() => handleDeleteRuntime(setting.id)}>
+                          <Badge variant="outline">
+                            {setting.scope === "global" ? "Глобальная" : "Тематическая"}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="font-mono text-sm">{setting.topic_key || "—"}</TableCell>
+                        <TableCell className="font-mono font-medium">{setting.value}</TableCell>
+                        <TableCell>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="text-destructive hover:text-destructive"
+                            onClick={() => handleDeleteRuntime(setting.id)}
+                          >
                             <Trash2 className="w-4 h-4" />
                           </Button>
                         </TableCell>

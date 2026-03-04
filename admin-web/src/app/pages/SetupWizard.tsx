@@ -19,19 +19,23 @@ const steps = [
   { number: 4, title: "Запуск", description: "Начальный импорт" },
 ] as const;
 
-function toLog(message: string, type: LogEntry["type"] = "info"): LogEntry {
+function logEntry(message: string, type: LogEntry["type"] = "info"): LogEntry {
   return {
     type,
     message,
-    timestamp: new Date().toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+    timestamp: new Date().toLocaleTimeString("ru-RU", {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    }),
   };
 }
 
 export default function SetupWizard() {
   const navigate = useNavigate();
   const [currentStep, setCurrentStep] = useState<Step>(1);
+  const [loading, setLoading] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
-  const [loading, setLoading] = useState<string | null>(null);
   const [error, setError] = useState("");
 
   const [channelName, setChannelName] = useState("");
@@ -41,22 +45,21 @@ export default function SetupWizard() {
   const [showApiKey, setShowApiKey] = useState(false);
 
   const [audienceDescription, setAudienceDescription] = useState("");
+  const [scoringAnalyzed, setScoringAnalyzed] = useState(false);
   const [scoringResult, setScoringResult] = useState("");
 
   const [botToken, setBotToken] = useState("");
-  const [botTokenSaved, setBotTokenSaved] = useState(false);
   const [showBotToken, setShowBotToken] = useState(false);
   const [reviewChatId, setReviewChatId] = useState("");
   const [channelId, setChannelId] = useState("");
   const [signature, setSignature] = useState("");
   const [timezone, setTimezone] = useState("Europe/Moscow");
 
-  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [bootstrapLogs, setBootstrapLogs] = useState<LogEntry[]>([]);
   const [bootstrapComplete, setBootstrapComplete] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
-
     api
       .getSetupState()
       .then((state: SetupState) => {
@@ -65,13 +68,13 @@ export default function SetupWizard() {
         setChannelTheme(state.channel_theme || "");
         setApiKeySaved(state.openrouter_api_key_set);
         setAudienceDescription(state.audience_description || "");
-        setBotTokenSaved(state.telegram_bot_token_set);
         setReviewChatId(state.telegram_review_chat_id || "");
         setChannelId(state.telegram_channel_id || "");
         setSignature(state.telegram_signature || "");
         setTimezone(state.timezone_name || "Europe/Moscow");
         setCurrentStep(Math.min(4, Math.max(1, state.onboarding_step || 1)) as Step);
         if (state.onboarding_completed) {
+          setScoringAnalyzed(true);
           setBootstrapComplete(true);
         }
       })
@@ -81,12 +84,11 @@ export default function SetupWizard() {
           navigate("/login", { replace: true });
           return;
         }
-        setError(err instanceof Error ? err.message : "Не удалось загрузить состояние setup.");
+        setError(err instanceof Error ? err.message : "Не удалось загрузить setup.");
       })
       .finally(() => {
         if (!cancelled) setInitialLoading(false);
       });
-
     return () => {
       cancelled = true;
     };
@@ -94,8 +96,8 @@ export default function SetupWizard() {
 
   const progress = (currentStep / steps.length) * 100;
 
-  async function saveStep1() {
-    setLoading("step1");
+  async function handleSaveApiKey() {
+    setLoading(true);
     setError("");
     try {
       await api.saveSetupStep1({
@@ -103,76 +105,102 @@ export default function SetupWizard() {
         channel_theme: channelTheme.trim(),
         openrouter_api_key: apiKey.trim() || undefined,
       });
+      setApiKeySaved(true);
       setApiKey("");
-      if (apiKey.trim()) setApiKeySaved(true);
-      setCurrentStep(2);
+      setShowApiKey(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не удалось сохранить шаг 1.");
     } finally {
-      setLoading(null);
+      setLoading(false);
     }
   }
 
-  async function saveStep2(analyze = false) {
-    setLoading(analyze ? "analyze" : "step2");
+  async function handleAnalyzeScoring() {
+    setLoading(true);
     setError("");
     try {
-      if (analyze) {
-        const result = await api.analyzeSetupStep2({ audience_description: audienceDescription.trim() });
+      const result = await api.analyzeSetupStep2({
+        audience_description: audienceDescription.trim(),
+      });
+      setScoringAnalyzed(true);
+      if (result.params.length > 0) {
         setScoringResult(
-          result.params
-            .map((item) => `${item.title} (${item.key}) · weight ${Number(item.weight).toFixed(2)}`)
-            .join("\n"),
+          `Профиль аудитории успешно проанализирован. Создано ${result.params.length} параметров оценки с учетом вашей тематики.`,
         );
       } else {
-        await api.saveSetupStep2({ audience_description: audienceDescription.trim() });
+        setScoringResult("Профиль аудитории успешно проанализирован.");
       }
-      setCurrentStep(3);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Не удалось сохранить шаг 2.");
-    } finally {
-      setLoading(null);
-    }
-  }
-
-  async function saveTelegram() {
-    setLoading("telegram");
-    setError("");
-    try {
-      await api.saveTelegramSettings({
-        telegram_bot_token: botToken.trim() || undefined,
-        telegram_review_chat_id: reviewChatId.trim(),
-        telegram_channel_id: channelId.trim(),
-        telegram_signature: signature.trim(),
-        timezone_name: timezone.trim() || "Europe/Moscow",
+      await api.saveSetupStep2({
+        audience_description: audienceDescription.trim(),
       });
-      setBotToken("");
-      if (botToken.trim()) setBotTokenSaved(true);
-      setCurrentStep(4);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Не удалось сохранить Telegram settings.");
+      setError(err instanceof Error ? err.message : "Не удалось настроить скоринг.");
     } finally {
-      setLoading(null);
+      setLoading(false);
     }
   }
 
-  async function runBootstrap() {
-    setLoading("bootstrap");
+  async function saveStep3() {
+    await api.saveTelegramSettings({
+      telegram_bot_token: botToken.trim() || undefined,
+      telegram_review_chat_id: reviewChatId.trim(),
+      telegram_channel_id: channelId.trim(),
+      telegram_signature: signature.trim(),
+      timezone_name: timezone.trim() || "Europe/Moscow",
+    });
+    setBotToken("");
+  }
+
+  async function handleBootstrap() {
+    setLoading(true);
     setError("");
-    setLogs([toLog("Запуск начального импорта...")]);
+    setBootstrapLogs([logEntry("Запуск начального импорта...")]);
     try {
-      const out = await api.completeSetup();
-      const nextLogs = Object.entries(out).map(([key, value]) =>
-        toLog(`${key}: ${typeof value === "object" ? JSON.stringify(value) : String(value)}`, "success"),
-      );
-      setLogs((prev) => [...prev, ...nextLogs]);
+      const result = await api.completeSetup();
+      setBootstrapLogs((prev) => [
+        ...prev,
+        ...Object.entries(result).map(([key, value]) =>
+          logEntry(`${key}: ${typeof value === "object" ? JSON.stringify(value) : String(value)}`, "success"),
+        ),
+      ]);
       setBootstrapComplete(true);
     } catch (err) {
       const detail = err instanceof Error ? err.message : "Начальный импорт завершился ошибкой.";
-      setLogs((prev) => [...prev, toLog(detail, "error")]);
+      setBootstrapLogs((prev) => [...prev, logEntry(detail, "error")]);
       setError(detail);
     } finally {
-      setLoading(null);
+      setLoading(false);
+    }
+  }
+
+  async function handleNext() {
+    setError("");
+    if (currentStep === 1) {
+      setCurrentStep(2);
+      return;
+    }
+    if (currentStep === 2) {
+      setCurrentStep(3);
+      return;
+    }
+    if (currentStep === 3) {
+      setLoading(true);
+      try {
+        await saveStep3();
+        setCurrentStep(4);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Не удалось сохранить Telegram-настройки.");
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
+    navigate("/");
+  }
+
+  function handleBack() {
+    if (currentStep > 1) {
+      setCurrentStep((currentStep - 1) as Step);
     }
   }
 
@@ -194,7 +222,9 @@ export default function SetupWizard() {
             </div>
             <div>
               <h1 className="text-xl font-semibold">Настройка рабочего пространства</h1>
-              <p className="text-sm text-muted-foreground">Шаг {currentStep} из {steps.length}</p>
+              <p className="text-sm text-muted-foreground">
+                Шаг {currentStep} из {steps.length}
+              </p>
             </div>
           </div>
           <Progress value={progress} className="h-1" />
@@ -202,12 +232,16 @@ export default function SetupWizard() {
       </div>
 
       <div className="max-w-4xl mx-auto px-6 py-8">
-        <div className="flex gap-8 mb-8 flex-wrap">
+        <div className="flex gap-8 mb-8">
           {steps.map((step) => (
             <div
               key={step.number}
               className={`flex items-center gap-3 ${
-                step.number === currentStep ? "opacity-100" : step.number < currentStep ? "opacity-60" : "opacity-40"
+                step.number === currentStep
+                  ? "opacity-100"
+                  : step.number < currentStep
+                    ? "opacity-60"
+                    : "opacity-40"
               }`}
             >
               <div
@@ -233,29 +267,37 @@ export default function SetupWizard() {
           ))}
         </div>
 
-        <div className="bg-card border border-border rounded-lg p-8 space-y-6">
-          {error ? (
-            <div className="text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2">
-              {error}
-            </div>
-          ) : null}
-
-          {currentStep === 1 ? (
-            <>
+        <div className="bg-card border border-border rounded-lg p-8">
+          {currentStep === 1 && (
+            <div className="space-y-6">
               <div>
                 <h2 className="text-xl font-semibold mb-2">Настройка канала</h2>
-                <p className="text-sm text-muted-foreground">Название, позиционирование и LLM-ключ для workspace.</p>
+                <p className="text-sm text-muted-foreground">
+                  Основная информация о вашем новостном канале
+                </p>
               </div>
 
               <div className="space-y-4">
                 <div className="space-y-2">
                   <Label htmlFor="channelName">Название канала</Label>
-                  <Input id="channelName" value={channelName} onChange={(e) => setChannelName(e.target.value)} />
+                  <Input
+                    id="channelName"
+                    placeholder="AI News Daily"
+                    value={channelName}
+                    onChange={(e) => setChannelName(e.target.value)}
+                  />
                 </div>
+
                 <div className="space-y-2">
                   <Label htmlFor="channelTheme">Тематика канала</Label>
-                  <Textarea id="channelTheme" value={channelTheme} onChange={(e) => setChannelTheme(e.target.value)} rows={4} />
+                  <Input
+                    id="channelTheme"
+                    placeholder="Новости искусственного интеллекта"
+                    value={channelTheme}
+                    onChange={(e) => setChannelTheme(e.target.value)}
+                  />
                 </div>
+
                 <div className="space-y-2">
                   <Label htmlFor="apiKey">OpenRouter API Key</Label>
                   <div className="flex gap-2">
@@ -266,69 +308,106 @@ export default function SetupWizard() {
                         placeholder={apiKeySaved ? "Ключ уже сохранен" : "sk-or-v1-..."}
                         value={apiKey}
                         onChange={(e) => setApiKey(e.target.value)}
+                        disabled={loading || apiKeySaved}
                         className={apiKeySaved ? "bg-green-500/10" : ""}
                       />
-                      <button
-                        type="button"
-                        onClick={() => setShowApiKey((value) => !value)}
-                        className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground"
-                      >
-                        {showApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                      </button>
+                      {!apiKeySaved ? (
+                        <button
+                          type="button"
+                          onClick={() => setShowApiKey(!showApiKey)}
+                          className="absolute right-3 top-1/2 -translate-y-1/2"
+                        >
+                          {showApiKey ? (
+                            <EyeOff className="w-4 h-4 text-muted-foreground" />
+                          ) : (
+                            <Eye className="w-4 h-4 text-muted-foreground" />
+                          )}
+                        </button>
+                      ) : null}
                     </div>
-                    <Button onClick={saveStep1} disabled={!channelName.trim() || !channelTheme.trim() || loading === "step1"}>
-                      {loading === "step1" ? <Loader2 className="w-4 h-4 animate-spin" /> : "Сохранить"}
-                    </Button>
+                    {!apiKeySaved ? (
+                      <Button
+                        onClick={handleSaveApiKey}
+                        disabled={!channelName.trim() || !channelTheme.trim() || !apiKey.trim() || loading}
+                      >
+                        {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : "Сохранить"}
+                      </Button>
+                    ) : (
+                      <Button variant="outline" disabled className="gap-2">
+                        <CheckCircle2 className="w-4 h-4 text-green-400" />
+                        Сохранено
+                      </Button>
+                    )}
                   </div>
-                  {apiKeySaved ? <p className="text-xs text-green-400">Ключ уже хранится в базе и скрыт.</p> : null}
+                  {apiKeySaved && (
+                    <p className="text-xs text-green-400">API ключ безопасно сохранен</p>
+                  )}
                 </div>
               </div>
-            </>
-          ) : null}
+            </div>
+          )}
 
-          {currentStep === 2 ? (
-            <>
+          {currentStep === 2 && (
+            <div className="space-y-6">
               <div>
                 <h2 className="text-xl font-semibold mb-2">Аудитория и скоринг</h2>
-                <p className="text-sm text-muted-foreground">Опиши аудиторию. На этой базе строятся параметры оценки новостей.</p>
+                <p className="text-sm text-muted-foreground">
+                  Опишите вашу аудиторию для настройки алгоритмов оценки
+                </p>
               </div>
+
               <div className="space-y-4">
                 <div className="space-y-2">
-                  <Label htmlFor="audience">Описание аудитории</Label>
+                  <Label htmlFor="audience">Описание целевой аудитории</Label>
                   <Textarea
                     id="audience"
-                    rows={8}
+                    placeholder="Профессионалы в области ML/AI: исследователи, инженеры, технические руководители. Интересуются новыми моделями, исследованиями, инструментами и практическими применениями ИИ. Ценят технические детали и глубокий анализ."
                     value={audienceDescription}
                     onChange={(e) => setAudienceDescription(e.target.value)}
+                    rows={6}
+                    disabled={scoringAnalyzed}
                   />
                 </div>
-                <div className="flex flex-wrap gap-3">
-                  <Button onClick={() => saveStep2(false)} disabled={!audienceDescription.trim() || loading === "step2"}>
-                    {loading === "step2" ? <Loader2 className="w-4 h-4 animate-spin" /> : "Сохранить"}
-                  </Button>
-                  <Button
-                    variant="outline"
-                    onClick={() => saveStep2(true)}
-                    disabled={!audienceDescription.trim() || loading === "analyze"}
-                  >
-                    {loading === "analyze" ? <Loader2 className="w-4 h-4 animate-spin" /> : "Анализировать scoring"}
-                  </Button>
-                </div>
-                {scoringResult ? (
-                  <div className="rounded-lg border border-border bg-black/20 p-4">
-                    <pre className="text-xs text-muted-foreground whitespace-pre-wrap">{scoringResult}</pre>
-                  </div>
-                ) : null}
-              </div>
-            </>
-          ) : null}
 
-          {currentStep === 3 ? (
-            <>
-              <div>
-                <h2 className="text-xl font-semibold mb-2">Telegram</h2>
-                <p className="text-sm text-muted-foreground">Review chat, publish channel и токен бота для workspace.</p>
+                {!scoringAnalyzed ? (
+                  <Button
+                    onClick={handleAnalyzeScoring}
+                    disabled={!audienceDescription.trim() || loading}
+                    className="w-full"
+                  >
+                    {loading ? (
+                      <>
+                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                        Анализ профиля...
+                      </>
+                    ) : (
+                      "Проанализировать и настроить скоринг"
+                    )}
+                  </Button>
+                ) : (
+                  <div className="border border-green-500/30 bg-green-500/10 rounded-lg p-4">
+                    <div className="flex items-start gap-3">
+                      <CheckCircle2 className="w-5 h-5 text-green-400 flex-shrink-0 mt-0.5" />
+                      <div>
+                        <h4 className="font-medium text-green-300 mb-1">Скоринг настроен</h4>
+                        <p className="text-sm text-green-200/80">{scoringResult}</p>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
+            </div>
+          )}
+
+          {currentStep === 3 && (
+            <div className="space-y-6">
+              <div>
+                <h2 className="text-xl font-semibold mb-2">Интеграция Telegram</h2>
+                <p className="text-sm text-muted-foreground">
+                  Подключите бота для публикации в канал
+                </p>
+              </div>
+
               <div className="space-y-4">
                 <div className="space-y-2">
                   <Label htmlFor="botToken">Bot Token</Label>
@@ -336,75 +415,154 @@ export default function SetupWizard() {
                     <Input
                       id="botToken"
                       type={showBotToken ? "text" : "password"}
-                      placeholder={botTokenSaved ? "Токен уже сохранен" : "123456:AA..."}
+                      placeholder="1234567890:ABCdefGHIjklMNOpqrsTUVwxyz"
                       value={botToken}
                       onChange={(e) => setBotToken(e.target.value)}
-                      className={botTokenSaved ? "bg-green-500/10" : ""}
+                      disabled={loading}
                     />
                     <button
                       type="button"
-                      onClick={() => setShowBotToken((value) => !value)}
-                      className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground"
+                      onClick={() => setShowBotToken(!showBotToken)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2"
                     >
-                      {showBotToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      {showBotToken ? (
+                        <EyeOff className="w-4 h-4 text-muted-foreground" />
+                      ) : (
+                        <Eye className="w-4 h-4 text-muted-foreground" />
+                      )}
                     </button>
                   </div>
+                  <p className="text-xs text-muted-foreground">Получить у @BotFather</p>
                 </div>
-                <div className="grid gap-4 md:grid-cols-2">
-                  <div className="space-y-2">
-                    <Label htmlFor="reviewChat">Review chat</Label>
-                    <Input id="reviewChat" value={reviewChatId} onChange={(e) => setReviewChatId(e.target.value)} />
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="channelId">Channel id</Label>
-                    <Input id="channelId" value={channelId} onChange={(e) => setChannelId(e.target.value)} />
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="signature">Signature</Label>
-                    <Input id="signature" value={signature} onChange={(e) => setSignature(e.target.value)} />
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="timezone">Timezone</Label>
-                    <Input id="timezone" value={timezone} onChange={(e) => setTimezone(e.target.value)} />
-                  </div>
-                </div>
-                <Button onClick={saveTelegram} disabled={loading === "telegram" || !reviewChatId.trim() || !channelId.trim()}>
-                  {loading === "telegram" ? <Loader2 className="w-4 h-4 animate-spin" /> : "Сохранить Telegram"}
-                </Button>
-              </div>
-            </>
-          ) : null}
 
-          {currentStep === 4 ? (
-            <>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="reviewChatId">Review Chat ID</Label>
+                    <Input
+                      id="reviewChatId"
+                      placeholder="-1001234567890"
+                      value={reviewChatId}
+                      onChange={(e) => setReviewChatId(e.target.value)}
+                      disabled={loading}
+                    />
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="channelId">Channel ID</Label>
+                    <Input
+                      id="channelId"
+                      placeholder="@ai_news_channel"
+                      value={channelId}
+                      onChange={(e) => setChannelId(e.target.value)}
+                      disabled={loading}
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="signature">Подпись публикаций</Label>
+                  <Input
+                    id="signature"
+                    placeholder="AI News Daily"
+                    value={signature}
+                    onChange={(e) => setSignature(e.target.value)}
+                    disabled={loading}
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="timezone">Часовой пояс</Label>
+                  <Input
+                    id="timezone"
+                    placeholder="Europe/Moscow"
+                    value={timezone}
+                    onChange={(e) => setTimezone(e.target.value)}
+                    disabled={loading}
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {currentStep === 4 && (
+            <div className="space-y-6">
               <div>
                 <h2 className="text-xl font-semibold mb-2">Начальный импорт</h2>
-                <p className="text-sm text-muted-foreground">Сбор за месяц, дедуп, скоринг и первый top pick.</p>
+                <p className="text-sm text-muted-foreground">
+                  Загрузите первую партию статей из настроенных источников
+                </p>
               </div>
-              <div className="flex flex-wrap gap-3">
-                <Button onClick={runBootstrap} disabled={loading === "bootstrap" || bootstrapComplete}>
-                  {loading === "bootstrap" ? <Loader2 className="w-4 h-4 animate-spin" /> : bootstrapComplete ? "Уже выполнено" : "Запустить"}
-                </Button>
-                {bootstrapComplete ? (
-                  <Button variant="secondary" onClick={() => navigate("/")}>
-                    Перейти к центру публикаций
-                  </Button>
-                ) : null}
-              </div>
-              <LogPanel logs={logs} title="Bootstrap log" />
-            </>
-          ) : null}
 
-          <div className="flex justify-between pt-4 border-t border-border">
-            <Button variant="ghost" onClick={() => setCurrentStep((value) => Math.max(1, value - 1) as Step)} disabled={currentStep === 1}>
-              Назад
-            </Button>
-            {currentStep < 4 ? (
-              <Button variant="outline" onClick={() => setCurrentStep((value) => Math.min(4, value + 1) as Step)}>
-                Пропустить вперед
-              </Button>
-            ) : null}
+              {!bootstrapComplete ? (
+                <Button
+                  onClick={handleBootstrap}
+                  disabled={loading}
+                  className="w-full"
+                  size="lg"
+                >
+                  {loading ? (
+                    <>
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      Импорт данных...
+                    </>
+                  ) : (
+                    "Запустить начальный импорт"
+                  )}
+                </Button>
+              ) : null}
+
+              {bootstrapLogs.length > 0 ? (
+                <LogPanel logs={bootstrapLogs} title="Прогресс импорта" />
+              ) : null}
+
+              {bootstrapComplete ? (
+                <div className="border border-green-500/30 bg-green-500/10 rounded-lg p-6 text-center">
+                  <CheckCircle2 className="w-12 h-12 text-green-400 mx-auto mb-3" />
+                  <h3 className="font-semibold text-lg mb-2">Настройка завершена!</h3>
+                  <p className="text-sm text-muted-foreground mb-4">
+                    Система готова к работе.
+                  </p>
+                </div>
+              ) : null}
+            </div>
+          )}
+        </div>
+
+        {error ? (
+          <div className="mt-4 text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2">
+            {error}
           </div>
+        ) : null}
+
+        <div className="flex justify-between mt-6">
+          <Button
+            variant="outline"
+            onClick={handleBack}
+            disabled={currentStep === 1 || loading}
+          >
+            Назад
+          </Button>
+          <Button
+            onClick={handleNext}
+            disabled={
+              loading ||
+              (currentStep === 1 && !apiKeySaved) ||
+              (currentStep === 2 && !scoringAnalyzed) ||
+              (currentStep === 3 && (!reviewChatId.trim() || !channelId.trim())) ||
+              (currentStep === 4 && !bootstrapComplete)
+            }
+          >
+            {loading && currentStep === 3 ? (
+              <>
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                Сохранение...
+              </>
+            ) : currentStep === 4 ? (
+              "Перейти к панели"
+            ) : (
+              "Далее"
+            )}
+          </Button>
         </div>
       </div>
     </div>

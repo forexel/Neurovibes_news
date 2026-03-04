@@ -5,7 +5,7 @@ import { Button } from "../components/ui/button";
 import { Badge } from "../components/ui/badge";
 import { LogPanel } from "../components/LogPanel";
 import { Activity, AlertCircle, CheckCircle2, Clock, Loader2, Send } from "lucide-react";
-import { api, ApiError, formatDateTime, SetupState, TelegramReviewJob, WorkerStatus } from "../lib/api";
+import { api, ApiError, formatDateTime, SetupState, WorkerStatus } from "../lib/api";
 
 type LogEntry = { type: "info" | "success" | "error"; message: string; timestamp?: string };
 
@@ -17,7 +17,6 @@ export default function BotControlPage() {
   const navigate = useNavigate();
   const [setupState, setSetupState] = useState<SetupState | null>(null);
   const [worker, setWorker] = useState<WorkerStatus | null>(null);
-  const [jobs, setJobs] = useState<TelegramReviewJob[]>([]);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -52,7 +51,6 @@ export default function BotControlPage() {
         setWorker(workerResult.value);
       }
       if (jobsResult.status === "fulfilled") {
-        setJobs(jobsResult.value.items || []);
         setLogs(
           (jobsResult.value.items || []).map((job) => ({
             type:
@@ -187,30 +185,6 @@ export default function BotControlPage() {
               </div>
             </div>
 
-            <div className="bg-card border border-border rounded-lg p-6">
-              <h3 className="font-semibold mb-4">Review queue</h3>
-              {jobs.length === 0 ? (
-                <div className="text-sm text-muted-foreground">Нет последних review jobs.</div>
-              ) : (
-                <div className="space-y-3">
-                  {jobs.slice(0, 6).map((job) => (
-                    <div key={job.id} className="flex items-center justify-between gap-4 rounded-md border border-border px-3 py-2 text-sm">
-                      <div className="min-w-0">
-                        <div className="font-medium">job #{job.id}</div>
-                        <div className="text-muted-foreground">
-                          article {job.article_id ?? "—"} · chat {job.chat_id || "—"}
-                        </div>
-                      </div>
-                      <div className="text-right">
-                        <Badge variant="outline">{job.status || "unknown"}</Badge>
-                        <div className="mt-1 text-xs text-muted-foreground">{formatDateTime(job.updated_at || job.created_at)}</div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
             {worker?.worker_last_cycle_error ? (
               <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4">
                 <div className="flex items-start gap-3">
@@ -255,8 +229,33 @@ export default function BotControlPage() {
             </div>
           </div>
 
-          <div className="lg:col-span-1">
-            <LogPanel logs={logs} title="Bot log" />
+          <div className="lg:col-span-1 space-y-6">
+            <div className="bg-card border border-border rounded-lg p-6">
+              <h3 className="font-semibold mb-4">Информация о циклах</h3>
+              <div className="space-y-3 text-sm">
+                <div className="flex justify-between items-center">
+                  <span className="text-muted-foreground">Старт последнего:</span>
+                  <span className="font-mono">
+                    {formatDateTime(worker?.worker_last_cycle_start_utc)}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-muted-foreground">Финиш последнего:</span>
+                  <span className="font-mono">
+                    {formatDateTime(worker?.worker_last_cycle_finish_utc)}
+                  </span>
+                </div>
+                <div className="pt-3 border-t border-border">
+                  <div className="flex justify-between items-center">
+                    <span className="text-muted-foreground">Следующий цикл:</span>
+                    <span className="font-mono text-cyan-400">
+                      {formatDateTime(worker?.worker_next_cycle_utc)}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <LogPanel logs={logs} title="Лог операций бота" />
           </div>
         </div>
       </div>
