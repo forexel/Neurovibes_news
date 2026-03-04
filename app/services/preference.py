@@ -206,6 +206,55 @@ def _safe_logit(p: np.ndarray | float) -> np.ndarray | float:
     return np.log(clipped / (1.0 - clipped))
 
 
+def _balanced_sample_weights(y: np.ndarray) -> np.ndarray:
+    if y.size == 0:
+        return np.array([], dtype=float)
+    counts: dict[int, int] = {}
+    for cls in np.unique(y):
+        cls_i = int(cls)
+        counts[cls_i] = int(np.sum(y == cls_i))
+    n_classes = max(1, len(counts))
+    n_total = int(len(y))
+    weights = {
+        cls: (float(n_total) / float(n_classes * cnt))
+        for cls, cnt in counts.items()
+        if cnt > 0
+    }
+    return np.array([float(weights.get(int(v), 1.0)) for v in y], dtype=float)
+
+
+def _stratified_train_val_indices(y: np.ndarray, val_ratio: float = 0.2) -> tuple[np.ndarray, np.ndarray]:
+    n = int(len(y))
+    if n < 4:
+        idx = np.arange(n, dtype=int)
+        split = max(1, min(n - 1, int(round(n * (1.0 - val_ratio)))))
+        return idx[:split], idx[split:]
+
+    rng = np.random.default_rng(42)
+    train_idx: list[int] = []
+    val_idx: list[int] = []
+    classes = [int(c) for c in np.unique(y)]
+    for cls in classes:
+        cls_idx = np.where(y == cls)[0]
+        if cls_idx.size == 0:
+            continue
+        cls_idx = rng.permutation(cls_idx)
+        n_cls = int(cls_idx.size)
+        n_val_cls = int(round(n_cls * float(val_ratio)))
+        n_val_cls = max(1, min(n_cls - 1, n_val_cls)) if n_cls > 1 else 0
+        if n_val_cls > 0:
+            val_idx.extend(int(i) for i in cls_idx[:n_val_cls])
+            train_idx.extend(int(i) for i in cls_idx[n_val_cls:])
+        else:
+            train_idx.extend(int(i) for i in cls_idx)
+
+    if not train_idx or not val_idx:
+        idx = np.arange(n, dtype=int)
+        split = max(1, min(n - 1, int(round(n * (1.0 - val_ratio)))))
+        return idx[:split], idx[split:]
+    return np.array(sorted(train_idx), dtype=int), np.array(sorted(val_idx), dtype=int)
+
+
 def _editor_choice_vectorizer() -> HashingVectorizer:
     return HashingVectorizer(
         n_features=EDITOR_CHOICE_TEXT_FEATURES,
@@ -1067,8 +1116,9 @@ def train_ranking_model(batch_id: str) -> dict:
     x = np.array([[float(r.features.get(k, 0.0)) for k in feature_names] for r in rows], dtype=float)
     y = np.array([int(r.label) for r in rows], dtype=int)
 
-    model = LogisticRegression(max_iter=1000)
-    model.fit(x, y)
+    sample_weight = _balanced_sample_weights(y)
+    model = LogisticRegression(max_iter=1000, class_weight="balanced")
+    model.fit(x, y, sample_weight=sample_weight)
     probs = model.predict_proba(x)[:, 1]
     auc = float(roc_auc_score(y, probs)) if len(np.unique(y)) > 1 else 0.5
 
@@ -1078,6 +1128,7 @@ def train_ranking_model(batch_id: str) -> dict:
         "intercept": float(model.intercept_[0]),
         "batch_id": batch_id,
         "auc_train": auc,
+        "train_pos_ratio": float(np.mean(y)),
     }
     version = datetime.utcnow().strftime("%Y%m%d%H%M%S")
     path = MODEL_DIR / f"ranking_{version}.json"
@@ -1091,7 +1142,7 @@ def train_ranking_model(batch_id: str) -> dict:
                 name="ranking",
                 version=version,
                 artifact_path=path.name,
-                metrics={"auc_train": auc, "n": len(rows)},
+                metrics={"auc_train": auc, "n": len(rows), "train_pos_ratio": float(np.mean(y))},
                 active=True,
             )
         )
@@ -1115,30 +1166,53 @@ def get_active_ranking_artifact() -> dict | None:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def build_editor_choice_dataset(days_back: int = 30) -> dict:
+def build_editor_choice_dataset(
+    days_back: int = 30,
+    *,
+    clean_only: bool = False,
+    min_reason_len: int = 20,
+    balance_classes: bool = False,
+    max_rows: int = 0,
+) -> dict:
     days_back = max(1, int(days_back or 1))
     if days_back == 1:
         start_utc, end_utc = _today_local_window_utc()
     else:
         end_utc = datetime.utcnow()
         start_utc = end_utc - timedelta(days=days_back)
+    allowed_decisions = ["publish", "top_pick", "hide", "delete"] if clean_only else ["publish", "hide", "delete", "defer"]
     with session_scope() as session:
         rows = session.scalars(
             select(TrainingEvent)
             .where(
                 TrainingEvent.created_at >= start_utc,
                 TrainingEvent.created_at < end_utc,
-                TrainingEvent.decision.in_(["publish", "hide", "delete", "defer"]),
+                TrainingEvent.decision.in_(allowed_decisions),
             )
             .order_by(TrainingEvent.created_at.asc())
         ).all()
 
-    if not rows:
-        return {"ok": False, "reason": "no_training_events"}
+    raw_n = len(rows)
+    if clean_only and rows:
+        by_article: dict[int, TrainingEvent] = {}
+        for row in rows:
+            by_article[int(row.article_id)] = row
+        rows = [
+            row
+            for row in by_article.values()
+            if len(str(row.reason_text or "").strip()) >= max(0, int(min_reason_len))
+        ]
+        rows.sort(key=lambda x: x.created_at or datetime.min)
 
-    X: list[np.ndarray] = []
-    y: list[int] = []
-    meta: list[dict] = []
+    if not rows:
+        return {
+            "ok": False,
+            "reason": "no_training_events",
+            "clean_only": bool(clean_only),
+            "raw_n": int(raw_n),
+        }
+
+    items: list[tuple[np.ndarray, int, dict]] = []
     with session_scope() as session:
         for r in rows:
             feats = dict(r.features_json or {})
@@ -1147,17 +1221,57 @@ def build_editor_choice_dataset(days_back: int = 30) -> dict:
                 feats.setdefault("title_text", str(article.title or "")[:400])
                 feats.setdefault("subtitle_text", str(article.subtitle or "")[:800])
                 feats.setdefault("text_excerpt", str(article.text or "")[:1500])
-            X.append(_editor_choice_vector_from_features(feats))
-            y.append(int(r.label))
-            meta.append(
-                {
-                    "event_id": int(r.id),
-                    "created_at": r.created_at.isoformat(),
-                    "article_id": int(r.article_id),
-                    "decision": r.decision,
-                }
-            )
-    return {"ok": True, "X": X, "y": y, "meta": meta, "n": len(rows)}
+            vec = _editor_choice_vector_from_features(feats)
+            label = int(r.label)
+            meta = {
+                "event_id": int(r.id),
+                "created_at": r.created_at.isoformat(),
+                "article_id": int(r.article_id),
+                "decision": r.decision,
+                "reason_text": str(r.reason_text or ""),
+                "clean_label": bool(clean_only),
+            }
+            items.append((vec, label, meta))
+
+    if balance_classes and items:
+        pos = [it for it in items if int(it[1]) == 1]
+        neg = [it for it in items if int(it[1]) == 0]
+        per_class = min(len(pos), len(neg))
+        if int(max_rows or 0) > 0:
+            per_class = min(per_class, max(1, int(max_rows) // 2))
+        pos = pos[-per_class:] if per_class > 0 else []
+        neg = neg[-per_class:] if per_class > 0 else []
+        items = sorted((pos + neg), key=lambda x: x[2].get("created_at", ""))
+    elif int(max_rows or 0) > 0 and len(items) > int(max_rows):
+        items = items[-int(max_rows):]
+
+    if not items:
+        return {
+            "ok": False,
+            "reason": "no_training_events_after_filtering",
+            "clean_only": bool(clean_only),
+            "raw_n": int(raw_n),
+        }
+
+    X: list[np.ndarray] = []
+    y: list[int] = []
+    meta: list[dict] = []
+    for vec, label, rec_meta in items:
+        X.append(vec)
+        y.append(label)
+        meta.append(rec_meta)
+    return {
+        "ok": True,
+        "X": X,
+        "y": y,
+        "meta": meta,
+        "n": len(items),
+        "clean_only": bool(clean_only),
+        "raw_n": int(raw_n),
+        "balance_classes": bool(balance_classes),
+        "max_rows": int(max_rows or 0),
+        "min_reason_len": int(min_reason_len),
+    }
 
 
 def build_practical_ranking_dataset(days_back: int = 28) -> dict:
@@ -1325,8 +1439,22 @@ def predict_practical_ranking_prob(features: dict | None) -> dict:
     return {"ok": True, "prob": prob, "version": artifact.get("_version")}
 
 
-def train_editor_choice_model(days_back: int = 1, min_samples: int = 8) -> dict:
-    ds = build_editor_choice_dataset(days_back=days_back)
+def train_editor_choice_model(
+    days_back: int = 1,
+    min_samples: int = 8,
+    *,
+    clean_only: bool = False,
+    min_reason_len: int = 20,
+    balance_classes: bool = False,
+    max_rows: int = 0,
+) -> dict:
+    ds = build_editor_choice_dataset(
+        days_back=days_back,
+        clean_only=clean_only,
+        min_reason_len=min_reason_len,
+        balance_classes=balance_classes,
+        max_rows=max_rows,
+    )
     if not ds.get("ok"):
         return ds
     X = np.array(ds["X"], dtype=float)
@@ -1340,11 +1468,18 @@ def train_editor_choice_model(days_back: int = 1, min_samples: int = 8) -> dict:
     split = max(1, min(n - 1, int(n * 0.8)))
     X_train, X_val = X[:split], X[split:]
     y_train, y_val = y[:split], y[split:]
+    val_indices = np.arange(split, n, dtype=int)
+    if len(np.unique(y_train)) < 2 or len(np.unique(y_val)) < 2:
+        train_idx, val_idx = _stratified_train_val_indices(y, val_ratio=0.2)
+        X_train, X_val = X[train_idx], X[val_idx]
+        y_train, y_val = y[train_idx], y[val_idx]
+        val_indices = val_idx
     if len(np.unique(y_train)) < 2:
         return {"ok": False, "reason": "train_split_one_class", "n": n}
 
+    train_weight = _balanced_sample_weights(y_train)
     model = LogisticRegression(max_iter=1000, class_weight="balanced")
-    model.fit(X_train, y_train)
+    model.fit(X_train, y_train, sample_weight=train_weight)
 
     p_train = model.predict_proba(X_train)[:, 1]
     p_val = model.predict_proba(X_val)[:, 1] if len(X_val) else np.array([])
@@ -1355,8 +1490,9 @@ def train_editor_choice_model(days_back: int = 1, min_samples: int = 8) -> dict:
     if len(p_val) >= 30 and len(np.unique(y_val)) > 1:
         try:
             val_logits = _safe_logit(p_val).reshape(-1, 1)
+            val_weight = _balanced_sample_weights(y_val)
             cal = LogisticRegression(max_iter=1000, class_weight="balanced")
-            cal.fit(val_logits, y_val)
+            cal.fit(val_logits, y_val, sample_weight=val_weight)
             a = float(cal.coef_[0][0])
             b = float(cal.intercept_[0])
             z_cal = (a * _safe_logit(p_val)) + b
@@ -1378,7 +1514,7 @@ def train_editor_choice_model(days_back: int = 1, min_samples: int = 8) -> dict:
 
     # Simple precision@1 and ndcg@5 over hourly groups from meta timestamps
     meta = ds.get("meta") or []
-    val_meta = meta[split:]
+    val_meta = [meta[int(i)] for i in val_indices if 0 <= int(i) < len(meta)]
     grouped: dict[str, list[tuple[float, int]]] = {}
     for i, row in enumerate(val_meta):
         if i >= len(p_val):
@@ -1411,6 +1547,10 @@ def train_editor_choice_model(days_back: int = 1, min_samples: int = 8) -> dict:
         "intercept": float(model.intercept_[0]),
         "trained_at": datetime.utcnow().isoformat(),
         "days_back": int(days_back),
+        "clean_only": bool(clean_only),
+        "min_reason_len": int(min_reason_len),
+        "balance_classes": bool(balance_classes),
+        "max_rows": int(max_rows or 0),
         "n_train": int(len(y_train)),
         "n_val": int(len(y_val)),
         "calibration": calibration,
@@ -1419,6 +1559,8 @@ def train_editor_choice_model(days_back: int = 1, min_samples: int = 8) -> dict:
             "roc_auc_val": auc_val,
             "precision_at_1": precision_at_1,
             "ndcg_at_5": ndcg5,
+            "train_pos_ratio": float(np.mean(y_train)),
+            "val_pos_ratio": float(np.mean(y_val)) if len(y_val) else None,
         },
     }
     version = datetime.utcnow().strftime("%Y%m%d%H%M%S")
