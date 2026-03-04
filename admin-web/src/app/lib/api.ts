@@ -198,11 +198,12 @@ export const api = {
         if (target.pathname === "/login") {
           throw new ApiError(401, "Неверный email или пароль.");
         }
+        return { redirectTo: target.pathname || "/" };
       } catch {
         // Ignore URL parsing issues and fall back to setup-state check.
       }
     }
-    return this.getSetupState();
+    return { redirectTo: "/" };
   },
 
   async register(login: string, password: string) {

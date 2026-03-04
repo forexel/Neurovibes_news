@@ -35,8 +35,8 @@ export default function LoginPage() {
     setLoading(true);
 
     try {
-      const state = await api.login(email.trim(), password);
-      navigate(state.onboarding_completed ? "/" : "/setup");
+      const result = await api.login(email.trim(), password);
+      window.location.assign(result.redirectTo || "/");
     } catch (err) {
       const detail =
         err instanceof ApiError
