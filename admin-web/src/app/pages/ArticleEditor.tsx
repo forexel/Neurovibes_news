@@ -17,6 +17,8 @@ import {
   ArrowLeft,
   Calendar,
   ExternalLink,
+  FileText,
+  Clock,
   Loader2,
   Save,
   Send,
@@ -432,9 +434,123 @@ export default function ArticleEditor() {
             </div>
 
             <div className="bg-card border border-border rounded-lg p-6">
-              <h3 className="font-semibold mb-4">Post + Image Preview</h3>
+              <h3 className="font-semibold mb-4">Предпросмотр поста</h3>
               <pre className="whitespace-pre-wrap rounded-lg bg-black/20 border border-border p-4 text-sm">{postPreview}</pre>
               {article.image_web ? <img src={article.image_web} alt="" className="mt-4 rounded-lg border border-border max-h-96 object-cover" /> : null}
+            </div>
+
+            <div className="bg-card border border-border rounded-lg p-6">
+              <h3 className="font-semibold mb-4">Действия</h3>
+              <div className="space-y-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div>
+                    <Label htmlFor="schedule-linear">Запланировать публикацию</Label>
+                    <Input
+                      id="schedule-linear"
+                      type="datetime-local"
+                      value={scheduleDate}
+                      onChange={(e) => setScheduleDate(e.target.value)}
+                    />
+                  </div>
+                  <div className="flex items-end">
+                    <Button
+                      variant="outline"
+                      className="w-full"
+                      onClick={() => run("Clear Schedule", () => api.postArticleAction(articleId, "unschedule-publish"))}
+                    >
+                      <Calendar className="w-4 h-4 mr-2" />
+                      Очистить расписание
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                  <Button variant="outline" size="sm" onClick={() => run("Score", () => api.postArticleAction(articleId, "score"))}>
+                    <Wand2 className="w-4 h-4 mr-2" />
+                    Оценить
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={() => run("Prepare + Image", () => api.postArticleAction(articleId, "prepare"))}>
+                    <FileText className="w-4 h-4 mr-2" />
+                    Подготовить
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() =>
+                      run(isSelectedHourly ? "Remove Hour" : "Select Hour", () =>
+                        api.postArticleAction(
+                          articleId,
+                          isSelectedHourly ? "unselect-hour" : "status",
+                          isSelectedHourly ? undefined : { status: "selected_hourly" },
+                        ),
+                      )
+                    }
+                  >
+                    <Clock className="w-4 h-4 mr-2" />
+                    {isSelectedHourly ? "Снять с часа" : "Выбрать на час"}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() =>
+                      run(article.is_selected_day ? "Remove Day" : "Select Day", () =>
+                        api.postArticleAction(articleId, article.is_selected_day ? "unselect-day" : "select-day"),
+                      )
+                    }
+                  >
+                    <Calendar className="w-4 h-4 mr-2" />
+                    {article.is_selected_day ? "Снять с дня" : "Выбрать на день"}
+                  </Button>
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    onClick={() => run("Publish", publishWithReason)}
+                    disabled={hasInsufficientContent}
+                    className="flex-1 min-w-[220px]"
+                  >
+                    <Send className="w-4 h-4 mr-2" />
+                    Опубликовать сейчас
+                  </Button>
+                  <Button variant="outline" onClick={() => run("Archive", () => api.postArticleAction(articleId, "status", { status: "rejected" }))}>
+                    <Archive className="w-4 h-4 mr-2" />
+                    В архив
+                  </Button>
+                  <Button variant="destructive" onClick={deleteWithReason}>
+                    <Trash2 className="w-4 h-4 mr-2" />
+                    Удалить
+                  </Button>
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-card border border-border rounded-lg p-6">
+              <h3 className="font-semibold mb-4">Обратная связь</h3>
+              <div className="space-y-4">
+                <div>
+                  <Label htmlFor="feedback-linear">Почему выбрана эта статья?</Label>
+                  <Textarea
+                    id="feedback-linear"
+                    value={feedback}
+                    onChange={(e) => setFeedback(e.target.value)}
+                    rows={4}
+                    placeholder="Заметки для обучения алгоритмов..."
+                  />
+                </div>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() =>
+                    run("Save Feedback", () =>
+                      api.postArticleAction(articleId, "feedback", { explanation_text: feedback }),
+                    )
+                  }
+                  disabled={feedback.trim().length < 5}
+                >
+                  <Save className="w-4 h-4 mr-2" />
+                  Сохранить обратную связь
+                </Button>
+              </div>
             </div>
           </TabsContent>
 
