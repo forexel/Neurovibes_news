@@ -59,7 +59,7 @@ export function TopNavigation() {
     closeTimerRef.current = window.setTimeout(() => {
       setOpenMenu((current) => (current === menu ? null : current));
       closeTimerRef.current = null;
-    }, 420);
+    }, 650);
   }
 
   useEffect(
@@ -110,6 +110,7 @@ export function TopNavigation() {
                   size="sm"
                   className="gap-2"
                   onClick={() => setOpenMenu((value) => (value === "actions" ? null : "actions"))}
+                  onPointerEnter={() => openMenuHover("actions")}
                   onMouseEnter={() => openMenuHover("actions")}
                   onMouseLeave={() => closeMenuHover("actions")}
                 >
@@ -122,6 +123,7 @@ export function TopNavigation() {
                 sideOffset={0}
                 className="w-56"
                 collisionPadding={8}
+                onPointerEnter={() => openMenuHover("actions")}
                 onMouseEnter={() => openMenuHover("actions")}
                 onMouseLeave={() => closeMenuHover("actions")}
               >
@@ -171,6 +173,7 @@ export function TopNavigation() {
                   size="sm"
                   className="gap-2"
                   onClick={() => setOpenMenu((value) => (value === "tools" ? null : "tools"))}
+                  onPointerEnter={() => openMenuHover("tools")}
                   onMouseEnter={() => openMenuHover("tools")}
                   onMouseLeave={() => closeMenuHover("tools")}
                 >
@@ -183,6 +186,7 @@ export function TopNavigation() {
                 sideOffset={0}
                 className="w-48"
                 collisionPadding={8}
+                onPointerEnter={() => openMenuHover("tools")}
                 onMouseEnter={() => openMenuHover("tools")}
                 onMouseLeave={() => closeMenuHover("tools")}
               >
@@ -223,6 +227,7 @@ export function TopNavigation() {
               size="sm"
               className="gap-2"
               onClick={() => setOpenMenu((value) => (value === "account" ? null : "account"))}
+              onPointerEnter={() => openMenuHover("account")}
               onMouseEnter={() => openMenuHover("account")}
               onMouseLeave={() => closeMenuHover("account")}
             >
@@ -235,6 +240,7 @@ export function TopNavigation() {
             sideOffset={0}
             className="w-48"
             collisionPadding={8}
+            onPointerEnter={() => openMenuHover("account")}
             onMouseEnter={() => openMenuHover("account")}
             onMouseLeave={() => closeMenuHover("account")}
           >

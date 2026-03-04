@@ -671,9 +671,9 @@ export default function ArticlesDashboard() {
       </div>
 
       <Dialog open={Boolean(previewArticle)} onOpenChange={(open) => !open && setPreviewArticle(null)}>
-        <DialogContent className="max-w-4xl [&>button]:right-5 [&>button]:top-5 [&>button]:h-9 [&>button]:w-9 [&>button]:rounded-md [&>button]:border [&>button]:border-border">
+        <DialogContent className="max-w-4xl [&>button]:right-3 [&>button]:top-3 [&>button]:h-9 [&>button]:w-9 [&>button]:rounded-md [&>button]:border [&>button]:border-border">
           <DialogHeader>
-            <DialogTitle className="pr-12 leading-tight">{previewArticle?.ru_title || previewArticle?.title}</DialogTitle>
+            <DialogTitle className="pr-20 leading-tight">{previewArticle?.ru_title || previewArticle?.title}</DialogTitle>
             <DialogDescription className="flex items-center gap-2 flex-wrap">
               {previewArticle ? <StatusBadge status={previewArticle.status} /> : null}
               {previewArticle?.score_10 != null ? <ScoreBadge score={previewArticle.score_10} size="sm" /> : null}

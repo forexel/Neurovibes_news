@@ -1347,7 +1347,7 @@ def article_details(article_id: int) -> dict:
         emb = session.scalars(
             select(ArticleEmbedding)
             .where(ArticleEmbedding.article_id == article_id)
-            .order_by(ArticleEmbedding.id.desc())
+            .order_by(ArticleEmbedding.created_at.desc())
             .limit(1)
         ).first()
         if emb and emb.embedding:
