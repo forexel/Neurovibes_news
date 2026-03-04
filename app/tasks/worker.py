@@ -139,6 +139,11 @@ def _run_cycle_thread(backfill_days: int, decision_mode: bool, slot_key: str) ->
         if not decision_mode:
             return
 
+        # Strategy is intentionally disabled for this hour slot (e.g. ML every 2 hours).
+        # Do not send "all filtered" noise in skipped slots.
+        if str(result.get("selection_strategy") or "").strip().lower() == "off":
+            return
+
         if top_article_id:
             # Auto-mode: never spam the same hour slot. Force resend is only for manual backfill endpoints.
             review_out = send_hourly_top_for_review(int(top_article_id), force=False)

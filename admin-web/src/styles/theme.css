@@ -178,4 +178,16 @@
     font-weight: var(--font-weight-normal);
     line-height: 1.5;
   }
+
+  button,
+  [role="button"],
+  a[href],
+  summary {
+    cursor: pointer;
+  }
+
+  button:disabled,
+  [role="button"][aria-disabled="true"] {
+    cursor: not-allowed;
+  }
 }
