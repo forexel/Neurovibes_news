@@ -322,8 +322,6 @@ def _build_review_text(article: Article, window: tuple[datetime, datetime, str] 
                 if selection.confidence is not None:
                     selector_line += f" (confidence {float(selection.confidence):.3f})"
                     criteria_lines.append(f"Вероятность публикации: {float(selection.confidence):.3f}")
-                if (selection.model_version or "").strip():
-                    criteria_lines.append(f"Версия модели: {str(selection.model_version).strip()}")
             elif selector_kind == "script":
                 selector_line = "Выбор: скрипт/правила"
             elif selector_kind:
@@ -338,6 +336,9 @@ def _build_review_text(article: Article, window: tuple[datetime, datetime, str] 
                 except Exception:
                     continue
             if isinstance(chosen, dict):
+                model_version = str(chosen.get("model_version") or "").strip()
+                if model_version:
+                    criteria_lines.append("Версия модели: " + model_version)
                 top_drivers = [str(x).strip() for x in list(chosen.get("top_drivers") or []) if str(x).strip()]
                 if top_drivers:
                     criteria_lines.append("Факторы: " + "; ".join(top_drivers[:3]))
