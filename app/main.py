@@ -5165,37 +5165,8 @@ def _dt_to_utc_z(dt: datetime | None) -> str | None:
     return aware.isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def _score_to_10(score: Score | None) -> int | None:
+def _score_to_10(score: Score | None) -> float | None:
     if score is None or score.final_score is None:
         return None
-    raw = max(0.0, min(10.0, float(score.final_score) * 10.0))
-
-    # Editorial calibration:
-    # - lift mid-range (fillers) to human-friendly 5-7 band
-    # - stretch top stories into 8-10 when relevance/virality/business_IT are strong
-    features = score.features if isinstance(score.features, dict) else {}
-    relevance = max(0.0, min(1.0, float(score.relevance or 0.0) / 10.0))
-    virality = max(0.0, min(1.0, float(score.virality or 0.0) / 10.0))
-    business_it = max(0.0, min(1.0, float(features.get("business_it", 0.5))))
-    domain = str(features.get("domain") or "").strip().lower()
-    geek_penalty = max(0.6, min(1.0, float(features.get("geek_penalty", 1.0))))
-
-    audience_fit = (0.45 * relevance) + (0.25 * virality) + (0.30 * business_it)
-    base = raw + 1.4
-    fit_adjust = (audience_fit - 0.5) * 1.0  # approx -0.5..+0.5
-    hot_bonus = 0.7 if (relevance >= 0.85 and virality >= 0.70) else 0.0
-
-    low_rel_penalty = 0.0
-    if relevance < 0.50:
-        low_rel_penalty = -1.2
-    elif relevance < 0.60:
-        low_rel_penalty = -0.6
-
-    value = base + fit_adjust + hot_bonus + low_rel_penalty
-    if domain == "research":
-        value -= 1.6
-    if business_it < 0.65:
-        value -= 0.7
-    value *= geek_penalty
-    value = max(0.0, min(10.0, value))
-    return int(round(value))
+    value = max(0.0, min(10.0, float(score.final_score) * 10.0))
+    return round(value, 1)

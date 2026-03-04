@@ -15,7 +15,6 @@ from app.services.embedding_dedup import process_embeddings_and_dedup
 from app.services.ingestion import enrich_summary_only_articles, run_ingestion_fast
 from app.services.llm import get_client, track_usage_from_response
 from app.services.preference import (
-    blended_editor_score,
     get_active_profile,
     log_training_event,
     predict_editor_choice_prob,
@@ -32,6 +31,11 @@ def _clip_multiplier(value: float) -> float:
     min_mult = get_runtime_float("editorial_min_multiplier", default=0.55)
     max_mult = get_runtime_float("editorial_max_multiplier", default=1.25)
     return float(max(min_mult, min(max_mult, value)))
+
+
+def _unified_score_10(score: Score) -> float:
+    # Single score scale for UI and ranking: 0..10 from model final_score (0..1).
+    return float(max(0.0, min(10.0, float(score.final_score or 0.0) * 10.0)))
 
 
 def _editorial_score_multiplier(article: Article, score: Score) -> tuple[float, list[str]]:
@@ -93,31 +97,13 @@ def _editorial_score_multiplier(article: Article, score: Score) -> tuple[float, 
 
 
 def _rule_adjusted_score(article: Article, score: Score) -> float:
-    raw = float(score.final_score or 0.0)
-    features = score.features if isinstance(score.features, dict) else {}
-    domain = str(features.get("domain") or "").strip().lower()
-    business_it = float(features.get("business_it") or 0.0)  # stored as 0..1
-    geek_penalty = float(features.get("geek_penalty") or 1.0)
-
-    mult = geek_penalty
-    if domain == "research":
-        mult *= 0.78
-    if business_it < 0.65:
-        mult *= 0.90
-    if article.content_mode == "summary_only":
-        mult *= 0.85
-    editorial_mult, _ = _editorial_score_multiplier(article, score)
-    mult *= editorial_mult
-    return raw * mult
+    _ = article
+    return _unified_score_10(score)
 
 
 def _audience_adjusted_score(article: Article, score: Score) -> float:
-    base = _rule_adjusted_score(article, score)
-    blend = blended_editor_score(base, score.features if isinstance(score.features, dict) else {})
-    if blend.get("ok"):
-        # convert 0..1 back to 0..10 for existing ranking comparisons
-        return float(blend["final"]) * 10.0
-    return base
+    _ = article
+    return _unified_score_10(score)
 
 
 def _get_tz_name() -> str:
