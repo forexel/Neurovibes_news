@@ -19,6 +19,7 @@ import {
   ExternalLink,
   FileText,
   Clock,
+  Image as ImageIcon,
   Loader2,
   Save,
   Send,
@@ -435,8 +436,29 @@ export default function ArticleEditor() {
 
             <div className="bg-card border border-border rounded-lg p-6">
               <h3 className="font-semibold mb-4">Предпросмотр поста</h3>
-              <pre className="whitespace-pre-wrap rounded-lg bg-black/20 border border-border p-4 text-sm">{postPreview}</pre>
-              {article.image_web ? <img src={article.image_web} alt="" className="mt-4 rounded-lg border border-border max-h-96 object-cover" /> : null}
+              <div className="bg-gradient-to-br from-blue-950/50 to-purple-950/50 border border-border rounded-lg p-6 max-w-md">
+                {article.image_web ? (
+                  <img
+                    src={article.image_web}
+                    alt="Preview"
+                    className="w-full h-48 object-cover rounded-lg mb-4"
+                  />
+                ) : (
+                  <div className="w-full h-48 bg-muted/20 rounded-lg mb-4 flex items-center justify-center">
+                    <ImageIcon className="w-12 h-12 text-muted-foreground" />
+                  </div>
+                )}
+                <h4 className="font-semibold mb-2">
+                  {ruTitle || article.ru_title || article.title}
+                </h4>
+                <p className="text-sm text-muted-foreground mb-3">
+                  {ruSummary || article.ru_summary || article.subtitle || "Аннотация не создана"}
+                </p>
+                <div className="text-xs text-muted-foreground italic">
+                  AI News Daily
+                </div>
+              </div>
+              <pre className="mt-4 whitespace-pre-wrap rounded-lg bg-black/20 border border-border p-4 text-sm">{postPreview}</pre>
             </div>
 
             <div className="bg-card border border-border rounded-lg p-6">
