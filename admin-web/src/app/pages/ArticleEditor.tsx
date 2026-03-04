@@ -122,6 +122,20 @@ export default function ArticleEditor() {
     await api.postArticleAction(articleId, "publish");
   }
 
+  async function deleteWithReason() {
+    const reason = window.prompt(`Почему удалить статью #${articleId}?`);
+    if (!reason || reason.trim().length < 5) return;
+    setLoading("delete");
+    try {
+      await api.deleteArticle(articleId, reason.trim());
+      navigate("/dashboard");
+    } catch (err) {
+      addLog("error", err instanceof Error ? err.message : "Delete failed");
+    } finally {
+      setLoading(null);
+    }
+  }
+
   async function run(label: string, action: () => Promise<Record<string, unknown>>) {
     setLoading(label);
     addLog("info", `${label}...`);
@@ -218,6 +232,65 @@ export default function ArticleEditor() {
             Недостаточно контента для публикации. Сейчас в статье только короткий RSS summary. Нажми "Загрузить с сайта", и если сайт не отдаёт полный текст, материал лучше не публиковать.
           </div>
         ) : null}
+
+        <div className="mb-6 bg-card border border-border rounded-lg p-6">
+          <h3 className="font-semibold mb-4">Управление публикацией</h3>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="quick-schedule">Отложенная публикация</Label>
+              <div className="flex flex-wrap gap-2">
+                <Popover open={schedulePopoverOpen} onOpenChange={setSchedulePopoverOpen}>
+                  <PopoverTrigger asChild>
+                    <Button id="quick-schedule" type="button" variant="outline" className="justify-start text-left font-normal min-w-56">
+                      <Calendar className="mr-2 h-4 w-4" />
+                      {selectedScheduleDate ? format(selectedScheduleDate, "d MMMM yyyy", { locale: ru }) : "Выбрать дату"}
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-auto p-0" align="start">
+                    <DateCalendar
+                      mode="single"
+                      selected={selectedScheduleDate}
+                      onSelect={(date) => {
+                        setScheduleDate((current) => updateScheduleValue(current, date));
+                        setSchedulePopoverOpen(false);
+                      }}
+                    />
+                  </PopoverContent>
+                </Popover>
+                <Input
+                  type="time"
+                  value={scheduleDate ? scheduleDate.slice(11, 16) : ""}
+                  onChange={(e) => setScheduleDate((current) => updateScheduleValue(current, undefined, e.target.value || "10:00"))}
+                  className="w-32"
+                />
+                <Button
+                  onClick={() => run("Schedule", () => api.postArticleAction(articleId, "schedule-publish", { publish_at: scheduleDate }))}
+                  disabled={!scheduleDate}
+                >
+                  <Calendar className="w-4 h-4 mr-2" />
+                  Запланировать
+                </Button>
+                <Button variant="outline" onClick={() => run("Clear Schedule", () => api.postArticleAction(articleId, "unschedule-publish"))}>
+                  Очистить
+                </Button>
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button onClick={() => run("Publish", publishWithReason)} disabled={hasInsufficientContent}>
+                <Send className="w-4 h-4 mr-2" />
+                Опубликовать
+              </Button>
+              <Button variant="outline" onClick={() => run("Archive", () => api.postArticleAction(articleId, "status", { status: "rejected" }))}>
+                <Archive className="w-4 h-4 mr-2" />
+                В архив
+              </Button>
+              <Button variant="destructive" onClick={deleteWithReason}>
+                <Trash2 className="w-4 h-4 mr-2" />
+                Удалить
+              </Button>
+            </div>
+          </div>
+        </div>
 
         <Tabs defaultValue="linear" className="space-y-6">
           <TabsList>
@@ -485,22 +558,7 @@ export default function ArticleEditor() {
                         <Archive className="w-4 h-4 mr-2" />
                         Archive
                       </Button>
-                      <Button
-                        variant="destructive"
-                        onClick={async () => {
-                          const reason = window.prompt(`Почему удалить статью #${articleId}?`);
-                          if (!reason || reason.trim().length < 5) return;
-                          setLoading("delete");
-                          try {
-                            await api.deleteArticle(articleId, reason.trim());
-                            navigate("/dashboard");
-                          } catch (err) {
-                            addLog("error", err instanceof Error ? err.message : "Delete failed");
-                          } finally {
-                            setLoading(null);
-                          }
-                        }}
-                      >
+                      <Button variant="destructive" onClick={deleteWithReason}>
                         <Trash2 className="w-4 h-4 mr-2" />
                         Delete
                       </Button>
