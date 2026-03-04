@@ -2486,7 +2486,25 @@ def auto_selection() -> dict:
 
 @app.post("/articles/{article_id}/publish")
 def publish(article_id: int) -> dict:
-    return publish_article(article_id)
+    out = publish_article(article_id)
+    if out.get("ok"):
+        return out
+
+    error_code = str(out.get("error") or "publish_failed")
+    hint = str(out.get("hint") or "").strip()
+
+    if error_code == "article_not_found":
+        raise HTTPException(status_code=404, detail="Article not found")
+    if error_code.startswith("publish_blocked_status:"):
+        raise HTTPException(status_code=409, detail=error_code)
+    if error_code == "publish_blocked_pending_review":
+        raise HTTPException(status_code=409, detail=error_code)
+    if error_code in {"publish_blocked_insufficient_content", "ru_content_required"}:
+        raise HTTPException(status_code=422, detail=hint or error_code)
+    if error_code == "telegram_not_configured":
+        raise HTTPException(status_code=503, detail=error_code)
+
+    raise HTTPException(status_code=400, detail=hint or error_code)
 
 
 @app.post("/articles/{article_id}/schedule-publish")
