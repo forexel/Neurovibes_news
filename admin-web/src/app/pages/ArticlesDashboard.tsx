@@ -3,6 +3,7 @@ import { Link, useLocation, useNavigate } from "react-router";
 import { TopNavigation } from "../components/TopNavigation";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
+import { Textarea } from "../components/ui/textarea";
 import { Badge } from "../components/ui/badge";
 import { Switch } from "../components/ui/switch";
 import { Label } from "../components/ui/label";
@@ -45,6 +46,7 @@ import {
   MoreVertical,
   Download,
   RotateCcw,
+  Save,
   Search,
   Send,
   Trash2,
@@ -161,6 +163,9 @@ export default function ArticlesDashboard() {
   const [collectionResult, setCollectionResult] = useState<AggregateJobStatus["result"] | null>(null);
   const [openActionsId, setOpenActionsId] = useState<number | null>(null);
   const [previewActionLoading, setPreviewActionLoading] = useState<"publish" | "delete" | null>(null);
+  const [previewMlConfirmed, setPreviewMlConfirmed] = useState(false);
+  const [previewMlComment, setPreviewMlComment] = useState("");
+  const [previewMlSaving, setPreviewMlSaving] = useState(false);
   const actionsRef = useRef<HTMLDivElement | null>(null);
 
   const totalPages = useMemo(() => Math.max(1, Math.ceil(total / Number(pageSize))), [pageSize, total]);
@@ -236,6 +241,12 @@ export default function ArticlesDashboard() {
   useEffect(() => {
     loadDashboard();
   }, [currentPage, navigate, noDoubleFilter, pageSize, searchQuery, selectedSection]);
+
+  useEffect(() => {
+    setPreviewMlConfirmed(Boolean(previewArticle?.ml_verdict_confirmed));
+    setPreviewMlComment(String(previewArticle?.ml_verdict_comment || ""));
+    setPreviewMlSaving(false);
+  }, [previewArticle?.id, previewArticle?.ml_verdict_confirmed, previewArticle?.ml_verdict_comment]);
 
   async function openPreview(articleId: number) {
     try {
@@ -319,6 +330,25 @@ export default function ArticlesDashboard() {
       setPreviewArticle(null);
     } finally {
       setPreviewActionLoading(null);
+    }
+  }
+
+  async function savePreviewMlVerdict() {
+    if (!previewArticle) return;
+    setPreviewMlSaving(true);
+    setError("");
+    try {
+      await api.saveMlVerdict(previewArticle.id, {
+        confirmed: previewMlConfirmed,
+        comment: previewMlComment.trim(),
+      });
+      const details = await api.getArticle(previewArticle.id);
+      setPreviewArticle(details);
+      await loadDashboard();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось сохранить ML-вердикт.");
+    } finally {
+      setPreviewMlSaving(false);
     }
   }
 
@@ -670,8 +700,9 @@ export default function ArticlesDashboard() {
         </div>
       </div>
 
-      <Dialog open={Boolean(previewArticle)} onOpenChange={(open) => !open && setPreviewArticle(null)}>
-        <DialogContent className="max-w-4xl [&>button]:right-3 [&>button]:top-3 [&>button]:h-9 [&>button]:w-9 [&>button]:rounded-md [&>button]:border [&>button]:border-border">
+      {previewArticle ? (
+        <Dialog open={Boolean(previewArticle)} onOpenChange={(open) => !open && setPreviewArticle(null)}>
+          <DialogContent className="max-w-4xl [&>button]:right-3 [&>button]:top-3 [&>button]:h-9 [&>button]:w-9 [&>button]:rounded-md [&>button]:border [&>button]:border-border">
           <DialogHeader>
             <DialogTitle className="pr-20 leading-tight">{previewArticle?.ru_title || previewArticle?.title}</DialogTitle>
             <DialogDescription className="flex items-center gap-2 flex-wrap">
@@ -703,6 +734,46 @@ export default function ArticlesDashboard() {
                 <div className="mt-1 text-muted-foreground whitespace-pre-wrap">{previewArticle.ml_recommendation_reason}</div>
               </div>
             ) : null}
+            <div className="rounded-lg border border-border bg-muted/40 p-3 text-sm space-y-3">
+              <div className="font-medium">Валидация ML</div>
+              <div className="text-muted-foreground">
+                Рекомендация:{" "}
+                {mlRecommendationLabel(previewArticle as ArticleListItem)?.text || "ML: нет рекомендации"}
+                {previewArticle?.ml_model_version ? ` · модель ${previewArticle.ml_model_version}` : ""}
+              </div>
+              <div className="flex items-center gap-3">
+                <Switch
+                  id="preview-ml-verdict-confirmed"
+                  checked={previewMlConfirmed}
+                  onCheckedChange={setPreviewMlConfirmed}
+                />
+                <Label htmlFor="preview-ml-verdict-confirmed" className="cursor-pointer">
+                  Согласен с вердиктом ML
+                </Label>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="preview-ml-verdict-comment">Комментарий</Label>
+                <Textarea
+                  id="preview-ml-verdict-comment"
+                  value={previewMlComment}
+                  onChange={(event) => setPreviewMlComment(event.target.value)}
+                  placeholder="Почему согласен / не согласен с выбором модели"
+                  rows={3}
+                />
+              </div>
+              <div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="gap-2"
+                  onClick={savePreviewMlVerdict}
+                  disabled={previewMlSaving}
+                >
+                  {previewMlSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                  Сохранить валидацию ML
+                </Button>
+              </div>
+            </div>
             {previewArticle?.feedback ? (
               <div className="rounded-lg border border-border bg-muted/40 p-3 text-sm">
                 <div className="font-medium">Комментарий редактора</div>
@@ -771,8 +842,9 @@ export default function ArticlesDashboard() {
               ) : null}
             </div>
           </div>
-        </DialogContent>
-      </Dialog>
+          </DialogContent>
+        </Dialog>
+      ) : null}
     </div>
   );
 }
