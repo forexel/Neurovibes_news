@@ -233,65 +233,6 @@ export default function ArticleEditor() {
           </div>
         ) : null}
 
-        <div className="mb-6 bg-card border border-border rounded-lg p-6">
-          <h3 className="font-semibold mb-4">Управление публикацией</h3>
-          <div className="space-y-4">
-            <div className="space-y-2">
-              <Label htmlFor="quick-schedule">Отложенная публикация</Label>
-              <div className="flex flex-wrap gap-2">
-                <Popover open={schedulePopoverOpen} onOpenChange={setSchedulePopoverOpen}>
-                  <PopoverTrigger asChild>
-                    <Button id="quick-schedule" type="button" variant="outline" className="justify-start text-left font-normal min-w-56">
-                      <Calendar className="mr-2 h-4 w-4" />
-                      {selectedScheduleDate ? format(selectedScheduleDate, "d MMMM yyyy", { locale: ru }) : "Выбрать дату"}
-                    </Button>
-                  </PopoverTrigger>
-                  <PopoverContent className="w-auto p-0" align="start">
-                    <DateCalendar
-                      mode="single"
-                      selected={selectedScheduleDate}
-                      onSelect={(date) => {
-                        setScheduleDate((current) => updateScheduleValue(current, date));
-                        setSchedulePopoverOpen(false);
-                      }}
-                    />
-                  </PopoverContent>
-                </Popover>
-                <Input
-                  type="time"
-                  value={scheduleDate ? scheduleDate.slice(11, 16) : ""}
-                  onChange={(e) => setScheduleDate((current) => updateScheduleValue(current, undefined, e.target.value || "10:00"))}
-                  className="w-32"
-                />
-                <Button
-                  onClick={() => run("Schedule", () => api.postArticleAction(articleId, "schedule-publish", { publish_at: scheduleDate }))}
-                  disabled={!scheduleDate}
-                >
-                  <Calendar className="w-4 h-4 mr-2" />
-                  Запланировать
-                </Button>
-                <Button variant="outline" onClick={() => run("Clear Schedule", () => api.postArticleAction(articleId, "unschedule-publish"))}>
-                  Очистить
-                </Button>
-              </div>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <Button onClick={() => run("Publish", publishWithReason)} disabled={hasInsufficientContent}>
-                <Send className="w-4 h-4 mr-2" />
-                Опубликовать
-              </Button>
-              <Button variant="outline" onClick={() => run("Archive", () => api.postArticleAction(articleId, "status", { status: "rejected" }))}>
-                <Archive className="w-4 h-4 mr-2" />
-                В архив
-              </Button>
-              <Button variant="destructive" onClick={deleteWithReason}>
-                <Trash2 className="w-4 h-4 mr-2" />
-                Удалить
-              </Button>
-            </div>
-          </div>
-        </div>
-
         <Tabs defaultValue="linear" className="space-y-6">
           <TabsList>
             <TabsTrigger value="linear">Линейный режим</TabsTrigger>
