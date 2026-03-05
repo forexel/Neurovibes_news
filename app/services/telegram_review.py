@@ -42,6 +42,27 @@ _SQLI_PATTERNS = [
     re.compile(r"(--|/\*|\*/)"),
 ]
 
+_PUBLISH_TAGS_RU_TO_EN = [
+    ("Практичный инструмент", "practical_tool"),
+    ("Практичный кейс", "practical_case"),
+    ("Релевантно РФ", "ru_relevance"),
+    ("Вау-эффект", "wow_positive"),
+    ("Влияние в будущем", "future_impact"),
+    ("Влияние на бизнес", "business_impact"),
+]
+
+_DELETE_TAGS_RU_TO_EN = [
+    ("Слишком техническое", "too_technical"),
+    ("Политика/шум", "politics_noise"),
+    ("Инвестиции/оценка", "investment_noise"),
+    ("Кадровые назначения", "hiring_roles_noise"),
+    ("Низкая значимость", "low_significance"),
+    ("Нет практической пользы", "no_business_use"),
+    ("Не про AI/ML", "non_ai"),
+    ("Недостаточно контента", "content_incomplete"),
+    ("Дубль", "duplicate"),
+]
+
 def _post_decision_recalc() -> None:
     # Cheap recalc only: re-apply gates and update hourly selection using existing scores.
     try:
@@ -469,6 +490,95 @@ def _set_kv(session, key: str, value: str) -> None:
         session.add(TelegramBotKV(key=key, value=value, updated_at=datetime.utcnow()))
 
 
+def _pending_tags_key(chat_id: str, article_id: int, action: str) -> str:
+    return f"telegram_pending_tags:{chat_id}:{int(article_id)}:{(action or '').strip().lower()}"
+
+
+def _append_pending_tag(chat_id: str, article_id: int, action: str, tag: str) -> list[str]:
+    clean_tag = str(tag or "").strip().lower()
+    if not clean_tag:
+        return []
+    key = _pending_tags_key(chat_id, article_id, action)
+    with session_scope() as session:
+        raw = (_get_kv(session, key, "") or "").strip()
+        tags = [x.strip() for x in raw.split(",") if x.strip()]
+        if clean_tag not in tags:
+            tags.append(clean_tag)
+        _set_kv(session, key, ",".join(tags))
+        return tags
+
+
+def _consume_pending_tags(chat_id: str, article_id: int, action: str) -> list[str]:
+    key = _pending_tags_key(chat_id, article_id, action)
+    with session_scope() as session:
+        raw = (_get_kv(session, key, "") or "").strip()
+        tags = [x.strip() for x in raw.split(",") if x.strip()]
+        row = session.get(TelegramBotKV, key)
+        if row is not None:
+            session.delete(row)
+        return tags
+
+
+def _build_tag_picker_kb(article_id: int, action: str) -> dict:
+    action_l = (action or "").strip().lower()
+    pairs = _PUBLISH_TAGS_RU_TO_EN if action_l in {"publish_now", "schedule_1h", "schedule_custom"} else _DELETE_TAGS_RU_TO_EN
+    rows: list[list[dict[str, str]]] = []
+    row: list[dict[str, str]] = []
+    for ru_label, en_tag in pairs:
+        row.append({"text": ru_label, "callback_data": f"rv:tag:{int(article_id)}:{action_l}:{en_tag}"})
+        if len(row) >= 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([{"text": "Готово, ввести причину", "callback_data": f"rv:tagdone:{int(article_id)}:{action_l}"}])
+    return {"inline_keyboard": rows}
+
+
+def _reason_with_tags(action: str, reason: str, tags: list[str]) -> str:
+    txt = (reason or "").strip()
+    clean_tags = [str(x).strip().lower() for x in (tags or []) if str(x).strip()]
+    tag_set = set(clean_tags)
+    action_l = (action or "").strip().lower()
+
+    decision = "publish"
+    if action_l in {"delete", "hide"}:
+        decision = "delete"
+    elif action_l in {"schedule_1h", "schedule_custom", "later"}:
+        decision = "defer"
+
+    ai_ml_relevance = 0 if "non_ai" in tag_set else 1
+    audience_fit = 0 if "too_technical" in tag_set else 1
+    practical_value = 0 if "no_business_use" in tag_set else 1
+    content_completeness = 0 if "content_incomplete" in tag_set else 1
+    non_duplicate = 0 if "duplicate" in tag_set else 1
+    risk_level_ok = 0 if {"politics_noise", "investment_noise", "hiring_roles_noise"} & tag_set else 1
+
+    novelty_positive = {
+        "practical_tool",
+        "practical_case",
+        "ru_relevance",
+        "wow_positive",
+        "future_impact",
+        "business_impact",
+    }
+    novelty_signal = 1 if (novelty_positive & tag_set) else 0
+
+    lines = [
+        f"decision={decision}",
+        f"ai_ml_relevance={ai_ml_relevance}",
+        f"audience_fit={audience_fit}",
+        f"practical_value={practical_value}",
+        f"content_completeness={content_completeness}",
+        f"non_duplicate={non_duplicate}",
+        f"risk_level_ok={risk_level_ok}",
+        f"novelty_signal={novelty_signal}",
+        f"tags={','.join(clean_tags)}" if clean_tags else "tags=",
+        f"reason_text={txt}",
+    ]
+    return "\n".join(lines)
+
+
 def _archive_article_with_reason(article_id: int, reason: str) -> dict:
     with session_scope() as session:
         article = session.get(Article, article_id)
@@ -894,11 +1004,28 @@ def _handle_callback(update: dict) -> dict:
         _send_message(chat_id, "Когда публиковать?", reply_markup=kb)
         return {"ok": True, "action": "publish_choose_time", "article_id": article_id}
 
-    if action == "pubnow":
-        # This callback comes from the temporary "Когда публиковать?" chooser; remove it entirely.
+    if action == "tag":
+        if len(parts) < 5:
+            return {"ok": True, "skipped": "bad_tag_callback"}
+        pending_action = str(parts[3] or "").strip().lower()
+        tag = str(parts[4] or "").strip().lower()
+        tags = _append_pending_tag(chat_id, article_id, pending_action, tag)
+        if callback_id:
+            _answer_callback(callback_id, f"Добавлено тегов: {len(tags)}")
+        return {"ok": True, "action": "tag_added", "article_id": article_id, "pending_action": pending_action, "tag": tag, "tags": tags}
+
+    if action == "tagdone":
+        if len(parts) < 4:
+            return {"ok": True, "skipped": "bad_tagdone_callback"}
+        pending_action = str(parts[3] or "").strip().lower()
+        tags = _consume_pending_tags(chat_id, article_id, pending_action)
         _delete_message(chat_id, message_id)
-        # Safety: do NOT publish immediately. Ask for reason first, then publish in message handler.
-        prompt = _send_message(chat_id, "Почему публикуем сейчас? Ответь реплаем на это сообщение.", force_reply=True)
+        tags_line = ",".join(tags) if tags else "нет"
+        prompt = _send_message(
+            chat_id,
+            f"Теги: {tags_line}\nНапиши краткую причину (1-2 предложения). Ответь реплаем.",
+            force_reply=True,
+        )
         if prompt.get("ok"):
             prompt_id = str((prompt.get("result") or {}).get("message_id") or "")
             if prompt_id:
@@ -908,12 +1035,21 @@ def _handle_callback(update: dict) -> dict:
                             chat_id=chat_id,
                             user_id=user_id or "0",
                             article_id=article_id,
-                            action="publish_now",
+                            action=pending_action,
                             prompt_message_id=prompt_id,
                             created_at=datetime.utcnow(),
                         )
                     )
-        return {"ok": True, "action": "publish_now_pending_reason", "article_id": article_id}
+                    if tags:
+                        _set_kv(session, _pending_tags_key(chat_id, article_id, f"{pending_action}:ready"), ",".join(tags))
+        return {"ok": True, "action": "tag_done_wait_reason", "article_id": article_id, "pending_action": pending_action, "tags": tags}
+
+    if action == "pubnow":
+        # This callback comes from the temporary "Когда публиковать?" chooser; remove it entirely.
+        _delete_message(chat_id, message_id)
+        kb = _build_tag_picker_kb(article_id, "publish_now")
+        _send_message(chat_id, "Выбери теги причины публикации (можно несколько), потом нажми «Готово»:", reply_markup=kb)
+        return {"ok": True, "action": "publish_now_pick_tags", "article_id": article_id}
 
     if action == "pub1h":
         # This callback comes from the temporary "Когда публиковать?" chooser; remove it entirely.
@@ -923,22 +1059,9 @@ def _handle_callback(update: dict) -> dict:
             if article:
                 article.scheduled_publish_at = datetime.utcnow() + timedelta(hours=1)
                 article.updated_at = datetime.utcnow()
-        prompt = _send_message(chat_id, "Поставил публикацию через 1 час. Почему выбрал именно эту новость? Ответь реплаем.", force_reply=True)
-        if prompt.get("ok"):
-            prompt_id = str((prompt.get("result") or {}).get("message_id") or "")
-            if prompt_id:
-                with session_scope() as session:
-                    session.add(
-                        TelegramPendingReason(
-                            chat_id=chat_id,
-                            user_id=user_id or "0",
-                            article_id=article_id,
-                            action="schedule_1h",
-                            prompt_message_id=prompt_id,
-                            created_at=datetime.utcnow(),
-                        )
-                    )
-        return {"ok": True, "action": "publish_plus_1h", "article_id": article_id}
+        kb = _build_tag_picker_kb(article_id, "schedule_1h")
+        _send_message(chat_id, "Поставил +1 час. Выбери теги причины, затем нажми «Готово»:", reply_markup=kb)
+        return {"ok": True, "action": "publish_plus_1h_pick_tags", "article_id": article_id}
 
     if action == "pubpick":
         # This callback comes from the temporary "Когда публиковать?" chooser; remove it entirely.
@@ -972,22 +1095,9 @@ def _handle_callback(update: dict) -> dict:
             if art:
                 art.scheduled_publish_at = None
                 art.updated_at = datetime.utcnow()
-        prompt = _send_message(chat_id, "Почему удаляем эту новость? Ответь реплаем на это сообщение.", force_reply=True)
-        if prompt.get("ok"):
-            prompt_id = str((prompt.get("result") or {}).get("message_id") or "")
-            if prompt_id:
-                with session_scope() as session:
-                    session.add(
-                        TelegramPendingReason(
-                            chat_id=chat_id,
-                            user_id=user_id or "0",
-                            article_id=article_id,
-                            action="delete",
-                            prompt_message_id=prompt_id,
-                            created_at=datetime.utcnow(),
-                        )
-                    )
-        return {"ok": True, "action": "delete", "article_id": article_id}
+        kb = _build_tag_picker_kb(article_id, "delete")
+        _send_message(chat_id, "Выбери теги причины удаления (можно несколько), затем «Готово»:", reply_markup=kb)
+        return {"ok": True, "action": "delete_pick_tags", "article_id": article_id}
 
     if action == "hide":
         _edit_message_reply_markup(chat_id, message_id)
@@ -997,22 +1107,9 @@ def _handle_callback(update: dict) -> dict:
             if art:
                 art.scheduled_publish_at = None
                 art.updated_at = datetime.utcnow()
-        prompt = _send_message(chat_id, "Почему скрываем (не удаляем) эту новость? Ответь реплаем.", force_reply=True)
-        if prompt.get("ok"):
-            prompt_id = str((prompt.get("result") or {}).get("message_id") or "")
-            if prompt_id:
-                with session_scope() as session:
-                    session.add(
-                        TelegramPendingReason(
-                            chat_id=chat_id,
-                            user_id=user_id or "0",
-                            article_id=article_id,
-                            action="hide",
-                            prompt_message_id=prompt_id,
-                            created_at=datetime.utcnow(),
-                        )
-                    )
-        return {"ok": True, "action": "hide", "article_id": article_id}
+        kb = _build_tag_picker_kb(article_id, "hide")
+        _send_message(chat_id, "Выбери теги причины скрытия, затем «Готово»:", reply_markup=kb)
+        return {"ok": True, "action": "hide_pick_tags", "article_id": article_id}
 
     if action == "later":
         _edit_message_reply_markup(chat_id, message_id)
@@ -1073,6 +1170,7 @@ def _handle_message(update: dict) -> dict:
             return {"ok": True, "skipped": "no_pending"}
         article_id = int(pending.article_id)
         action = pending.action
+    ready_tags = _consume_pending_tags(chat_id, article_id, f"{action}:ready")
 
     ok_input, safe_text, input_error = _sanitize_reason_input(text)
     if not ok_input:
@@ -1089,10 +1187,11 @@ def _handle_message(update: dict) -> dict:
             ).first()
             if pending:
                 session.delete(pending)
-            session.add(EditorFeedback(article_id=article_id, explanation_text=safe_text))
+            reason_payload = _reason_with_tags(action, safe_text, ready_tags)
+            session.add(EditorFeedback(article_id=article_id, explanation_text=reason_payload))
             job = session.scalars(select(TelegramReviewJob).where(TelegramReviewJob.article_id == article_id)).first()
             if job:
-                job.decision_reason = safe_text
+                job.decision_reason = reason_payload
                 job.updated_at = datetime.utcnow()
         # Keep chat clean: remove bot prompt + user's reply + original preview message.
         _delete_message(chat_id, prompt_id)
@@ -1106,6 +1205,7 @@ def _handle_message(update: dict) -> dict:
         return {"ok": True, "action": "publish_reason_saved", "article_id": article_id}
 
     if action == "publish_now":
+        reason_payload = _reason_with_tags(action, safe_text, ready_tags)
         out = publish_article(article_id)
         with session_scope() as session:
             pending = session.scalars(
@@ -1116,18 +1216,18 @@ def _handle_message(update: dict) -> dict:
             ).first()
             if pending:
                 session.delete(pending)
-            session.add(EditorFeedback(article_id=article_id, explanation_text=safe_text))
+            session.add(EditorFeedback(article_id=article_id, explanation_text=reason_payload))
             job = session.scalars(select(TelegramReviewJob).where(TelegramReviewJob.article_id == article_id)).first()
             if job:
                 job.status = "published" if out.get("ok") else "failed"
-                job.decision_reason = safe_text
+                job.decision_reason = reason_payload
                 job.updated_at = datetime.utcnow()
         if out.get("ok"):
             _safe_log_training_event(
                 article_id=article_id,
                 decision="publish",
                 label=1,
-                reason_text=safe_text,
+                reason_text=reason_payload,
                 user_id=_safe_user_id_int(user_id),
                 override=False,
                 final_outcome="published",
@@ -1136,6 +1236,7 @@ def _handle_message(update: dict) -> dict:
         _delete_message(chat_id, prompt_id)
         if msg_id:
             _delete_message(chat_id, msg_id)
+        reason_payload = _reason_with_tags(action, safe_text, ready_tags)
         with session_scope() as session:
             job = session.scalars(select(TelegramReviewJob).where(TelegramReviewJob.article_id == article_id)).first()
             if job and (job.review_message_id or "").strip():
@@ -1144,6 +1245,7 @@ def _handle_message(update: dict) -> dict:
         return {"ok": True, "action": "publish_now_done", "article_id": article_id, "publish": out}
 
     if action == "schedule_1h":
+        reason_payload = _reason_with_tags(action, safe_text, ready_tags)
         with session_scope() as session:
             pending = session.scalars(
                 select(TelegramPendingReason).where(
@@ -1153,17 +1255,17 @@ def _handle_message(update: dict) -> dict:
             ).first()
             if pending:
                 session.delete(pending)
-            session.add(EditorFeedback(article_id=article_id, explanation_text=f"SCHEDULE(+1h): {safe_text}"))
+            session.add(EditorFeedback(article_id=article_id, explanation_text=f"SCHEDULE(+1h): {reason_payload}"))
             job = session.scalars(select(TelegramReviewJob).where(TelegramReviewJob.article_id == article_id)).first()
             if job:
                 job.status = "scheduled"
-                job.decision_reason = safe_text
+                job.decision_reason = reason_payload
                 job.updated_at = datetime.utcnow()
         _safe_log_training_event(
             article_id=article_id,
             decision="defer",
             label=0,
-            reason_text=safe_text,
+            reason_text=reason_payload,
             user_id=_safe_user_id_int(user_id),
             final_outcome=None,
         )
@@ -1241,6 +1343,7 @@ def _handle_message(update: dict) -> dict:
         return {"ok": True, "action": "scheduled_custom_time", "article_id": article_id, "scheduled_utc": dt_utc.isoformat(sep=" ", timespec="seconds")}
 
     if action == "schedule_custom":
+        reason_payload = _reason_with_tags(action, safe_text, ready_tags)
         with session_scope() as session:
             pending = session.scalars(
                 select(TelegramPendingReason).where(
@@ -1250,17 +1353,17 @@ def _handle_message(update: dict) -> dict:
             ).first()
             if pending:
                 session.delete(pending)
-            session.add(EditorFeedback(article_id=article_id, explanation_text=f"SCHEDULE(custom): {safe_text}"))
+            session.add(EditorFeedback(article_id=article_id, explanation_text=f"SCHEDULE(custom): {reason_payload}"))
             job = session.scalars(select(TelegramReviewJob).where(TelegramReviewJob.article_id == article_id)).first()
             if job:
                 job.status = "scheduled"
-                job.decision_reason = safe_text
+                job.decision_reason = reason_payload
                 job.updated_at = datetime.utcnow()
         _safe_log_training_event(
             article_id=article_id,
             decision="defer",
             label=0,
-            reason_text=safe_text,
+            reason_text=reason_payload,
             user_id=_safe_user_id_int(user_id),
             final_outcome=None,
         )
@@ -1275,7 +1378,8 @@ def _handle_message(update: dict) -> dict:
         return {"ok": True, "action": "schedule_custom_reason_saved", "article_id": article_id}
 
     if action == "delete":
-        out = _archive_article_with_reason(article_id=article_id, reason=safe_text)
+        reason_payload = _reason_with_tags(action, safe_text, ready_tags)
+        out = _archive_article_with_reason(article_id=article_id, reason=reason_payload)
         with session_scope() as session:
             pending = session.scalars(
                 select(TelegramPendingReason).where(
@@ -1288,14 +1392,14 @@ def _handle_message(update: dict) -> dict:
             job = session.scalars(select(TelegramReviewJob).where(TelegramReviewJob.article_id == article_id)).first()
             if job:
                 job.status = "deleted" if out.get("ok") else "failed"
-                job.decision_reason = safe_text
+                job.decision_reason = reason_payload
                 job.updated_at = datetime.utcnow()
         if out.get("ok"):
             _safe_log_training_event(
                 article_id=article_id,
                 decision="delete",
                 label=0,
-                reason_text=safe_text,
+                reason_text=reason_payload,
                 user_id=_safe_user_id_int(user_id),
                 final_outcome="deleted",
             )
@@ -1310,6 +1414,7 @@ def _handle_message(update: dict) -> dict:
         return {"ok": True, "action": "delete_reason_saved", "article_id": article_id, "delete": out}
 
     if action == "hide":
+        reason_payload = _reason_with_tags(action, safe_text, ready_tags)
         with session_scope() as session:
             pending = session.scalars(
                 select(TelegramPendingReason).where(
@@ -1323,20 +1428,20 @@ def _handle_message(update: dict) -> dict:
             if article:
                 article.status = ArticleStatus.ARCHIVED
                 article.archived_kind = "hide"
-                article.archived_reason = safe_text
+                article.archived_reason = reason_payload
                 article.archived_at = datetime.utcnow()
                 article.updated_at = datetime.utcnow()
-            session.add(EditorFeedback(article_id=article_id, explanation_text=f"HIDE: {safe_text}"))
+            session.add(EditorFeedback(article_id=article_id, explanation_text=f"HIDE: {reason_payload}"))
             job = session.scalars(select(TelegramReviewJob).where(TelegramReviewJob.article_id == article_id)).first()
             if job:
                 job.status = "deleted"
-                job.decision_reason = safe_text
+                job.decision_reason = reason_payload
                 job.updated_at = datetime.utcnow()
         _safe_log_training_event(
             article_id=article_id,
             decision="hide",
             label=0,
-            reason_text=safe_text,
+            reason_text=reason_payload,
             user_id=_safe_user_id_int(user_id),
             final_outcome="hidden",
         )

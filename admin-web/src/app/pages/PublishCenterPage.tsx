@@ -18,6 +18,9 @@ import { api, ApiError, ArticleListItem, formatDateTime, SetupState } from "../l
 
 type PublishPanel = "actionable" | "scheduled" | "deleted" | "published";
 
+const ML_REVIEW_MIN = 0.4;
+const ML_REVIEW_MAX = 0.75;
+
 export default function PublishCenterPage() {
   const navigate = useNavigate();
   const [setupState, setSetupState] = useState<SetupState | null>(null);
@@ -85,13 +88,38 @@ export default function PublishCenterPage() {
         .sort((a, b) => String(a.scheduled_publish_at || "").localeCompare(String(b.scheduled_publish_at || ""))),
     [allArticles],
   );
+  const needsMlValidation = (item: ArticleListItem) => {
+    if (["published", "archived", "rejected", "double"].includes(String(item.status || "").toLowerCase())) {
+      return false;
+    }
+    if (String(item.content_mode || "").toLowerCase() === "summary_only") {
+      return false;
+    }
+    const rec = String(item.ml_recommendation || "").toLowerCase();
+    const hasMl = Boolean(rec) || Boolean(item.ml_recommendation_at);
+    if (!hasMl) return false;
+
+    const conf = typeof item.ml_recommendation_confidence === "number" ? item.ml_recommendation_confidence : null;
+    const inGrayBand = conf !== null && conf >= ML_REVIEW_MIN && conf <= ML_REVIEW_MAX;
+    const explicitReview = rec === "review";
+    const notValidated = !item.ml_verdict_updated_at;
+    return explicitReview || inGrayBand || notValidated;
+  };
   const draftsArticles = useMemo(
     () =>
-      allArticles.filter(
-        (item) =>
-          ["review", "scored", "selected_hourly", "ready"].includes(item.status) &&
-          String(item.content_mode || "").toLowerCase() !== "summary_only",
-      ),
+      allArticles
+        .filter((item) => {
+          const isOperationalQueue =
+            ["review", "scored", "selected_hourly", "ready"].includes(item.status) &&
+            String(item.content_mode || "").toLowerCase() !== "summary_only";
+          return isOperationalQueue || needsMlValidation(item);
+        })
+        .sort((a, b) => {
+          const aVal = needsMlValidation(a) ? 1 : 0;
+          const bVal = needsMlValidation(b) ? 1 : 0;
+          if (aVal !== bVal) return bVal - aVal;
+          return String(b.created_at || b.published_at || "").localeCompare(String(a.created_at || a.published_at || ""));
+        }),
     [allArticles],
   );
 
