@@ -66,6 +66,19 @@ RUNTIME_DEFAULTS: dict[str, str] = {
     "ml_review_min_confidence": "0.72",
     "ml_recommend_publish_threshold": "0.72",
     "ml_recommend_delete_threshold": "0.28",
+    # User-vector retrieval ranking (pos - alpha * neg)
+    "user_vector_alpha": "0.60",
+    "user_vector_window_days": "30",
+    "user_vector_half_life_days": "7",
+    "user_vector_max_events": "500",
+    "user_vector_manual_weight": "4",
+    "user_vector_positive_statuses_csv": "published,selected_hourly",
+    "user_vector_negative_statuses_csv": "deleted,archived,rejected",
+    "user_vector_split_by_content_type": "true",
+    # Auto disable low-value sources in Sources page
+    "source_auto_disable_enabled": "true",
+    "source_auto_disable_days": "14",
+    "source_auto_disable_min_attempts": "12",
     # Hour-end article selection strategy.
     # Examples: "09:script,10:ml,11:off"
     "hourly_slot_strategy_csv": os.getenv("HOURLY_SLOT_STRATEGY_CSV", "").strip(),

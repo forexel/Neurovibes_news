@@ -8,10 +8,13 @@ from zoneinfo import ZoneInfo
 
 from app.db import init_db
 from app.db import session_scope
+from app.models import Article
+from app.models import ArticleStatus
 from app.models import EditorFeedback
+from app.models import Source
 from app.models import UserWorkspace
 from app.models import TelegramBotKV
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from app.services.bootstrap import seed_sources
 from app.services.pipeline import pick_hourly_top, run_hourly_cycle
 from app.services.preference import reretag_today_training_event_reasons, train_editor_choice_model
@@ -25,6 +28,8 @@ from app.services.telegram_context import load_workspace_telegram_context
 from app.services.llm import get_workspace_api_key, set_user_api_key
 from app.services.telegram_context import telegram_timezone_name
 from app.services.runtime_settings import get_runtime_float
+from app.services.runtime_settings import get_runtime_bool
+from app.services.runtime_settings import get_runtime_int
 
 
 INTERVAL_SECONDS = int(os.getenv("WORKER_INTERVAL_SECONDS", "3600"))
@@ -189,6 +194,55 @@ def _worker_local_now() -> datetime:
     return datetime.now(tz)
 
 
+def _auto_disable_cold_sources() -> dict:
+    enabled = get_runtime_bool("source_auto_disable_enabled", default=True)
+    if not enabled:
+        return {"ok": True, "enabled": False, "disabled": 0}
+    days = int(max(1, get_runtime_int("source_auto_disable_days", default=14)))
+    min_attempts = int(max(1, get_runtime_int("source_auto_disable_min_attempts", default=12)))
+    since = datetime.utcnow() - timedelta(days=days)
+
+    with session_scope() as session:
+        rows = session.execute(
+            select(
+                Article.source_id.label("source_id"),
+                func.count(Article.id).label("attempts"),
+                func.sum(case((Article.status == ArticleStatus.PUBLISHED, 1), else_=0)).label("published"),
+            )
+            .where(
+                Article.created_at >= since,
+                Article.source_id.is_not(None),
+            )
+            .group_by(Article.source_id)
+        ).all()
+
+        disabled_ids: list[int] = []
+        scanned = 0
+        for row in rows:
+            source_id = int(row.source_id or 0)
+            if source_id <= 0:
+                continue
+            attempts = int(row.attempts or 0)
+            published = int(row.published or 0)
+            scanned += 1
+            if attempts < min_attempts or published > 0:
+                continue
+            source = session.get(Source, source_id)
+            if not source or not bool(source.is_active):
+                continue
+            source.is_active = False
+            disabled_ids.append(source_id)
+    return {
+        "ok": True,
+        "enabled": True,
+        "days": days,
+        "min_attempts": min_attempts,
+        "scanned": scanned,
+        "disabled": len(disabled_ids),
+        "source_ids": disabled_ids[:100],
+    }
+
+
 def _run_daily_ml_maintenance_thread(local_day_key: str) -> None:
     _load_default_user_context()
     _set_worker_kv("worker_daily_ml_state", "running")
@@ -197,9 +251,11 @@ def _run_daily_ml_maintenance_thread(local_day_key: str) -> None:
     try:
         reasons_out = reretag_today_training_event_reasons(limit=50, overwrite=False)
         editor_out = train_editor_choice_model(days_back=1, min_samples=8)
+        source_out = _auto_disable_cold_sources()
         result = {
             "reason_retag_today": reasons_out,
             "editor_choice_train": editor_out,
+            "source_auto_disable": source_out,
         }
         print("[worker] daily ml maintenance", result, flush=True)
         _set_worker_kv("worker_daily_ml_last_run_local_date", local_day_key)
