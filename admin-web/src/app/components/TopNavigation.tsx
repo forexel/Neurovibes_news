@@ -2,13 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router";
 import { Button } from "./ui/button";
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "./ui/dropdown-menu";
-import {
   FileText,
   Settings,
   Zap,
@@ -103,113 +96,95 @@ export function TopNavigation() {
               </Link>
             </Button>
 
-            <DropdownMenu open={openMenu === "actions"} onOpenChange={(open) => setOpenMenu(open ? "actions" : null)}>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="gap-2"
-                  onClick={() => setOpenMenu((value) => (value === "actions" ? null : "actions"))}
-                  onPointerEnter={() => openMenuHover("actions")}
-                  onMouseEnter={() => openMenuHover("actions")}
-                  onMouseLeave={() => closeMenuHover("actions")}
-                >
-                  <Zap className="w-4 h-4" />
-                  Действия
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent
-                align="start"
-                sideOffset={0}
-                className="w-56"
-                collisionPadding={8}
-                onPointerEnter={() => openMenuHover("actions")}
-                onMouseEnter={() => openMenuHover("actions")}
-                onMouseLeave={() => closeMenuHover("actions")}
+            <div
+              className="relative"
+              onPointerEnter={() => openMenuHover("actions")}
+              onMouseEnter={() => openMenuHover("actions")}
+              onMouseLeave={() => closeMenuHover("actions")}
+            >
+              <Button
+                variant="ghost"
+                size="sm"
+                className="gap-2"
+                onClick={() => setOpenMenu((value) => (value === "actions" ? null : "actions"))}
               >
-                <DropdownMenuItem onClick={() => runAction("Собрать за час", () => api.startAggregate("hour"))}>
-                  <Database className="w-4 h-4 mr-2" />
-                  Собрать за час
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => runAction("Собрать за день", () => api.startAggregate("day"))}>
-                  <Database className="w-4 h-4 mr-2" />
-                  Собрать за день
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => runAction("Собрать за неделю", () => api.startAggregate("week"))}>
-                  <Database className="w-4 h-4 mr-2" />
-                  Собрать за неделю
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => runAction("Собрать за месяц", () => api.startAggregate("month"))}>
-                  <Database className="w-4 h-4 mr-2" />
-                  Собрать за месяц
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem onClick={() => runAction("Запустить Pipeline", () => api.startPipeline(1))}>
-                  <Zap className="w-4 h-4 mr-2" />
-                  Запустить Pipeline
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => runAction("Оценить новые", () => api.startScoring(300))}>
-                  <FileText className="w-4 h-4 mr-2" />
-                  Оценить новые
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => runAction("Получить полный текст", () => api.startEnrich(30, 300))}>
-                  <FileText className="w-4 h-4 mr-2" />
-                  Получить полный текст
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem onClick={() => runAction("Отсев не-AI", () => api.pruneNonAi(20000))}>
-                  Очистить не-AI
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => runAction("Пересобрать профиль", () => api.rebuildProfile())}>
-                  Пересобрать профиль
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+                <Zap className="w-4 h-4" />
+                Действия
+              </Button>
+              {openMenu === "actions" ? (
+                <div className="absolute left-0 top-full z-[120] mt-1 w-56 rounded-md border border-border bg-popover p-1 shadow-md">
+                  <button type="button" className="top-nav-menu-item" onClick={() => runAction("Собрать за час", () => api.startAggregate("hour"))}>
+                    <Database className="w-4 h-4 mr-2" />
+                    Собрать за час
+                  </button>
+                  <button type="button" className="top-nav-menu-item" onClick={() => runAction("Собрать за день", () => api.startAggregate("day"))}>
+                    <Database className="w-4 h-4 mr-2" />
+                    Собрать за день
+                  </button>
+                  <button type="button" className="top-nav-menu-item" onClick={() => runAction("Собрать за неделю", () => api.startAggregate("week"))}>
+                    <Database className="w-4 h-4 mr-2" />
+                    Собрать за неделю
+                  </button>
+                  <button type="button" className="top-nav-menu-item" onClick={() => runAction("Собрать за месяц", () => api.startAggregate("month"))}>
+                    <Database className="w-4 h-4 mr-2" />
+                    Собрать за месяц
+                  </button>
+                  <div className="my-1 h-px bg-border" />
+                  <button type="button" className="top-nav-menu-item" onClick={() => runAction("Запустить Pipeline", () => api.startPipeline(1))}>
+                    <Zap className="w-4 h-4 mr-2" />
+                    Запустить Pipeline
+                  </button>
+                  <button type="button" className="top-nav-menu-item" onClick={() => runAction("Оценить новые", () => api.startScoring(300))}>
+                    <FileText className="w-4 h-4 mr-2" />
+                    Оценить новые
+                  </button>
+                  <button type="button" className="top-nav-menu-item" onClick={() => runAction("Получить полный текст", () => api.startEnrich(30, 300))}>
+                    <FileText className="w-4 h-4 mr-2" />
+                    Получить полный текст
+                  </button>
+                  <div className="my-1 h-px bg-border" />
+                  <button type="button" className="top-nav-menu-item" onClick={() => runAction("Отсев не-AI", () => api.pruneNonAi(20000))}>
+                    Очистить не-AI
+                  </button>
+                  <button type="button" className="top-nav-menu-item" onClick={() => runAction("Пересобрать профиль", () => api.rebuildProfile())}>
+                    Пересобрать профиль
+                  </button>
+                </div>
+              ) : null}
+            </div>
 
-            <DropdownMenu open={openMenu === "tools"} onOpenChange={(open) => setOpenMenu(open ? "tools" : null)}>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="gap-2"
-                  onClick={() => setOpenMenu((value) => (value === "tools" ? null : "tools"))}
-                  onPointerEnter={() => openMenuHover("tools")}
-                  onMouseEnter={() => openMenuHover("tools")}
-                  onMouseLeave={() => closeMenuHover("tools")}
-                >
-                  <Wrench className="w-4 h-4" />
-                  Инструменты
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent
-                align="start"
-                sideOffset={0}
-                className="w-48"
-                collisionPadding={8}
-                onPointerEnter={() => openMenuHover("tools")}
-                onMouseEnter={() => openMenuHover("tools")}
-                onMouseLeave={() => closeMenuHover("tools")}
+            <div
+              className="relative"
+              onPointerEnter={() => openMenuHover("tools")}
+              onMouseEnter={() => openMenuHover("tools")}
+              onMouseLeave={() => closeMenuHover("tools")}
+            >
+              <Button
+                variant="ghost"
+                size="sm"
+                className="gap-2"
+                onClick={() => setOpenMenu((value) => (value === "tools" ? null : "tools"))}
               >
-                <DropdownMenuItem asChild>
-                  <Link to="/bot" className="cursor-pointer">
+                <Wrench className="w-4 h-4" />
+                Инструменты
+              </Button>
+              {openMenu === "tools" ? (
+                <div className="absolute left-0 top-full z-[120] mt-1 w-48 rounded-md border border-border bg-popover p-1 shadow-md">
+                  <Link to="/bot" className="top-nav-menu-item">
                     <Bot className="w-4 h-4 mr-2" />
                     Бот
                   </Link>
-                </DropdownMenuItem>
-                <DropdownMenuItem asChild>
-                  <Link to="/publish" className="cursor-pointer">
+                  <Link to="/publish" className="top-nav-menu-item">
                     <Send className="w-4 h-4 mr-2" />
                     Публикация
                   </Link>
-                </DropdownMenuItem>
-                <DropdownMenuItem asChild>
-                  <Link to="/score" className="cursor-pointer">
+                  <Link to="/score" className="top-nav-menu-item">
                     <Settings className="w-4 h-4 mr-2" />
                     Оценка
                   </Link>
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+                </div>
+              ) : null}
+            </div>
 
             <Button variant={isActive("/sources") ? "secondary" : "ghost"} size="sm" asChild>
               <Link to="/sources" className="gap-2">
@@ -220,45 +195,35 @@ export function TopNavigation() {
           </div>
         </div>
 
-        <DropdownMenu open={openMenu === "account"} onOpenChange={(open) => setOpenMenu(open ? "account" : null)}>
-          <DropdownMenuTrigger asChild>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="gap-2"
-              onClick={() => setOpenMenu((value) => (value === "account" ? null : "account"))}
-              onPointerEnter={() => openMenuHover("account")}
-              onMouseEnter={() => openMenuHover("account")}
-              onMouseLeave={() => closeMenuHover("account")}
-            >
-              <User className="w-4 h-4" />
-              Аккаунт
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent
-            align="end"
-            sideOffset={0}
-            className="w-48"
-            collisionPadding={8}
-            onPointerEnter={() => openMenuHover("account")}
-            onMouseEnter={() => openMenuHover("account")}
-            onMouseLeave={() => closeMenuHover("account")}
+        <div
+          className="relative"
+          onPointerEnter={() => openMenuHover("account")}
+          onMouseEnter={() => openMenuHover("account")}
+          onMouseLeave={() => closeMenuHover("account")}
+        >
+          <Button
+            variant="ghost"
+            size="sm"
+            className="gap-2"
+            onClick={() => setOpenMenu((value) => (value === "account" ? null : "account"))}
           >
-            <DropdownMenuItem asChild>
-              <Link to="/setup" className="cursor-pointer">
+            <User className="w-4 h-4" />
+            Аккаунт
+          </Button>
+          {openMenu === "account" ? (
+            <div className="absolute right-0 top-full z-[120] mt-1 w-48 rounded-md border border-border bg-popover p-1 shadow-md">
+              <Link to="/setup" className="top-nav-menu-item">
                 <Settings className="w-4 h-4 mr-2" />
                 Настройки
               </Link>
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem asChild>
-              <a href="/logout" className="cursor-pointer text-destructive">
+              <div className="my-1 h-px bg-border" />
+              <a href="/logout" className="top-nav-menu-item text-destructive">
                 <LogOut className="w-4 h-4 mr-2" />
                 Выйти
               </a>
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
+            </div>
+          ) : null}
+        </div>
       </div>
     </nav>
   );

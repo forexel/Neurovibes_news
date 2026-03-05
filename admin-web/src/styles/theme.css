@@ -191,3 +191,9 @@
     cursor: not-allowed;
   }
 }
+
+@layer components {
+  .top-nav-menu-item {
+    @apply flex w-full items-center rounded-sm px-2 py-1.5 text-left text-sm text-popover-foreground transition-colors hover:bg-accent hover:text-accent-foreground;
+  }
+}
