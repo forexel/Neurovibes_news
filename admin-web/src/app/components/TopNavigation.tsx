@@ -106,7 +106,7 @@ export function TopNavigation() {
                 variant="ghost"
                 size="sm"
                 className="gap-2"
-                onClick={() => setOpenMenu((value) => (value === "actions" ? null : "actions"))}
+                onClick={() => setOpenMenu("actions")}
                 onMouseEnter={() => openMenuHover("actions")}
                 onMouseOver={() => openMenuHover("actions")}
               >
@@ -165,7 +165,7 @@ export function TopNavigation() {
                 variant="ghost"
                 size="sm"
                 className="gap-2"
-                onClick={() => setOpenMenu((value) => (value === "tools" ? null : "tools"))}
+                onClick={() => setOpenMenu("tools")}
                 onMouseEnter={() => openMenuHover("tools")}
                 onMouseOver={() => openMenuHover("tools")}
               >
@@ -209,7 +209,7 @@ export function TopNavigation() {
             variant="ghost"
             size="sm"
             className="gap-2"
-            onClick={() => setOpenMenu((value) => (value === "account" ? null : "account"))}
+            onClick={() => setOpenMenu("account")}
             onMouseEnter={() => openMenuHover("account")}
             onMouseOver={() => openMenuHover("account")}
           >
