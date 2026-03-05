@@ -19,22 +19,49 @@
 - Недостаточно контента (summary-only без возможности вытянуть полный текст).
 - Низкое доверие к источнику или явные признаки низкого качества.
 
-## 3) Строгие критерии (6-8) для одного решения
+## 3) Правила разметки (обновлено под редактора)
 
-Оцениваем по 8 критериям (`1`/`0`):
-- `ai_ml_relevance`: это действительно AI/ML тема.
-- `audience_fit`: релевантно аудитории канала.
-- `practical_value`: есть практическая польза.
-- `source_quality`: источник достаточно надежен.
-- `novelty_signal`: есть новизна/рын.сигнал.
-- `content_completeness`: есть достаточно контента для поста.
-- `non_duplicate`: не дубль/не повтор кластера.
-- `risk_level_ok`: нет сильного риска шума/хайпа/мусора.
+Используем 4 группы правил:
 
-Правило:
-- `publish`: если нет критического провала (`ai_ml_relevance`, `source_quality`, `content_completeness`)
-  и сумма >= 5/8.
-- `delete`: если есть критический провал или сумма < 5/8.
+### A. Hard delete (сразу удаляем)
+- `ai_ml_relevance=0` (не про AI/ML)
+- `content_completeness=0` (не удалось вытянуть контент, пустой summary)
+- `is_duplicate=1` (дубль/повтор материала)
+
+### B. Cooldown delete (временно не повторяем тему)
+- если тема уже публиковалась недавно (например, "безработица из-за ИИ"), повтор в течение 30 дней -> `delete`
+- поле: `cooldown_topic_hit=1`
+
+### C. Причины удаления (теги)
+- `too_technical`
+- `politics_noise`
+- `investment_noise`
+- `hiring_roles_noise`
+- `low_significance`
+- `no_business_use`
+
+### D. Причины публикации (теги)
+- `practical_tool`
+- `practical_case`
+- `ru_relevance`
+- `wow_positive`
+- `future_impact`
+- `business_impact`
+
+Оцениваем основными 0/1 полями:
+- `ai_ml_relevance`
+- `content_completeness`
+- `audience_fit`
+- `practical_value`
+- `risk_too_technical`
+- `risk_politics`
+- `risk_investment_noise`
+- `risk_hiring_roles`
+
+Решение:
+- если сработал любой Hard delete -> `delete`
+- иначе если `cooldown_topic_hit=1` -> `delete`
+- иначе `publish` при `practical_value=1` и `audience_fit=1`
 
 ## 4) Обязательные поля разметки
 
@@ -42,22 +69,24 @@
 - `reason_text`: короткая причина (минимум 20 символов)
 - `tags` (рекомендуется): 1-3 тега причин (например `practical_tool`, `too_technical`, `duplicate`)
 
-Шаблон записи:
+Шаблон записи (вставлять в комментарий/feedback):
 
 ```json
 {
   "decision": "publish|delete",
   "reason_text": "краткая причина",
-  "tags": ["tag1", "tag2"],
+  "tags": ["practical_tool", "ru_relevance"],
   "criteria": {
     "ai_ml_relevance": 1,
     "audience_fit": 1,
-    "practical_value": 0,
-    "source_quality": 1,
-    "novelty_signal": 1,
+    "practical_value": 1,
     "content_completeness": 1,
-    "non_duplicate": 1,
-    "risk_level_ok": 0
+    "risk_too_technical": 0,
+    "risk_politics": 0,
+    "risk_investment_noise": 0,
+    "risk_hiring_roles": 0,
+    "cooldown_topic_hit": 0,
+    "is_duplicate": 0
   }
 }
 ```

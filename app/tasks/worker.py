@@ -24,6 +24,7 @@ from app.services.telegram_review import (
 from app.services.telegram_context import load_workspace_telegram_context
 from app.services.llm import get_workspace_api_key, set_user_api_key
 from app.services.telegram_context import telegram_timezone_name
+from app.services.runtime_settings import get_runtime_float
 
 
 INTERVAL_SECONDS = int(os.getenv("WORKER_INTERVAL_SECONDS", "3600"))
@@ -144,6 +145,9 @@ def _run_cycle_thread(backfill_days: int, decision_mode: bool, slot_key: str) ->
         if str(result.get("selection_strategy") or "").strip().lower() == "off":
             return
 
+        interval_hours = int(max(1, round(get_runtime_float("ml_review_every_n_hours", default=2.0))))
+        hours_phrase = "час" if interval_hours == 1 else ("2 часа" if interval_hours == 2 else f"{interval_hours} часов")
+
         if top_article_id:
             # Auto-mode: never spam the same hour slot. Force resend is only for manual backfill endpoints.
             review_out = send_hourly_top_for_review(int(top_article_id), force=False)
@@ -152,7 +156,7 @@ def _run_cycle_thread(backfill_days: int, decision_mode: bool, slot_key: str) ->
             if review_out.get("skipped") == "already_sent":
                 status_out = send_review_status_once_per_hour(
                     "top_unchanged",
-                    "За последний час новый топ не появился: лучший кандидат не изменился.",
+                    f"За последние {hours_phrase} новый топ не появился: лучший кандидат не изменился.",
                 )
                 print("[worker] telegram review status", status_out, flush=True)
             # If already sent for this slot, do nothing (we already produced 1 message for the window).
@@ -160,12 +164,12 @@ def _run_cycle_thread(backfill_days: int, decision_mode: bool, slot_key: str) ->
             if inserted_total <= 0:
                 status_out = send_review_status_once_per_hour(
                     "no_new_articles",
-                    "За последний час новых статей нет (по источникам пришло 0 новых ссылок).",
+                    f"За последние {hours_phrase} новых статей нет (по источникам пришло 0 новых ссылок).",
                 )
             else:
                 status_out = send_review_status_once_per_hour(
                     "all_filtered",
-                    f"За последний час новые статьи были (+{inserted_total}), но все не прошли фильтры/скоринг.",
+                    f"За последние {hours_phrase} новые статьи были (+{inserted_total}), но все не прошли фильтры/скоринг.",
                 )
             print("[worker] telegram review status", status_out, flush=True)
     except Exception as exc:
