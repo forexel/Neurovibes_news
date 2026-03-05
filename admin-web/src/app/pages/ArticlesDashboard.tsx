@@ -174,10 +174,39 @@ function parseMlReason(input?: string | null): { reason: string; tags: string[] 
     .filter((line) => !/^drivers:/i.test(line))
     .filter((line) => !/^ml_prob/i.test(line))
     .filter((line) => !/^publish>=/i.test(line))
+    .filter((line) => !/^delete<=/i.test(line))
     .filter((line) => !/^decision=/i.test(line))
     .filter((line) => !/^(ai_ml_relevance|audience_fit|practical_value|content_completeness|non_duplicate|risk_level_ok|novelty_signal)=/i.test(line))
     .join(" ");
-  return { reason: fallback || raw, tags: allTags };
+  const cleaned = (fallback || raw)
+    .replace(/\bpublish>=\s*\d+(\.\d+)?/gi, "")
+    .replace(/\bdelete<=\s*\d+(\.\d+)?/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+  return { reason: cleaned, tags: allTags };
+}
+
+const ML_TAG_LABELS: Record<string, string> = {
+  local_practical_gate: "Локальная практичность не пройдена",
+  summary_boring_gate: "Скучный/слабый summary",
+  technical_gate: "Слишком техническая",
+  deep_technical_gate: "Слишком узко техническая",
+  geek_gate: "Гик-контент для узкой аудитории",
+  investing_gate: "Инвестиционный шум",
+  mass_audience_gate: "Слабый fit под массовую аудиторию",
+  editor_style_gate: "Не подходит редакционный стиль",
+  personnel_move_gate: "Кадровая новость",
+  non_ai: "Не про AI/ML",
+  investment_noise: "Инвестиционный шум",
+  politics_noise: "Политический шум",
+  too_technical: "Слишком техническая",
+  no_business_use: "Нет практической пользы",
+};
+
+function formatMlTag(tag: string): string {
+  const key = String(tag || "").trim();
+  if (!key) return "";
+  return ML_TAG_LABELS[key] ? `${ML_TAG_LABELS[key]} (${key})` : key;
 }
 
 export default function ArticlesDashboard() {
@@ -782,7 +811,7 @@ export default function ArticlesDashboard() {
                   <div className="mt-2 flex flex-wrap gap-1.5">
                     {previewMlParsed.tags.map((tag) => (
                       <Badge key={tag} variant="outline" className="text-xs">
-                        {tag}
+                        {formatMlTag(tag)}
                       </Badge>
                     ))}
                   </div>
