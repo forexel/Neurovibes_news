@@ -240,7 +240,22 @@ export default function ArticlesDashboard() {
   const [reasonDialogAction, setReasonDialogAction] = useState<"publish" | "delete">("publish");
   const [reasonDialogArticleId, setReasonDialogArticleId] = useState<number | null>(null);
   const [reasonDialogText, setReasonDialogText] = useState("");
+  const [reasonDialogTags, setReasonDialogTags] = useState<string[]>([]);
+  const [reasonDialogCustomTag, setReasonDialogCustomTag] = useState("");
   const actionsRef = useRef<HTMLDivElement | null>(null);
+
+  const deleteReasonTagOptions: Array<{ value: string; label: string }> = [
+    { value: "low_significance", label: "Низкая значимость" },
+    { value: "no_business_use", label: "Нет практической пользы" },
+    { value: "no_ru", label: "Не релевантно для РФ" },
+    { value: "no_future_impact", label: "Нет влияния на будущее" },
+    { value: "too_technical", label: "Слишком техническая" },
+    { value: "politics_noise", label: "Политический шум" },
+    { value: "investment_noise", label: "Инвестиционный шум" },
+    { value: "hiring_roles_noise", label: "Найм/роли, не по теме" },
+    { value: "duplicate", label: "Дубликат" },
+    { value: "non_ai", label: "Не AI/ML" },
+  ];
 
   const totalPages = useMemo(() => Math.max(1, Math.ceil(total / Number(pageSize))), [pageSize, total]);
 
@@ -391,7 +406,29 @@ export default function ArticlesDashboard() {
     setReasonDialogAction(action);
     setReasonDialogArticleId(id);
     setReasonDialogText("");
+    setReasonDialogTags([]);
+    setReasonDialogCustomTag("");
     setReasonDialogOpen(true);
+  }
+
+  function normalizeTag(raw: string): string {
+    return String(raw || "")
+      .trim()
+      .toLowerCase()
+      .replace(/[^\w-]+/g, "_")
+      .replace(/_+/g, "_")
+      .replace(/^_+|_+$/g, "");
+  }
+
+  function toggleReasonTag(tag: string) {
+    setReasonDialogTags((prev) => (prev.includes(tag) ? prev.filter((x) => x !== tag) : [...prev, tag]));
+  }
+
+  function addCustomReasonTag() {
+    const normalized = normalizeTag(reasonDialogCustomTag);
+    if (!normalized) return;
+    setReasonDialogTags((prev) => (prev.includes(normalized) ? prev : [...prev, normalized]));
+    setReasonDialogCustomTag("");
   }
 
   async function submitReasonDialog() {
@@ -403,9 +440,15 @@ export default function ArticlesDashboard() {
       return;
     }
     if (reasonDialogAction === "delete") {
+      const tags = reasonDialogTags.map(normalizeTag).filter(Boolean);
+      const payload = [
+        "decision=delete",
+        `tags=${tags.join(",")}`,
+        `reason_text=${reason}`,
+      ].join("\n");
       setPreviewActionLoading("delete");
       try {
-        await runAction(() => api.deleteArticle(id, reason));
+        await runAction(() => api.deleteArticle(id, payload));
         setPreviewArticle(null);
         setReasonDialogOpen(false);
       } finally {
@@ -413,10 +456,14 @@ export default function ArticlesDashboard() {
       }
       return;
     }
+    const publishTags = reasonDialogTags.map(normalizeTag).filter(Boolean);
+    const publishFeedback = publishTags.length
+      ? [`decision=publish`, `tags=${publishTags.join(",")}`, `reason_text=${reason}`].join("\n")
+      : reason;
     setPreviewActionLoading("publish");
     try {
       await runAction(async () => {
-        await api.postArticleAction(id, "feedback", { explanation_text: reason });
+        await api.postArticleAction(id, "feedback", { explanation_text: publishFeedback });
         await api.postArticleAction(id, "publish");
       });
       setPreviewArticle(null);
@@ -975,6 +1022,41 @@ export default function ArticlesDashboard() {
             <Label htmlFor="reason-dialog-text">
               {reasonDialogAction === "publish" ? "Почему публикуем?" : "Почему удаляем?"}
             </Label>
+            {reasonDialogAction === "delete" ? (
+              <div className="space-y-2 rounded-md border border-border p-3">
+                <div className="text-xs font-medium text-muted-foreground">Теги причины удаления</div>
+                <div className="flex flex-wrap gap-2">
+                  {deleteReasonTagOptions.map((item) => {
+                    const active = reasonDialogTags.includes(item.value);
+                    return (
+                      <button
+                        key={item.value}
+                        type="button"
+                        onClick={() => toggleReasonTag(item.value)}
+                        className={`rounded-full border px-2.5 py-1 text-xs transition-colors ${
+                          active
+                            ? "border-red-500/40 bg-red-500/15 text-red-200"
+                            : "border-border bg-muted/20 text-muted-foreground hover:bg-muted/40"
+                        }`}
+                      >
+                        {item.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className="flex gap-2">
+                  <Input
+                    value={reasonDialogCustomTag}
+                    onChange={(e) => setReasonDialogCustomTag(e.target.value)}
+                    placeholder="Новый тег (например: local_policy_noise)"
+                    className="h-8"
+                  />
+                  <Button type="button" variant="outline" size="sm" onClick={addCustomReasonTag}>
+                    Добавить тег
+                  </Button>
+                </div>
+              </div>
+            ) : null}
             <Textarea
               id="reason-dialog-text"
               value={reasonDialogText}
