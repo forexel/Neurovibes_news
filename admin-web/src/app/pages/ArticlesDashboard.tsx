@@ -327,7 +327,14 @@ export default function ArticlesDashboard() {
       const details = await api.getArticle(articleId);
       setPreviewArticle(details);
     } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        navigate("/login", { replace: true });
+        return;
+      }
       setError(err instanceof Error ? err.message : "Не удалось открыть превью.");
+      navigate(`/article/${articleId}`, {
+        state: { from: `${location.pathname}${location.search || ""}` },
+      });
     }
   }
 
