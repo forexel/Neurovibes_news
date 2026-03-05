@@ -8,6 +8,7 @@ import { Label } from "../components/ui/label";
 import { Switch } from "../components/ui/switch";
 import { Calendar as DateCalendar } from "../components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "../components/ui/dialog";
 import { StatusBadge } from "../components/StatusBadge";
 import { ScoreBadge } from "../components/ScoreBadge";
 import { LogPanel } from "../components/LogPanel";
@@ -93,6 +94,9 @@ export default function ArticleEditor() {
   const [mlVerdictComment, setMlVerdictComment] = useState("");
   const [scheduleDate, setScheduleDate] = useState("");
   const [schedulePopoverOpen, setSchedulePopoverOpen] = useState(false);
+  const [reasonDialogOpen, setReasonDialogOpen] = useState(false);
+  const [reasonDialogAction, setReasonDialogAction] = useState<"publish" | "delete">("publish");
+  const [reasonDialogText, setReasonDialogText] = useState("");
 
   function addLog(type: LogEntry["type"], message: string) {
     setLogs((prev) => [...prev, { type, message, timestamp: stamp() }]);
@@ -135,20 +139,39 @@ export default function ArticleEditor() {
     return Boolean(value) && value !== "unknown";
   }, [article?.ml_recommendation]);
 
-  async function publishWithReason() {
-    const reason = window.prompt(`Почему публикуем статью #${articleId}?`, feedback || "");
-    if (!reason || reason.trim().length < 5) return;
-    await api.postArticleAction(articleId, "feedback", { explanation_text: reason.trim() });
-    setFeedback(reason.trim());
-    await api.postArticleAction(articleId, "publish");
+  function openReasonDialog(action: "publish" | "delete") {
+    setReasonDialogAction(action);
+    setReasonDialogText(action === "publish" ? feedback || "" : "");
+    setReasonDialogOpen(true);
   }
 
-  async function deleteWithReason() {
-    const reason = window.prompt(`Почему удалить статью #${articleId}?`);
-    if (!reason || reason.trim().length < 5) return;
+  async function submitReasonDialog() {
+    const reason = reasonDialogText.trim();
+    if (reason.length < 5) {
+      addLog("error", "Комментарий должен быть не короче 5 символов.");
+      return;
+    }
+    if (reasonDialogAction === "publish") {
+      setLoading("Publish");
+      try {
+        await api.postArticleAction(articleId, "feedback", { explanation_text: reason });
+        setFeedback(reason);
+        await api.postArticleAction(articleId, "publish");
+        addLog("success", "Publish: ok");
+        setReasonDialogOpen(false);
+        await loadArticle();
+      } catch (err) {
+        addLog("error", err instanceof Error ? err.message : "Publish failed");
+      } finally {
+        setLoading(null);
+      }
+      return;
+    }
+
     setLoading("delete");
     try {
-      await api.deleteArticle(articleId, reason.trim());
+      await api.deleteArticle(articleId, reason);
+      setReasonDialogOpen(false);
       navigate(returnTo);
     } catch (err) {
       addLog("error", err instanceof Error ? err.message : "Delete failed");
@@ -546,7 +569,7 @@ export default function ArticleEditor() {
 
                 <div className="flex flex-wrap gap-2">
                   <Button
-                    onClick={() => run("Publish", publishWithReason)}
+                    onClick={() => openReasonDialog("publish")}
                     disabled={hasInsufficientContent}
                     className="flex-1 min-w-[220px]"
                   >
@@ -557,7 +580,7 @@ export default function ArticleEditor() {
                     <Archive className="w-4 h-4 mr-2" />
                     В архив
                   </Button>
-                  <Button variant="destructive" onClick={deleteWithReason}>
+                  <Button variant="destructive" onClick={() => openReasonDialog("delete")}>
                     <Trash2 className="w-4 h-4 mr-2" />
                     Удалить
                   </Button>
@@ -667,7 +690,7 @@ export default function ArticleEditor() {
                         Prepare + Image
                       </Button>
                       <Button
-                        onClick={() => run("Publish", publishWithReason)}
+                        onClick={() => openReasonDialog("publish")}
                         disabled={hasInsufficientContent}
                       >
                         <Send className="w-4 h-4 mr-2" />
@@ -705,7 +728,7 @@ export default function ArticleEditor() {
                         <Archive className="w-4 h-4 mr-2" />
                         Archive
                       </Button>
-                      <Button variant="destructive" onClick={deleteWithReason}>
+                      <Button variant="destructive" onClick={() => openReasonDialog("delete")}>
                         <Trash2 className="w-4 h-4 mr-2" />
                         Delete
                       </Button>
@@ -737,6 +760,38 @@ export default function ArticleEditor() {
           <LogPanel logs={logs} title="Лог операций" />
         </div>
       </div>
+      <Dialog open={reasonDialogOpen} onOpenChange={setReasonDialogOpen}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>{reasonDialogAction === "publish" ? "Причина публикации" : "Причина удаления"}</DialogTitle>
+            <DialogDescription>Добавь комментарий к статье #{articleId}.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="article-editor-reason">
+              {reasonDialogAction === "publish" ? "Почему публикуем?" : "Почему удаляем?"}
+            </Label>
+            <Textarea
+              id="article-editor-reason"
+              value={reasonDialogText}
+              onChange={(e) => setReasonDialogText(e.target.value)}
+              rows={6}
+              placeholder="Комментарий для истории действий и обучения"
+            />
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setReasonDialogOpen(false)}>
+              Отмена
+            </Button>
+            <Button
+              onClick={submitReasonDialog}
+              disabled={reasonDialogText.trim().length < 5 || loading !== null}
+              className={reasonDialogAction === "delete" ? "bg-destructive text-destructive-foreground hover:bg-destructive/90" : ""}
+            >
+              {reasonDialogAction === "publish" ? "Опубликовать" : "Удалить"}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

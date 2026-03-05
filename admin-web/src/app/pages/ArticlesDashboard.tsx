@@ -236,6 +236,10 @@ export default function ArticlesDashboard() {
   const [previewMlConfirmed, setPreviewMlConfirmed] = useState(false);
   const [previewMlComment, setPreviewMlComment] = useState("");
   const [previewMlSaving, setPreviewMlSaving] = useState(false);
+  const [reasonDialogOpen, setReasonDialogOpen] = useState(false);
+  const [reasonDialogAction, setReasonDialogAction] = useState<"publish" | "delete">("publish");
+  const [reasonDialogArticleId, setReasonDialogArticleId] = useState<number | null>(null);
+  const [reasonDialogText, setReasonDialogText] = useState("");
   const actionsRef = useRef<HTMLDivElement | null>(null);
 
   const totalPages = useMemo(() => Math.max(1, Math.ceil(total / Number(pageSize))), [pageSize, total]);
@@ -376,31 +380,51 @@ export default function ArticlesDashboard() {
         ? 8
         : 0;
 
-  async function promptDelete(id: number) {
-    const reason = window.prompt(`Почему удалить статью #${id}?`);
-    if (!reason || reason.trim().length < 5) return;
-    setPreviewActionLoading("delete");
+  function openReasonDialog(action: "publish" | "delete", id: number) {
+    setReasonDialogAction(action);
+    setReasonDialogArticleId(id);
+    setReasonDialogText("");
+    setReasonDialogOpen(true);
+  }
+
+  async function submitReasonDialog() {
+    const id = reasonDialogArticleId;
+    const reason = reasonDialogText.trim();
+    if (!id) return;
+    if (reason.length < 5) {
+      setError("Комментарий должен быть не короче 5 символов.");
+      return;
+    }
+    if (reasonDialogAction === "delete") {
+      setPreviewActionLoading("delete");
+      try {
+        await runAction(() => api.deleteArticle(id, reason));
+        setPreviewArticle(null);
+        setReasonDialogOpen(false);
+      } finally {
+        setPreviewActionLoading(null);
+      }
+      return;
+    }
+    setPreviewActionLoading("publish");
     try {
-      await runAction(() => api.deleteArticle(id, reason.trim()));
+      await runAction(async () => {
+        await api.postArticleAction(id, "feedback", { explanation_text: reason });
+        await api.postArticleAction(id, "publish");
+      });
       setPreviewArticle(null);
+      setReasonDialogOpen(false);
     } finally {
       setPreviewActionLoading(null);
     }
   }
 
+  async function promptDelete(id: number) {
+    openReasonDialog("delete", id);
+  }
+
   async function promptPublish(id: number) {
-    const reason = window.prompt(`Почему публикуем статью #${id}?`);
-    if (!reason || reason.trim().length < 5) return;
-    setPreviewActionLoading("publish");
-    try {
-      await runAction(async () => {
-        await api.postArticleAction(id, "feedback", { explanation_text: reason.trim() });
-        await api.postArticleAction(id, "publish");
-      });
-      setPreviewArticle(null);
-    } finally {
-      setPreviewActionLoading(null);
-    }
+    openReasonDialog("publish", id);
   }
 
   async function savePreviewMlVerdict() {
@@ -932,6 +956,40 @@ export default function ArticlesDashboard() {
           </DialogContent>
         </Dialog>
       ) : null}
+      <Dialog open={reasonDialogOpen} onOpenChange={setReasonDialogOpen}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>{reasonDialogAction === "publish" ? "Причина публикации" : "Причина удаления"}</DialogTitle>
+            <DialogDescription>
+              Добавь комментарий по статье #{reasonDialogArticleId ?? "—"}.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="reason-dialog-text">
+              {reasonDialogAction === "publish" ? "Почему публикуем?" : "Почему удаляем?"}
+            </Label>
+            <Textarea
+              id="reason-dialog-text"
+              value={reasonDialogText}
+              onChange={(e) => setReasonDialogText(e.target.value)}
+              rows={6}
+              placeholder="Напиши комментарий для модели и истории действий"
+            />
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setReasonDialogOpen(false)}>
+              Отмена
+            </Button>
+            <Button
+              onClick={submitReasonDialog}
+              disabled={reasonDialogText.trim().length < 5 || previewActionLoading !== null}
+              className={reasonDialogAction === "delete" ? "bg-destructive text-destructive-foreground hover:bg-destructive/90" : ""}
+            >
+              {reasonDialogAction === "publish" ? "Опубликовать" : "Удалить"}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

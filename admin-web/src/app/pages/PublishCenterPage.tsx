@@ -3,6 +3,9 @@ import { Link, useLocation, useNavigate } from "react-router";
 import { TopNavigation } from "../components/TopNavigation";
 import { Button } from "../components/ui/button";
 import { Badge } from "../components/ui/badge";
+import { Label } from "../components/ui/label";
+import { Textarea } from "../components/ui/textarea";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "../components/ui/dialog";
 import {
   Table,
   TableBody,
@@ -32,6 +35,10 @@ export default function PublishCenterPage() {
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [activePanel, setActivePanel] = useState<PublishPanel>("actionable");
+  const [reasonDialogOpen, setReasonDialogOpen] = useState(false);
+  const [reasonDialogAction, setReasonDialogAction] = useState<"publish" | "delete">("publish");
+  const [reasonDialogArticleId, setReasonDialogArticleId] = useState<number | null>(null);
+  const [reasonDialogText, setReasonDialogText] = useState("");
 
   async function loadData() {
     setLoading(true);
@@ -75,11 +82,31 @@ export default function PublishCenterPage() {
     }
   }
 
-  async function publishWithReason(articleId: number) {
-    const reason = window.prompt("Почему публикуем эту статью?", "");
-    if (!reason || reason.trim().length < 5) return;
-    await api.postArticleAction(articleId, "feedback", { explanation_text: reason.trim() });
-    await api.postArticleAction(articleId, "publish");
+  function openReasonDialog(action: "publish" | "delete", articleId: number) {
+    setReasonDialogAction(action);
+    setReasonDialogArticleId(articleId);
+    setReasonDialogText("");
+    setReasonDialogOpen(true);
+  }
+
+  async function submitReasonDialog() {
+    const articleId = reasonDialogArticleId;
+    const reason = reasonDialogText.trim();
+    if (!articleId) return;
+    if (reason.length < 5) {
+      setError("Комментарий должен быть не короче 5 символов.");
+      return;
+    }
+    const label = reasonDialogAction === "publish" ? `Опубликовать #${articleId}` : `Удалить #${articleId}`;
+    await runAction(label, async () => {
+      if (reasonDialogAction === "publish") {
+        await api.postArticleAction(articleId, "feedback", { explanation_text: reason });
+        await api.postArticleAction(articleId, "publish");
+      } else {
+        await api.deleteArticle(articleId, reason);
+      }
+    });
+    setReasonDialogOpen(false);
   }
 
   const scheduledArticles = useMemo(
@@ -274,16 +301,12 @@ export default function PublishCenterPage() {
           }
           onDeleteArticle={
             activeList.showDelete
-              ? (articleId) => {
-                  const reason = window.prompt("Причина удаления статьи", "");
-                  if (!reason || !reason.trim()) return;
-                  void runAction(`Удалить #${articleId}`, () => api.deleteArticle(articleId, reason.trim()));
-                }
+              ? (articleId) => openReasonDialog("delete", articleId)
               : undefined
           }
           onPublishNow={
             activeList.showPublishNow
-              ? (articleId) => runAction(`Опубликовать #${articleId}`, () => publishWithReason(articleId))
+              ? (articleId) => openReasonDialog("publish", articleId)
               : undefined
           }
           onUnschedule={
@@ -292,6 +315,40 @@ export default function PublishCenterPage() {
               : undefined
           }
         />
+        <Dialog open={reasonDialogOpen} onOpenChange={setReasonDialogOpen}>
+          <DialogContent className="sm:max-w-lg">
+            <DialogHeader>
+              <DialogTitle>{reasonDialogAction === "publish" ? "Причина публикации" : "Причина удаления"}</DialogTitle>
+              <DialogDescription>
+                Добавь комментарий по статье #{reasonDialogArticleId ?? "—"}.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-2">
+              <Label htmlFor="publish-center-reason">
+                {reasonDialogAction === "publish" ? "Почему публикуем?" : "Почему удаляем?"}
+              </Label>
+              <Textarea
+                id="publish-center-reason"
+                value={reasonDialogText}
+                onChange={(e) => setReasonDialogText(e.target.value)}
+                rows={6}
+                placeholder="Комментарий для истории действий и обучения"
+              />
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setReasonDialogOpen(false)}>
+                Отмена
+              </Button>
+              <Button
+                onClick={submitReasonDialog}
+                disabled={reasonDialogText.trim().length < 5 || actionLoading !== null}
+                className={reasonDialogAction === "delete" ? "bg-destructive text-destructive-foreground hover:bg-destructive/90" : ""}
+              >
+                {reasonDialogAction === "publish" ? "Опубликовать" : "Удалить"}
+              </Button>
+            </div>
+          </DialogContent>
+        </Dialog>
       </div>
     </div>
   );
