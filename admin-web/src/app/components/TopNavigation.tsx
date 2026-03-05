@@ -112,7 +112,7 @@ export function TopNavigation() {
                 Действия
               </Button>
               {openMenu === "actions" ? (
-                <div className="absolute left-0 top-full z-[120] mt-1 w-56 rounded-md border border-border bg-popover p-1 shadow-md">
+                <div className="absolute left-0 top-[calc(100%-1px)] z-[200] w-56 rounded-md border border-border bg-popover p-1 shadow-md">
                   <button type="button" className="top-nav-menu-item" onClick={() => runAction("Собрать за час", () => api.startAggregate("hour"))}>
                     <Database className="w-4 h-4 mr-2" />
                     Собрать за час
@@ -169,7 +169,7 @@ export function TopNavigation() {
                 Инструменты
               </Button>
               {openMenu === "tools" ? (
-                <div className="absolute left-0 top-full z-[120] mt-1 w-48 rounded-md border border-border bg-popover p-1 shadow-md">
+                <div className="absolute left-0 top-[calc(100%-1px)] z-[200] w-48 rounded-md border border-border bg-popover p-1 shadow-md">
                   <Link to="/bot" className="top-nav-menu-item">
                     <Bot className="w-4 h-4 mr-2" />
                     Бот
@@ -211,7 +211,7 @@ export function TopNavigation() {
             Аккаунт
           </Button>
           {openMenu === "account" ? (
-            <div className="absolute right-0 top-full z-[120] mt-1 w-48 rounded-md border border-border bg-popover p-1 shadow-md">
+            <div className="absolute right-0 top-[calc(100%-1px)] z-[200] w-48 rounded-md border border-border bg-popover p-1 shadow-md">
               <Link to="/setup" className="top-nav-menu-item">
                 <Settings className="w-4 h-4 mr-2" />
                 Настройки

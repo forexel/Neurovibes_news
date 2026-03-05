@@ -139,6 +139,36 @@ function sanitizePreviewHtml(input: string): string {
   return doc.body.innerHTML;
 }
 
+function parseMlReason(input?: string | null): { reason: string; tags: string[] } {
+  const raw = String(input || "").trim();
+  if (!raw) return { reason: "", tags: [] };
+  const normalized = raw.replace(/\s+\|\s+/g, "\n").replace(/\r/g, "");
+  const lines = normalized
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const tagsLine = lines.find((line) => /^tags=/i.test(line));
+  const reasonLine = lines.find((line) => /^reason_text=/i.test(line) || /^reason=/i.test(line));
+  const tags = tagsLine
+    ? tagsLine
+        .replace(/^tags=/i, "")
+        .split(",")
+        .map((tag) => tag.trim())
+        .filter(Boolean)
+    : [];
+  if (reasonLine) {
+    return { reason: reasonLine.replace(/^reason(_text)?=/i, "").trim(), tags };
+  }
+  const fallback = lines
+    .filter((line) => !/^drivers:/i.test(line))
+    .filter((line) => !/^ml_prob/i.test(line))
+    .filter((line) => !/^decision=/i.test(line))
+    .filter((line) => !/^(ai_ml_relevance|audience_fit|practical_value|content_completeness|non_duplicate|risk_level_ok|novelty_signal)=/i.test(line))
+    .join(" ");
+  return { reason: fallback || raw, tags };
+}
+
 export default function ArticlesDashboard() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -351,6 +381,11 @@ export default function ArticlesDashboard() {
       setPreviewMlSaving(false);
     }
   }
+
+  const previewMlParsed = useMemo(
+    () => parseMlReason(previewArticle?.ml_recommendation_reason),
+    [previewArticle?.ml_recommendation_reason],
+  );
 
   return (
     <div className="min-h-screen bg-background">
@@ -702,7 +737,8 @@ export default function ArticlesDashboard() {
 
       {previewArticle ? (
         <Dialog open={Boolean(previewArticle)} onOpenChange={(open) => !open && setPreviewArticle(null)}>
-          <DialogContent className="max-w-4xl [&>button]:right-3 [&>button]:top-3 [&>button]:h-9 [&>button]:w-9 [&>button]:rounded-md [&>button]:border [&>button]:border-border">
+          <DialogContent className="max-w-4xl h-[92vh] overflow-hidden p-0 [&>button]:right-3 [&>button]:top-3 [&>button]:h-9 [&>button]:w-9 [&>button]:rounded-md [&>button]:border [&>button]:border-border">
+          <div className="h-full overflow-y-auto px-6 py-6">
           <DialogHeader>
             <DialogTitle className="pr-20 leading-tight">{previewArticle?.ru_title || previewArticle?.title}</DialogTitle>
             <DialogDescription className="flex items-center gap-2 flex-wrap">
@@ -713,7 +749,7 @@ export default function ArticlesDashboard() {
               <span>{formatDateTime(previewArticle?.published_at || previewArticle?.created_at)}</span>
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-4">
+          <div className="mt-4 space-y-4">
             <div
               className="text-sm leading-7 text-foreground/90 whitespace-pre-wrap break-words [&_a]:text-blue-500 [&_a]:underline [&_b]:font-semibold [&_strong]:font-semibold"
               dangerouslySetInnerHTML={{
@@ -728,10 +764,21 @@ export default function ArticlesDashboard() {
                 <div className="mt-1 text-red-200/90">{previewArticle.archived_reason}</div>
               </div>
             ) : null}
-            {previewArticle?.ml_recommendation_reason ? (
+            {previewMlParsed.reason || previewMlParsed.tags.length ? (
               <div className="rounded-lg border border-border bg-muted/40 p-3 text-sm">
                 <div className="font-medium">Причина от ML</div>
-                <div className="mt-1 text-muted-foreground whitespace-pre-wrap">{previewArticle.ml_recommendation_reason}</div>
+                {previewMlParsed.tags.length > 0 ? (
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {previewMlParsed.tags.map((tag) => (
+                      <Badge key={tag} variant="outline" className="text-xs">
+                        {tag}
+                      </Badge>
+                    ))}
+                  </div>
+                ) : null}
+                {previewMlParsed.reason ? (
+                  <div className="mt-2 text-muted-foreground whitespace-pre-wrap">{previewMlParsed.reason}</div>
+                ) : null}
               </div>
             ) : null}
             <div className="rounded-lg border border-border bg-muted/40 p-3 text-sm space-y-3">
@@ -804,16 +851,16 @@ export default function ArticlesDashboard() {
             {previewArticle?.image_web ? (
               <img src={previewArticle.image_web} alt="" className="rounded-lg border border-border max-h-80 object-cover" />
             ) : null}
-            <div className="flex flex-wrap gap-2">
+            <div className="flex items-center gap-2 overflow-x-auto whitespace-nowrap pb-1">
               {previewArticle ? (
-                <Button asChild>
+                <Button asChild className="shrink-0">
                   <Link to={`/article/${previewArticle.id}`}>Открыть в редакторе</Link>
                 </Button>
               ) : null}
               {previewArticle && String(previewArticle.status || "").toUpperCase() !== "PUBLISHED" ? (
                 <Button
                   variant="outline"
-                  className="gap-2"
+                  className="gap-2 shrink-0"
                   onClick={() => promptPublish(previewArticle.id)}
                   disabled={previewActionLoading === "publish"}
                 >
@@ -824,7 +871,7 @@ export default function ArticlesDashboard() {
               {previewArticle && !["ARCHIVED", "REJECTED"].includes(String(previewArticle.status || "").toUpperCase()) ? (
                 <Button
                   variant="outline"
-                  className="gap-2 border-red-500/30 text-red-300 hover:bg-red-500/10"
+                  className="gap-2 shrink-0 border-red-500/30 text-red-300 hover:bg-red-500/10"
                   onClick={() => promptDelete(previewArticle.id)}
                   disabled={previewActionLoading === "delete"}
                 >
@@ -833,7 +880,7 @@ export default function ArticlesDashboard() {
                 </Button>
               ) : null}
               {previewArticle?.canonical_url ? (
-                <Button variant="outline" asChild>
+                <Button variant="outline" className="shrink-0" asChild>
                   <a href={previewArticle.canonical_url} target="_blank" rel="noreferrer" className="gap-2">
                     <ExternalLink className="h-4 w-4" />
                     Original source
@@ -841,6 +888,7 @@ export default function ArticlesDashboard() {
                 </Button>
               ) : null}
             </div>
+          </div>
           </div>
           </DialogContent>
         </Dialog>
