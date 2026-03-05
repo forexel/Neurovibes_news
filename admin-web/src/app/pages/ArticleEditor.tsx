@@ -121,6 +121,10 @@ export default function ArticleEditor() {
   const postPreview = useMemo(() => article?.post_preview || "RU текст не готов. Сгенерируй пост и сохрани его.", [article]);
   const selectedScheduleDate = useMemo(() => getScheduleDateValue(scheduleDate), [scheduleDate]);
   const hasInsufficientContent = String(article?.content_mode || "").toLowerCase() === "summary_only";
+  const hasMlVerdict = useMemo(() => {
+    const value = String(article?.ml_recommendation || "").trim().toLowerCase();
+    return Boolean(value) && value !== "unknown";
+  }, [article?.ml_recommendation]);
 
   async function publishWithReason() {
     const reason = window.prompt(`Почему публикуем статью #${articleId}?`, feedback || "");
@@ -261,28 +265,34 @@ export default function ArticleEditor() {
 
         <div className="mb-6 rounded-lg border border-border bg-card p-4">
           <div className="mb-3 text-sm font-medium">ML-вердикт</div>
-          <div className="mb-3 flex items-center gap-3">
-            <Switch id="ml-verdict-confirmed" checked={mlVerdictConfirmed} onCheckedChange={setMlVerdictConfirmed} />
-            <Label htmlFor="ml-verdict-confirmed" className="cursor-pointer">
-              Согласен с рекомендацией ML
-            </Label>
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="ml-verdict-comment">Комментарий</Label>
-            <Textarea
-              id="ml-verdict-comment"
-              value={mlVerdictComment}
-              onChange={(e) => setMlVerdictComment(e.target.value)}
-              rows={3}
-              placeholder="Почему согласен / не согласен с выбором модели"
-            />
-          </div>
-          <div className="mt-3">
-            <Button size="sm" variant="secondary" onClick={saveMlVerdict} disabled={loading === "ml-verdict"}>
-              {loading === "ml-verdict" ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Save className="w-4 h-4 mr-2" />}
-              Сохранить ML-вердикт
-            </Button>
-          </div>
+          {!hasMlVerdict ? (
+            <div className="text-sm text-muted-foreground">Нет вердикта ML.</div>
+          ) : (
+            <>
+              <div className="mb-3 flex items-center gap-3">
+                <Switch id="ml-verdict-confirmed" checked={mlVerdictConfirmed} onCheckedChange={setMlVerdictConfirmed} />
+                <Label htmlFor="ml-verdict-confirmed" className="cursor-pointer">
+                  Согласен с рекомендацией ML
+                </Label>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="ml-verdict-comment">Комментарий</Label>
+                <Textarea
+                  id="ml-verdict-comment"
+                  value={mlVerdictComment}
+                  onChange={(e) => setMlVerdictComment(e.target.value)}
+                  rows={3}
+                  placeholder="Почему согласен / не согласен с выбором модели"
+                />
+              </div>
+              <div className="mt-3">
+                <Button size="sm" variant="secondary" onClick={saveMlVerdict} disabled={loading === "ml-verdict"}>
+                  {loading === "ml-verdict" ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Save className="w-4 h-4 mr-2" />}
+                  Сохранить ML-вердикт
+                </Button>
+              </div>
+            </>
+          )}
         </div>
 
         <Tabs defaultValue="linear" className="space-y-6">
