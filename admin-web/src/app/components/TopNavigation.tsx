@@ -96,25 +96,19 @@ export function TopNavigation() {
               </Link>
             </Button>
 
-            <div
-              className="relative"
-              onPointerEnter={() => openMenuHover("actions")}
-              onMouseEnter={() => openMenuHover("actions")}
-              onMouseLeave={() => closeMenuHover("actions")}
-            >
+            <div className="relative group/actions">
               <Button
                 variant="ghost"
                 size="sm"
                 className="gap-2"
                 onClick={() => setOpenMenu("actions")}
-                onMouseEnter={() => openMenuHover("actions")}
-                onMouseOver={() => openMenuHover("actions")}
               >
                 <Zap className="w-4 h-4" />
                 Действия
               </Button>
-              {openMenu === "actions" ? (
-                <div className="absolute left-0 top-[calc(100%-1px)] z-[200] w-56 rounded-md border border-border bg-popover p-1 shadow-md">
+              <div
+                className={`absolute left-0 top-[calc(100%-1px)] z-[200] w-56 rounded-md border border-border bg-popover p-1 shadow-md ${openMenu === "actions" ? "block" : "hidden group-hover/actions:block"}`}
+              >
                   <button type="button" className="top-nav-menu-item" onClick={() => runAction("Собрать за час", () => api.startAggregate("hour"))}>
                     <Database className="w-4 h-4 mr-2" />
                     Собрать за час
@@ -152,28 +146,21 @@ export function TopNavigation() {
                     Пересобрать профиль
                   </button>
                 </div>
-              ) : null}
             </div>
 
-            <div
-              className="relative"
-              onPointerEnter={() => openMenuHover("tools")}
-              onMouseEnter={() => openMenuHover("tools")}
-              onMouseLeave={() => closeMenuHover("tools")}
-            >
+            <div className="relative group/tools">
               <Button
                 variant="ghost"
                 size="sm"
                 className="gap-2"
                 onClick={() => setOpenMenu("tools")}
-                onMouseEnter={() => openMenuHover("tools")}
-                onMouseOver={() => openMenuHover("tools")}
               >
                 <Wrench className="w-4 h-4" />
                 Инструменты
               </Button>
-              {openMenu === "tools" ? (
-                <div className="absolute left-0 top-[calc(100%-1px)] z-[200] w-48 rounded-md border border-border bg-popover p-1 shadow-md">
+              <div
+                className={`absolute left-0 top-[calc(100%-1px)] z-[200] w-48 rounded-md border border-border bg-popover p-1 shadow-md ${openMenu === "tools" ? "block" : "hidden group-hover/tools:block"}`}
+              >
                   <Link to="/bot" className="top-nav-menu-item">
                     <Bot className="w-4 h-4 mr-2" />
                     Бот
@@ -187,7 +174,6 @@ export function TopNavigation() {
                     Оценка
                   </Link>
                 </div>
-              ) : null}
             </div>
 
             <Button variant={isActive("/sources") ? "secondary" : "ghost"} size="sm" asChild>
@@ -199,25 +185,19 @@ export function TopNavigation() {
           </div>
         </div>
 
-        <div
-          className="relative"
-          onPointerEnter={() => openMenuHover("account")}
-          onMouseEnter={() => openMenuHover("account")}
-          onMouseLeave={() => closeMenuHover("account")}
-        >
+        <div className="relative group/account">
           <Button
             variant="ghost"
             size="sm"
             className="gap-2"
             onClick={() => setOpenMenu("account")}
-            onMouseEnter={() => openMenuHover("account")}
-            onMouseOver={() => openMenuHover("account")}
           >
             <User className="w-4 h-4" />
             Аккаунт
           </Button>
-          {openMenu === "account" ? (
-            <div className="absolute right-0 top-[calc(100%-1px)] z-[200] w-48 rounded-md border border-border bg-popover p-1 shadow-md">
+          <div
+            className={`absolute right-0 top-[calc(100%-1px)] z-[200] w-48 rounded-md border border-border bg-popover p-1 shadow-md ${openMenu === "account" ? "block" : "hidden group-hover/account:block"}`}
+          >
               <Link to="/setup" className="top-nav-menu-item">
                 <Settings className="w-4 h-4 mr-2" />
                 Настройки
@@ -228,7 +208,6 @@ export function TopNavigation() {
                 Выйти
               </a>
             </div>
-          ) : null}
         </div>
       </div>
     </nav>
