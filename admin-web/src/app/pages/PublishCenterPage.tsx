@@ -1,5 +1,5 @@
 import { ReactNode, useEffect, useMemo, useState } from "react";
-import { Link, useNavigate } from "react-router";
+import { Link, useLocation, useNavigate } from "react-router";
 import { TopNavigation } from "../components/TopNavigation";
 import { Button } from "../components/ui/button";
 import { Badge } from "../components/ui/badge";
@@ -23,6 +23,7 @@ const ML_REVIEW_MAX = 0.75;
 
 export default function PublishCenterPage() {
   const navigate = useNavigate();
+  const location = useLocation();
   const [setupState, setSetupState] = useState<SetupState | null>(null);
   const [allArticles, setAllArticles] = useState<ArticleListItem[]>([]);
   const [deletedArticles, setDeletedArticles] = useState<ArticleListItem[]>([]);
@@ -266,7 +267,11 @@ export default function PublishCenterPage() {
           emptyText={activeList.emptyText}
           showSchedule={activeList.showSchedule}
           actionLoading={actionLoading}
-          onOpenArticle={(articleId) => navigate(`/article/${articleId}`)}
+          onOpenArticle={(articleId) =>
+            navigate(`/article/${articleId}`, {
+              state: { from: `${location.pathname}${location.search || ""}` },
+            })
+          }
           onDeleteArticle={
             activeList.showDelete
               ? (articleId) => {

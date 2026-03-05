@@ -689,7 +689,9 @@ export default function ArticlesDashboard() {
                               className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent"
                               onClick={() => {
                                 setOpenActionsId(null);
-                                navigate(`/article/${article.id}`);
+                                navigate(`/article/${article.id}`, {
+                                  state: { from: `${location.pathname}${location.search || ""}` },
+                                });
                               }}
                             >
                               <ExternalLink className="w-4 h-4" />
@@ -894,7 +896,12 @@ export default function ArticlesDashboard() {
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
               {previewArticle ? (
                 <Button asChild className="w-full">
-                  <Link to={`/article/${previewArticle.id}`}>Открыть в редакторе</Link>
+                  <Link
+                    to={`/article/${previewArticle.id}`}
+                    state={{ from: `${location.pathname}${location.search || ""}` }}
+                  >
+                    Открыть в редакторе
+                  </Link>
                 </Button>
               ) : null}
               {previewArticle && String(previewArticle.status || "").toUpperCase() !== "PUBLISHED" ? (

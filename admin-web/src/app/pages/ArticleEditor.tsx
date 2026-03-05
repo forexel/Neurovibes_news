@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router";
+import { Link, useLocation, useNavigate, useParams } from "react-router";
 import { TopNavigation } from "../components/TopNavigation";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -66,8 +66,17 @@ function updateScheduleValue(currentValue: string, nextDate?: Date, nextTime?: s
 
 export default function ArticleEditor() {
   const { id } = useParams();
+  const location = useLocation();
   const navigate = useNavigate();
   const articleId = Number(id);
+  const returnTo =
+    typeof location.state === "object" &&
+    location.state !== null &&
+    "from" in location.state &&
+    typeof (location.state as { from?: unknown }).from === "string" &&
+    String((location.state as { from?: string }).from || "").startsWith("/")
+      ? String((location.state as { from?: string }).from)
+      : "/dashboard";
 
   const [article, setArticle] = useState<ArticleDetails | null>(null);
   const [loading, setLoading] = useState<string | null>(null);
@@ -140,7 +149,7 @@ export default function ArticleEditor() {
     setLoading("delete");
     try {
       await api.deleteArticle(articleId, reason.trim());
-      navigate("/dashboard");
+      navigate(returnTo);
     } catch (err) {
       addLog("error", err instanceof Error ? err.message : "Delete failed");
     } finally {
@@ -217,7 +226,7 @@ export default function ArticleEditor() {
         <div className="max-w-7xl mx-auto px-6 py-12 text-center">
           <h1 className="text-2xl font-semibold mb-4">Статья не найдена</h1>
           <Button asChild>
-            <Link to="/dashboard">Вернуться к списку</Link>
+            <Link to={returnTo}>Вернуться к списку</Link>
           </Button>
         </div>
       </div>
@@ -234,7 +243,7 @@ export default function ArticleEditor() {
         <div className="mb-6">
           <div className="flex items-center gap-3 mb-4">
             <Button variant="ghost" size="sm" asChild>
-              <Link to="/dashboard">
+              <Link to={returnTo}>
                 <ArrowLeft className="w-4 h-4 mr-2" />
                 К списку
               </Link>
