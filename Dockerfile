@@ -1,3 +1,11 @@
+FROM node:20-alpine AS web-build
+
+WORKDIR /web
+COPY admin-web/package*.json ./
+RUN npm ci
+COPY admin-web ./
+RUN npm run build
+
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -16,7 +24,7 @@ RUN python -m playwright install --with-deps chromium
 
 COPY app ./app
 COPY scripts ./scripts
-COPY admin-web/dist ./admin-web/dist
+COPY --from=web-build /web/dist ./admin-web/dist
 
 EXPOSE 8000
 
