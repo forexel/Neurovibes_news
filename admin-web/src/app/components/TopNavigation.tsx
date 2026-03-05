@@ -52,7 +52,7 @@ export function TopNavigation() {
     closeTimerRef.current = window.setTimeout(() => {
       setOpenMenu((current) => (current === menu ? null : current));
       closeTimerRef.current = null;
-    }, 650);
+    }, 140);
   }
 
   useEffect(
@@ -107,6 +107,8 @@ export function TopNavigation() {
                 size="sm"
                 className="gap-2"
                 onClick={() => setOpenMenu((value) => (value === "actions" ? null : "actions"))}
+                onMouseEnter={() => openMenuHover("actions")}
+                onMouseOver={() => openMenuHover("actions")}
               >
                 <Zap className="w-4 h-4" />
                 Действия
@@ -164,6 +166,8 @@ export function TopNavigation() {
                 size="sm"
                 className="gap-2"
                 onClick={() => setOpenMenu((value) => (value === "tools" ? null : "tools"))}
+                onMouseEnter={() => openMenuHover("tools")}
+                onMouseOver={() => openMenuHover("tools")}
               >
                 <Wrench className="w-4 h-4" />
                 Инструменты
@@ -206,6 +210,8 @@ export function TopNavigation() {
             size="sm"
             className="gap-2"
             onClick={() => setOpenMenu((value) => (value === "account" ? null : "account"))}
+            onMouseEnter={() => openMenuHover("account")}
+            onMouseOver={() => openMenuHover("account")}
           >
             <User className="w-4 h-4" />
             Аккаунт

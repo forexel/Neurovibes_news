@@ -157,16 +157,27 @@ function parseMlReason(input?: string | null): { reason: string; tags: string[] 
         .map((tag) => tag.trim())
         .filter(Boolean)
     : [];
+  const inferredTags: string[] = [];
+  const low = raw.toLowerCase();
+  if (/(инвестиц|valuation|market cap|оценк[аи])/.test(low)) inferredTags.push("investment_noise");
+  if (/(полит|election|government|geopolit)/.test(low)) inferredTags.push("politics_noise");
+  if (/(слишком техническ|too technical|agentic|benchmark)/.test(low)) inferredTags.push("too_technical");
+  if (/(не про ai|non-ai|not ai)/.test(low)) inferredTags.push("non_ai");
+  if (/(нет практическ|не про практическую пользу|low practical)/.test(low)) inferredTags.push("no_business_use");
+  const gates = Array.from(raw.matchAll(/\b([a-z_]+_gate)\b/g)).map((m) => m[1]);
+  const allTags = Array.from(new Set([...tags, ...inferredTags, ...gates]));
+
   if (reasonLine) {
-    return { reason: reasonLine.replace(/^reason(_text)?=/i, "").trim(), tags };
+    return { reason: reasonLine.replace(/^reason(_text)?=/i, "").trim(), tags: allTags };
   }
   const fallback = lines
     .filter((line) => !/^drivers:/i.test(line))
     .filter((line) => !/^ml_prob/i.test(line))
+    .filter((line) => !/^publish>=/i.test(line))
     .filter((line) => !/^decision=/i.test(line))
     .filter((line) => !/^(ai_ml_relevance|audience_fit|practical_value|content_completeness|non_duplicate|risk_level_ok|novelty_signal)=/i.test(line))
     .join(" ");
-  return { reason: fallback || raw, tags };
+  return { reason: fallback || raw, tags: allTags };
 }
 
 export default function ArticlesDashboard() {
@@ -737,7 +748,7 @@ export default function ArticlesDashboard() {
 
       {previewArticle ? (
         <Dialog open={Boolean(previewArticle)} onOpenChange={(open) => !open && setPreviewArticle(null)}>
-          <DialogContent className="max-w-4xl h-[92vh] overflow-hidden p-0 [&>button]:right-3 [&>button]:top-3 [&>button]:h-9 [&>button]:w-9 [&>button]:rounded-md [&>button]:border [&>button]:border-border">
+          <DialogContent className="max-w-4xl h-[92vh] overflow-hidden p-0 [&>button]:right-4 [&>button]:top-4 [&>button]:h-10 [&>button]:w-10 [&>button]:rounded-md [&>button]:border [&>button]:border-border">
           <div className="h-full overflow-y-auto px-6 py-6">
           <DialogHeader>
             <DialogTitle className="pr-20 leading-tight">{previewArticle?.ru_title || previewArticle?.title}</DialogTitle>
@@ -851,16 +862,16 @@ export default function ArticlesDashboard() {
             {previewArticle?.image_web ? (
               <img src={previewArticle.image_web} alt="" className="rounded-lg border border-border max-h-80 object-cover" />
             ) : null}
-            <div className="flex items-center gap-2 overflow-x-auto whitespace-nowrap pb-1">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
               {previewArticle ? (
-                <Button asChild className="shrink-0">
+                <Button asChild className="w-full">
                   <Link to={`/article/${previewArticle.id}`}>Открыть в редакторе</Link>
                 </Button>
               ) : null}
               {previewArticle && String(previewArticle.status || "").toUpperCase() !== "PUBLISHED" ? (
                 <Button
                   variant="outline"
-                  className="gap-2 shrink-0"
+                  className="gap-2 w-full"
                   onClick={() => promptPublish(previewArticle.id)}
                   disabled={previewActionLoading === "publish"}
                 >
@@ -871,7 +882,7 @@ export default function ArticlesDashboard() {
               {previewArticle && !["ARCHIVED", "REJECTED"].includes(String(previewArticle.status || "").toUpperCase()) ? (
                 <Button
                   variant="outline"
-                  className="gap-2 shrink-0 border-red-500/30 text-red-300 hover:bg-red-500/10"
+                  className="gap-2 w-full border-red-500/30 text-red-300 hover:bg-red-500/10"
                   onClick={() => promptDelete(previewArticle.id)}
                   disabled={previewActionLoading === "delete"}
                 >
@@ -880,7 +891,7 @@ export default function ArticlesDashboard() {
                 </Button>
               ) : null}
               {previewArticle?.canonical_url ? (
-                <Button variant="outline" className="shrink-0" asChild>
+                <Button variant="outline" className="w-full" asChild>
                   <a href={previewArticle.canonical_url} target="_blank" rel="noreferrer" className="gap-2">
                     <ExternalLink className="h-4 w-4" />
                     Original source
