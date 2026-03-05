@@ -890,14 +890,6 @@ export default function ArticlesDashboard() {
                   Удалить
                 </Button>
               ) : null}
-              {previewArticle?.canonical_url ? (
-                <Button variant="outline" className="w-full" asChild>
-                  <a href={previewArticle.canonical_url} target="_blank" rel="noreferrer" className="gap-2">
-                    <ExternalLink className="h-4 w-4" />
-                    Original source
-                  </a>
-                </Button>
-              ) : null}
             </div>
           </div>
           </div>
