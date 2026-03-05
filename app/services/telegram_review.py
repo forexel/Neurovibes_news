@@ -550,8 +550,6 @@ def _reason_with_tags(action: str, reason: str, tags: list[str]) -> str:
     ai_ml_relevance = 0 if "non_ai" in tag_set else 1
     audience_fit = 0 if "too_technical" in tag_set else 1
     practical_value = 0 if "no_business_use" in tag_set else 1
-    content_completeness = 0 if "content_incomplete" in tag_set else 1
-    non_duplicate = 0 if "duplicate" in tag_set else 1
     risk_level_ok = 0 if {"politics_noise", "investment_noise", "hiring_roles_noise"} & tag_set else 1
 
     novelty_positive = {
@@ -569,8 +567,6 @@ def _reason_with_tags(action: str, reason: str, tags: list[str]) -> str:
         f"ai_ml_relevance={ai_ml_relevance}",
         f"audience_fit={audience_fit}",
         f"practical_value={practical_value}",
-        f"content_completeness={content_completeness}",
-        f"non_duplicate={non_duplicate}",
         f"risk_level_ok={risk_level_ok}",
         f"novelty_signal={novelty_signal}",
         f"tags={','.join(clean_tags)}" if clean_tags else "tags=",

@@ -199,6 +199,22 @@ def _title_fallback_key(article: Article) -> str:
     return f"{src}|{' '.join(tokens)}"
 
 
+def _is_incomplete_candidate(article: Article) -> bool:
+    mode = str(article.content_mode or "").strip().lower()
+    if mode == "summary_only":
+        return True
+    text = str(article.text or "").strip()
+    subtitle = str(article.subtitle or "").strip()
+    if not text and not subtitle:
+        return True
+    low = text.lower()
+    if low.startswith("article url:") and ("comments url:" in low) and len(text) < 500:
+        return True
+    if len(text) < 220 and len(subtitle) < 60:
+        return True
+    return False
+
+
 def _hourly_candidates(limit: int = 50) -> list[tuple[Article, Score]]:
     now = datetime.utcnow()
     tz_name = _get_tz_name()
@@ -264,6 +280,8 @@ def _hourly_candidates(limit: int = 50) -> list[tuple[Article, Score]]:
 
     filtered = []
     for a, s in rows:
+        if _is_incomplete_candidate(a):
+            continue
         if a.cluster_key and a.cluster_key in selected_clusters:
             continue
         if (not a.cluster_key) and (_title_fallback_key(a) in selected_title_keys):

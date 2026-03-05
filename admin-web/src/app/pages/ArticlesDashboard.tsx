@@ -176,7 +176,7 @@ function parseMlReason(input?: string | null): { reason: string; tags: string[] 
     .filter((line) => !/^publish>=/i.test(line))
     .filter((line) => !/^delete<=/i.test(line))
     .filter((line) => !/^decision=/i.test(line))
-    .filter((line) => !/^(ai_ml_relevance|audience_fit|practical_value|content_completeness|non_duplicate|risk_level_ok|novelty_signal)=/i.test(line))
+    .filter((line) => !/^(ai_ml_relevance|audience_fit|practical_value|source_quality|content_completeness|non_duplicate|risk_level_ok|novelty_signal)=/i.test(line))
     .join(" ");
   const cleaned = (fallback || raw)
     .replace(/\bpublish>=\s*\d+(\.\d+)?/gi, "")

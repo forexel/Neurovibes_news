@@ -788,11 +788,54 @@ def refresh_ml_recommendation_in_session(session, article: Article, score: Score
 
     human_reason = str((features or {}).get("human_reason") or "").strip()
     top_drivers = (features or {}).get("top_drivers") or []
-    reason_parts = [f"ml_prob={prob:.3f}", f"publish>={publish_threshold:.2f}", f"delete<={delete_threshold:.2f}"]
+    tags: list[str] = []
+    gate_tag_map = {
+        "technical_gate": "too_technical",
+        "deep_technical_gate": "too_technical",
+        "mass_audience_gate": "low_significance",
+        "editor_style_gate": "style_mismatch",
+        "summary_boring_gate": "no_business_use",
+        "local_practical_gate": "no_business_use",
+        "investing_gate": "investment_noise",
+        "personnel_move_gate": "hiring_roles_noise",
+    }
+    for gate_key, tag in gate_tag_map.items():
+        if str((features or {}).get(gate_key) or "").strip().lower() == "failed":
+            tags.append(tag)
+
+    practical_value = float((features or {}).get("practical_value") or 0.0)
+    audience_fit = float((features or {}).get("audience_fit") or 0.0)
+    actionability = float((features or {}).get("actionability") or 0.0)
+    ai_ml_relevance = float((features or {}).get("ai_ml_relevance") or 0.0)
+    novelty = float((features or {}).get("novelty_signal") or 0.0)
+
+    if recommendation == "publish_candidate":
+        if practical_value >= 0.70:
+            tags.append("practical_tool")
+        if audience_fit >= 0.70:
+            tags.append("audience_fit_high")
+        if actionability >= 0.70:
+            tags.append("future_impact")
+        if novelty >= 0.70:
+            tags.append("wow_positive")
+    else:
+        if practical_value < 0.55:
+            tags.append("no_business_use")
+        if audience_fit < 0.55:
+            tags.append("low_significance")
+        if ai_ml_relevance < 0.55:
+            tags.append("non_ai")
+
+    tags = sorted(set([t for t in tags if t]))
+    reason_parts = []
+    if tags:
+        reason_parts.append("tags=" + ",".join(tags))
     if human_reason:
-        reason_parts.append(human_reason)
+        reason_parts.append("reason_text=" + human_reason)
     if isinstance(top_drivers, list) and top_drivers:
         reason_parts.append("drivers: " + ", ".join(str(x) for x in top_drivers[:3]))
+    if not reason_parts:
+        reason_parts.append("reason_text=Недостаточно сигналов для уверенного объяснения.")
 
     article.ml_prob = prob
     article.ml_recommendation = recommendation

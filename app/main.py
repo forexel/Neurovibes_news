@@ -1482,6 +1482,9 @@ def admin_data_articles(
                 base_query = base_query.where(Article.id.not_in(selected_today_ids))
             articles = session.scalars(base_query).all()
 
+        if view in {"all", "backlog", "unsorted", "no_double", "selected_hour", "selected_day"}:
+            articles = [a for a in articles if not _is_incomplete_for_review(a)]
+
         if view in {"all", "backlog"}:
             articles.sort(key=lambda a: (a.created_at or datetime.min), reverse=True)
             working_limit = WORKING_SET_PAGE_LIMIT * page_size
@@ -5228,6 +5231,32 @@ def _build_post_preview_text(article: Article) -> str:
         settings.telegram_signature or "@neuro_vibes_future",
     ]
     return "\n\n".join([p for p in parts if p])
+
+
+def _is_incomplete_for_review(article: Article) -> bool:
+    """
+    Hide obviously incomplete cards from editor working queues.
+    Published/deleted history is still available in dedicated views.
+    """
+    mode = str(article.content_mode or "").strip().lower()
+    if mode == "summary_only":
+        return True
+
+    text = str(article.text or "").strip()
+    subtitle = str(article.subtitle or "").strip()
+    ru_summary = str(article.ru_summary or "").strip()
+
+    if not text and not subtitle:
+        return True
+
+    low = text.lower()
+    if low.startswith("article url:") and ("comments url:" in low) and len(text) < 500:
+        return True
+
+    if len(text) < 220 and len(subtitle) < 60 and len(ru_summary) < 80:
+        return True
+
+    return False
 
 
 def _dt_to_utc_z(dt: datetime | None) -> str | None:
