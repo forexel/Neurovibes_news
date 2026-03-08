@@ -11,6 +11,7 @@ from app.api_dependencies import get_current_user, require_roles
 from app.db import session_scope
 from app.models import (
     Article,
+    ArticlePreview,
     ArticleEmbedding,
     ArticleStatus,
     ContentVersion,
@@ -27,6 +28,7 @@ from app.models import (
     User,
     UserRole,
 )
+from app.repositories.articles_repo import apply_preview_sort
 from app.services.audit import audit
 from app.services.auth import create_access_token, verify_password
 from app.services.auto_decision import decide_and_maybe_publish
@@ -97,27 +99,32 @@ def list_articles(
     page_size = max(1, min(100, page_size))
 
     with session_scope() as session:
-        query = select(Article)
-        count_query = select(func.count(Article.id))
+        query = (
+            select(
+                ArticlePreview,
+                Score.final_score.label("final_score"),
+            )
+            .join(Score, Score.article_id == ArticlePreview.id, isouter=True)
+        )
+        count_query = select(func.count(ArticlePreview.id))
 
         if status:
-            query = query.where(Article.status == status)
-            count_query = count_query.where(Article.status == status)
+            query = query.where(ArticlePreview.status == status)
+            count_query = count_query.where(ArticlePreview.status == status)
 
         if q:
             pattern = f"%{q}%"
-            cond = or_(Article.title.ilike(pattern), Article.subtitle.ilike(pattern), Article.ru_title.ilike(pattern))
+            cond = or_(ArticlePreview.title.ilike(pattern), ArticlePreview.subtitle.ilike(pattern), ArticlePreview.ru_title.ilike(pattern))
             query = query.where(cond)
             count_query = count_query.where(cond)
 
         total = int(session.scalar(count_query) or 0)
-        rows = session.scalars(
-            query.order_by(Article.created_at.desc()).offset((page - 1) * page_size).limit(page_size)
+        rows = session.execute(
+            apply_preview_sort(query, sort_by="created_at", sort_dir="desc").offset((page - 1) * page_size).limit(page_size)
         ).all()
 
         items = []
-        for a in rows:
-            s = session.get(Score, a.id)
+        for a, final_score in rows:
             items.append(
                 {
                     "id": a.id,
@@ -127,7 +134,7 @@ def list_articles(
                     "ru_title": a.ru_title,
                     "source_id": a.source_id,
                     "published_at": a.published_at,
-                    "score": s.final_score if s else None,
+                    "score": float(final_score) if final_score is not None else None,
                     "canonical_url": a.canonical_url,
                 }
             )

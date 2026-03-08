@@ -119,6 +119,7 @@ class Article(Base):
     ml_recommendation_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     ml_verdict_confirmed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     ml_verdict_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ml_verdict_tags: Mapped[list | None] = mapped_column(JSON, nullable=True)
     ml_verdict_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     scheduled_publish_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # Hour bucket (UTC, naive) for Selected Hour backfill/dedup.
@@ -138,6 +139,44 @@ class Article(Base):
         UniqueConstraint("canonical_url", name="uq_articles_canonical_url"),
         UniqueConstraint("source_id", "external_id", name="uq_article_source_external"),
         Index("ix_articles_status_created", "status", "created_at"),
+    )
+
+
+class ArticlePreview(Base):
+    __tablename__ = "article_previews"
+
+    id: Mapped[int] = mapped_column(ForeignKey("articles.id", ondelete="CASCADE"), primary_key=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    content_mode: Mapped[str] = mapped_column(String(20), nullable=False, default="summary_only")
+    double_of_article_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    subtitle: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    ru_title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ru_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    short_hook: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_id: Mapped[int] = mapped_column(ForeignKey("sources.id"), nullable=False)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    canonical_url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    generated_image_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    scheduled_publish_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    ml_recommendation: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    ml_recommendation_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ml_recommendation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ml_model_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    ml_recommendation_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    archived_kind: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    archived_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    ml_verdict_confirmed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    ml_verdict_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ml_verdict_tags: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    ml_verdict_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index("ix_article_previews_status_created", "status", "created_at"),
+        Index("ix_article_previews_source_created", "source_id", "created_at"),
+        Index("ix_article_previews_ml_conf", "ml_recommendation_confidence"),
     )
 
 

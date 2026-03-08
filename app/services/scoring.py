@@ -606,6 +606,32 @@ def _is_summary_and_boring(article: Article, semantic: dict) -> bool:
     return False
 
 
+def _is_insufficient_content(article: Article) -> bool:
+    """
+    Hard gate for empty/thin content.
+    Such articles should be auto-archived and not shown in manual review queues.
+    """
+    mode = str(article.content_mode or "").strip().lower()
+    if mode == "summary_only":
+        return True
+
+    text = str(article.text or "").strip()
+    subtitle = str(article.subtitle or "").strip()
+    ru_summary = str(article.ru_summary or "").strip()
+
+    if not text and not subtitle:
+        return True
+
+    low = text.lower()
+    if low.startswith("article url:") and ("comments url:" in low) and len(text) < 500:
+        return True
+
+    if len(text) < 220 and len(subtitle) < 60 and len(ru_summary) < 80:
+        return True
+
+    return False
+
+
 def _geek_penalty_factor(article: Article, semantic: dict, source_name: str | None) -> float:
     """Returns multiplicative penalty in [0.7..1.0] for geek-heavy content."""
     text = f"{article.title or ''} {article.subtitle or ''} {(article.text or '')[:2500]}".lower()
@@ -885,6 +911,15 @@ def score_article_in_session(session, article: Article, max_rank: int, editor_st
     """
     if article.status in {ArticleStatus.ARCHIVED, ArticleStatus.DOUBLE}:
         return {"ok": False, "error": f"article_not_scorable: status={article.status}"}
+
+    # Hard content gate: too little content for reliable scoring/review.
+    if _is_insufficient_content(article):
+        article.status = ArticleStatus.ARCHIVED
+        article.archived_kind = "filter"
+        article.archived_reason = "insufficient_content"
+        article.archived_at = datetime.utcnow()
+        article.updated_at = datetime.utcnow()
+        return {"ok": True, "article_id": article.id, "archived": True, "reason": "insufficient_content"}
 
     # Hard topical gate: if article is not about AI, archive it immediately.
     if not passes_ai_topic_filter(
@@ -1326,8 +1361,11 @@ def prune_bad_articles(limit: int = 50000, archive_summary_only: bool = True, ar
             if article.status in {ArticleStatus.PUBLISHED, ArticleStatus.SELECTED_HOURLY}:
                 continue
 
-            if archive_summary_only and (article.content_mode or "summary_only") == "summary_only":
+            if archive_summary_only and _is_insufficient_content(article):
                 article.status = ArticleStatus.ARCHIVED
+                article.archived_kind = "filter"
+                article.archived_reason = "insufficient_content"
+                article.archived_at = datetime.utcnow()
                 article.updated_at = datetime.utcnow()
                 counts["archived"] += 1
                 counts["summary_only"] += 1
@@ -1428,6 +1466,49 @@ def prune_bad_articles(limit: int = 50000, archive_summary_only: bool = True, ar
                     counts["low_mass_audience"] += 1
 
     return counts
+
+
+def archive_stale_unsorted(days_back: int = 3, limit: int = 50000) -> dict:
+    """
+    Archive stale working-queue items so "unsorted" stays operationally small.
+    Keeps published/scheduled/selected content untouched.
+    """
+    cutoff = datetime.utcnow() - timedelta(days=max(1, int(days_back or 1)))
+    archived = 0
+    scanned = 0
+
+    with session_scope() as session:
+        rows = session.scalars(
+            select(Article)
+            .where(
+                Article.status.in_(
+                    [
+                        ArticleStatus.NEW,
+                        ArticleStatus.INBOX,
+                        ArticleStatus.REVIEW,
+                        ArticleStatus.SCORED,
+                        ArticleStatus.READY,
+                    ]
+                ),
+                Article.created_at < cutoff,
+            )
+            .order_by(Article.created_at.asc())
+            .limit(limit)
+        ).all()
+
+        for article in rows:
+            scanned += 1
+            # Never auto-hide something already planned for publication.
+            if article.scheduled_publish_at is not None:
+                continue
+            article.status = ArticleStatus.ARCHIVED
+            article.archived_kind = "retention"
+            article.archived_reason = "stale_unsorted"
+            article.archived_at = datetime.utcnow()
+            article.updated_at = datetime.utcnow()
+            archived += 1
+
+    return {"ok": True, "days_back": int(max(1, int(days_back or 1))), "scanned": scanned, "archived": archived}
 
 
 def rescore_all_articles(limit: int = 50000, include_archived: bool = True) -> dict:

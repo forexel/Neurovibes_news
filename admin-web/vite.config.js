@@ -32,5 +32,18 @@ export default defineConfig({
       '/telegram': 'http://localhost:8000'
     }
   },
+  build: {
+    rollupOptions: {
+      output: {
+        entryFileNames: 'assets/app.js',
+        chunkFileNames: 'assets/chunk-[name].js',
+        assetFileNames: (assetInfo) => {
+          const name = String(assetInfo?.name || '')
+          if (name.endsWith('.css')) return 'assets/app.css'
+          return 'assets/[name][extname]'
+        }
+      }
+    }
+  },
   assetsInclude: ['**/*.svg', '**/*.csv']
 })

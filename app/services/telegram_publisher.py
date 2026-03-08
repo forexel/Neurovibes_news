@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from datetime import datetime
 from html import escape
 
@@ -14,6 +15,70 @@ from app.services.content_generation import generate_ru_summary
 from app.services.telegram_context import telegram_bot_token, telegram_channel_id, telegram_signature
 
 _MIN_FULL_TEXT_LEN = 500
+_TG_TIMEOUT_SECONDS = 30
+_TG_MAX_RETRIES = 3
+_TG_BASE_DELAY_SECONDS = 1.0
+_TG_PER_CHAT_MIN_DELAY_SECONDS = 1.05
+_TG_GLOBAL_MIN_DELAY_SECONDS = 0.05
+_LAST_CHAT_SEND_TS: dict[str, float] = {}
+_LAST_GLOBAL_SEND_TS: float = 0.0
+
+
+def _mask_sensitive(text: str, token: str | None = None) -> str:
+    out = str(text or "")
+    if token:
+        out = out.replace(token, "***")
+    out = out.replace("api.telegram.org/bot", "api.telegram.org/bot***")
+    return out[:1200]
+
+
+def _tg_wait_send_slot(chat_id: str) -> None:
+    global _LAST_GLOBAL_SEND_TS
+    now = time.monotonic()
+    last_chat = _LAST_CHAT_SEND_TS.get(chat_id, 0.0)
+    wait_chat = max(0.0, _TG_PER_CHAT_MIN_DELAY_SECONDS - (now - last_chat))
+    wait_global = max(0.0, _TG_GLOBAL_MIN_DELAY_SECONDS - (now - _LAST_GLOBAL_SEND_TS))
+    wait_s = max(wait_chat, wait_global)
+    if wait_s > 0:
+        time.sleep(wait_s)
+    _LAST_CHAT_SEND_TS[chat_id] = time.monotonic()
+    _LAST_GLOBAL_SEND_TS = _LAST_CHAT_SEND_TS[chat_id]
+
+
+def _tg_request(
+    url: str,
+    *,
+    token: str,
+    chat_id: str,
+    data: dict | None = None,
+    files: dict | None = None,
+    timeout: int = _TG_TIMEOUT_SECONDS,
+) -> dict:
+    last_error = ""
+    for attempt in range(1, _TG_MAX_RETRIES + 1):
+        _tg_wait_send_slot(chat_id)
+        try:
+            resp = httpx.post(url, data=data, files=files, timeout=timeout)
+            payload = resp.json()
+            if payload.get("ok"):
+                return payload
+
+            error_code = int(payload.get("error_code") or 0)
+            retry_after = 0
+            if isinstance(payload.get("parameters"), dict):
+                retry_after = int(payload["parameters"].get("retry_after") or 0)
+            if error_code == 429 and attempt < _TG_MAX_RETRIES:
+                time.sleep(max(_TG_BASE_DELAY_SECONDS, float(retry_after or 1)))
+                continue
+            last_error = str(payload)
+            break
+        except Exception as exc:
+            last_error = _mask_sensitive(str(exc), token=token)
+            if attempt < _TG_MAX_RETRIES:
+                time.sleep(_TG_BASE_DELAY_SECONDS * attempt)
+                continue
+            break
+    return {"ok": False, "error": last_error[:1200]}
 
 
 def send_test_message(text: str = "Neurovibes bot test message") -> dict:
@@ -23,18 +88,15 @@ def send_test_message(text: str = "Neurovibes bot test message") -> dict:
         return {"ok": False, "error": "telegram_not_configured"}
 
     url_base = f"https://api.telegram.org/bot{token}"
-    try:
-        resp = httpx.post(
-            f"{url_base}/sendMessage",
-            data={"chat_id": channel_id, "text": text[:4096]},
-            timeout=30,
-        )
-        data = resp.json()
-        if not data.get("ok"):
-            return {"ok": False, "error": str(data)}
-        return {"ok": True, "message_id": str(data["result"]["message_id"])}
-    except Exception as exc:
-        return {"ok": False, "error": str(exc)}
+    out = _tg_request(
+        f"{url_base}/sendMessage",
+        token=token,
+        chat_id=channel_id,
+        data={"chat_id": channel_id, "text": text[:4096]},
+    )
+    if not out.get("ok"):
+        return {"ok": False, "error": _mask_sensitive(str(out.get("error") or out), token=token)}
+    return {"ok": True, "message_id": str(out["result"]["message_id"])}
 
 
 def _has_pending_review(session, article_id: int) -> bool:
@@ -74,6 +136,14 @@ def publish_article(article_id: int, *, manual: bool = True) -> dict:
                 "error": "publish_blocked_insufficient_content",
                 "hint": "Сайт не дал полный текст. Нужен полноценный материал, а не короткий RSS summary.",
             }
+        last_success = session.scalars(
+            select(PublishJob)
+            .where(PublishJob.article_id == article.id, PublishJob.status == PublishStatus.SUCCESS)
+            .order_by(PublishJob.id.desc())
+            .limit(1)
+        ).first()
+        if last_success and (last_success.telegram_message_id or "").strip():
+            return {"ok": True, "message_id": str(last_success.telegram_message_id), "idempotent": True}
         has_ru = bool((article.ru_title or "").strip()) and bool((article.ru_summary or "").strip())
     if not has_ru:
         try:
@@ -95,6 +165,16 @@ def publish_article(article_id: int, *, manual: bool = True) -> dict:
                 "error": "publish_blocked_insufficient_content",
                 "hint": "Сайт не дал полный текст. Нужен полноценный материал, а не короткий RSS summary.",
             }
+        last_success = session.scalars(
+            select(PublishJob)
+            .where(PublishJob.article_id == article.id, PublishJob.status == PublishStatus.SUCCESS)
+            .order_by(PublishJob.id.desc())
+            .limit(1)
+        ).first()
+        if last_success and (last_success.telegram_message_id or "").strip():
+            article.status = ArticleStatus.PUBLISHED
+            article.scheduled_publish_at = None
+            return {"ok": True, "message_id": str(last_success.telegram_message_id), "idempotent": True}
         if not (article.ru_title or "").strip() or not (article.ru_summary or "").strip():
             return {"ok": False, "error": "ru_content_required", "hint": "Нажми Generate Post и/или Translate Full, затем сохрани RU текст"}
 
@@ -132,45 +212,46 @@ def publish_article(article_id: int, *, manual: bool = True) -> dict:
 
         resp = None
         if image_path and image_path.startswith(("http://", "https://")):
-            photo_resp = httpx.post(
+            photo_data = _tg_request(
                 f"{url_base}/sendPhoto",
+                token=token,
+                chat_id=channel_id,
                 data={
                     "chat_id": channel_id,
                     "caption": caption[:1024],
                     "parse_mode": "HTML",
                     "photo": image_path,
                 },
-                timeout=30,
             )
-            photo_data = photo_resp.json()
             if photo_data.get("ok"):
-                resp = photo_resp
+                resp = photo_data
         elif image_path and os.path.exists(image_path):
             with open(image_path, "rb") as f:
-                photo_resp = httpx.post(
+                photo_data = _tg_request(
                     f"{url_base}/sendPhoto",
+                    token=token,
+                    chat_id=channel_id,
                     data={
                         "chat_id": channel_id,
                         "caption": caption[:1024],
                         "parse_mode": "HTML",
                     },
                     files={"photo": f},
-                    timeout=30,
                 )
-            photo_data = photo_resp.json()
             if photo_data.get("ok"):
-                resp = photo_resp
+                resp = photo_data
 
         if resp is None:
-            resp = httpx.post(
+            resp = _tg_request(
                 f"{url_base}/sendMessage",
+                token=token,
+                chat_id=channel_id,
                 data={"chat_id": channel_id, "text": caption[:4096], "parse_mode": "HTML"},
-                timeout=30,
             )
 
-        data = resp.json()
+        data = resp
         if not data.get("ok"):
-            raise RuntimeError(str(data))
+            raise RuntimeError(_mask_sensitive(str(data), token=token))
 
         msg_id = str(data["result"]["message_id"])
 
@@ -196,8 +277,8 @@ def publish_article(article_id: int, *, manual: bool = True) -> dict:
             job = session.scalars(select(PublishJob).where(PublishJob.article_id == article_id).order_by(PublishJob.id.desc()).limit(1)).first()
             if job:
                 job.status = PublishStatus.FAILED
-                job.error_text = str(exc)
-        return {"ok": False, "error": str(exc)}
+                job.error_text = _mask_sensitive(str(exc), token=token)
+        return {"ok": False, "error": _mask_sensitive(str(exc), token=token)}
 
 
 def publish_scheduled_due(limit: int = 20) -> dict:

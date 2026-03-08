@@ -3,30 +3,42 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import re
 import threading
+import time
 import uuid
+from collections import deque
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from html import escape
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
+import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select, text
+from starlette.middleware.httpsredirect import HTTPSRedirectMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+from sqlalchemy import and_, func, not_, or_, select, text
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import load_only
 
 from app.core.config import settings
-from app.db import init_db, session_scope
+from app.db import get_sql_metrics_snapshot, init_db, session_scope
 from app.models import (
     Article,
+    ArticlePreview,
     ArticleEmbedding,
     ArticleStatus,
     ContentVersion,
     DailySelection,
     EditorFeedback,
     PublishJob,
+    ReasonTagCatalog,
     RawPageSnapshot,
     Score,
     ScoreParameter,
@@ -37,6 +49,7 @@ from app.models import (
     User,
     UserWorkspace,
 )
+from app.repositories.articles_repo import apply_preview_sort, count_from_query
 from app.api_v1 import router as v1_router
 from app.services.bootstrap import seed_sources
 from app.services.content_generation import (
@@ -82,6 +95,7 @@ from app.services.runtime_settings import (
     RUNTIME_DEFAULTS,
     delete_runtime_setting,
     get_runtime_float,
+    get_runtime_int,
     get_runtime_str,
     list_runtime_settings,
     upsert_runtime_setting,
@@ -90,6 +104,30 @@ from app.services.runtime_settings import (
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Neurovibes News API", version="0.3.0")
+
+
+def _csv_items(raw: str) -> list[str]:
+    return [x.strip() for x in str(raw or "").split(",") if x and x.strip()]
+
+
+_trusted_hosts = _csv_items(settings.trusted_hosts)
+_trusted_proxy_ips = set(_csv_items(settings.proxy_trusted_ips))
+if _trusted_hosts:
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=_trusted_hosts)
+
+if settings.enable_https_redirect:
+    app.add_middleware(HTTPSRedirectMiddleware)
+
+_cors_allowed_origins = _csv_items(settings.cors_allowed_origins)
+if _cors_allowed_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_allowed_origins,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
+    )
+
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 ADMIN_WEB_DIST = Path("admin-web/dist")
 ADMIN_WEB_ASSETS = ADMIN_WEB_DIST / "assets"
@@ -98,6 +136,263 @@ if ADMIN_WEB_ASSETS.exists():
 app.include_router(v1_router)
 
 WORKING_SET_PAGE_LIMIT = 20
+
+OPS_METRICS_LOCK = threading.Lock()
+OPS_STARTED_AT = datetime.utcnow()
+OPS_REQ_WINDOW_SECONDS = int(os.getenv("OPS_REQ_WINDOW_SECONDS", "900"))
+OPS_5XX_ALERT_WINDOW_SECONDS = int(os.getenv("OPS_5XX_ALERT_WINDOW_SECONDS", "300"))
+OPS_5XX_ALERT_THRESHOLD = int(os.getenv("OPS_5XX_ALERT_THRESHOLD", "8"))
+OPS_5XX_ALERT_COOLDOWN_SECONDS = int(os.getenv("OPS_5XX_ALERT_COOLDOWN_SECONDS", "900"))
+OPS_RATE_LIMIT_POSTS_PER_MIN_ANON = int(os.getenv("OPS_RATE_LIMIT_POSTS_PER_MIN_ANON", "30"))
+OPS_RATE_LIMIT_POSTS_PER_MIN_AUTH = int(os.getenv("OPS_RATE_LIMIT_POSTS_PER_MIN_AUTH", "120"))
+OPS_RATE_LIMIT_BURST_MULT = float(os.getenv("OPS_RATE_LIMIT_BURST_MULT", "1.5"))
+OPS_RATE_LIMIT_PREFIXES = ("/api/", "/v1/")
+
+_OPS_REQUEST_HISTORY: deque = deque()
+_OPS_5XX_TIMESTAMPS: deque = deque()
+_OPS_LAST_5XX_ALERT_TS: float = 0.0
+_OPS_RATE_BUCKETS: dict[str, dict[str, float]] = {}
+_OPS_PATH_STATS: dict[tuple[str, str], dict[str, float]] = {}
+
+
+def _ops_client_ip(request: Request) -> str:
+    remote_ip = str(request.client.host) if request.client and request.client.host else "unknown"
+    xff = (request.headers.get("x-forwarded-for") or "").strip()
+    if xff and remote_ip in _trusted_proxy_ips:
+        return xff.split(",")[0].strip()
+    xrip = (request.headers.get("x-real-ip") or "").strip()
+    if xrip and remote_ip in _trusted_proxy_ips:
+        return xrip
+    return remote_ip
+
+
+def _origin_allowed_for_request(request: Request) -> bool:
+    host = (request.headers.get("host") or "").split(":")[0].strip().lower()
+    if not host:
+        return False
+    allowed_hosts = {h.lower() for h in _trusted_hosts}
+    if host not in allowed_hosts:
+        return False
+
+    origin = (request.headers.get("origin") or "").strip()
+    referer = (request.headers.get("referer") or "").strip()
+    candidate = origin or referer
+    if not candidate:
+        # Non-browser clients often omit Origin/Referer.
+        return True
+    try:
+        parsed = urlparse(candidate)
+    except Exception:
+        return False
+    origin_host = (parsed.hostname or "").strip().lower()
+    if not origin_host:
+        return False
+    if origin_host in allowed_hosts:
+        return True
+    if _cors_allowed_origins:
+        for item in _cors_allowed_origins:
+            try:
+                item_host = (urlparse(item).hostname or "").strip().lower()
+            except Exception:
+                item_host = ""
+            if item_host and item_host == origin_host:
+                return True
+    return False
+
+
+def _ops_norm_path(path: str) -> str:
+    p = str(path or "/")
+    p = re.sub(r"/\d+", "/:id", p)
+    p = re.sub(r"/[0-9a-f]{16,}", "/:id", p, flags=re.IGNORECASE)
+    return p[:200]
+
+
+def _ops_percentile(values: list[float], p: float) -> float:
+    if not values:
+        return 0.0
+    arr = sorted(float(x) for x in values)
+    if len(arr) == 1:
+        return arr[0]
+    idx = (len(arr) - 1) * p
+    lo = int(math.floor(idx))
+    hi = int(math.ceil(idx))
+    if lo == hi:
+        return arr[lo]
+    return arr[lo] + (arr[hi] - arr[lo]) * (idx - lo)
+
+
+def _ops_send_telegram_alert_async(text_msg: str) -> None:
+    def _run() -> None:
+        try:
+            token = (settings.telegram_bot_token or "").strip()
+            chat_id = (get_runtime_str("telegram_review_chat_id") or settings.telegram_review_chat_id or "").strip()
+            if not token or not chat_id:
+                return
+            httpx.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat_id, "text": text_msg[:3500]},
+                timeout=10,
+            )
+        except Exception:
+            return
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _ops_maybe_alert_5xx(now_ts: float, path: str, method: str, status_code: int) -> None:
+    global _OPS_LAST_5XX_ALERT_TS
+    if status_code < 500:
+        return
+    with OPS_METRICS_LOCK:
+        _OPS_5XX_TIMESTAMPS.append(now_ts)
+        cutoff = now_ts - OPS_5XX_ALERT_WINDOW_SECONDS
+        while _OPS_5XX_TIMESTAMPS and _OPS_5XX_TIMESTAMPS[0] < cutoff:
+            _OPS_5XX_TIMESTAMPS.popleft()
+        current_5xx = len(_OPS_5XX_TIMESTAMPS)
+        can_alert = (now_ts - _OPS_LAST_5XX_ALERT_TS) >= OPS_5XX_ALERT_COOLDOWN_SECONDS
+        if current_5xx < OPS_5XX_ALERT_THRESHOLD or not can_alert:
+            return
+        _OPS_LAST_5XX_ALERT_TS = now_ts
+
+    _ops_send_telegram_alert_async(
+        f"ALERT: всплеск 5xx на API\n"
+        f"Окно: {OPS_5XX_ALERT_WINDOW_SECONDS}s\n"
+        f"5xx: {current_5xx}\n"
+        f"Последний: {method} {path} -> {status_code}"
+    )
+
+
+def _ops_rate_limit_blocked(request: Request) -> bool:
+    method = (request.method or "").upper()
+    path = str(request.url.path or "")
+    if method != "POST":
+        return False
+    if not any(path.startswith(prefix) for prefix in OPS_RATE_LIMIT_PREFIXES):
+        return False
+
+    ip = _ops_client_ip(request)
+    auth_hint = bool((request.cookies.get("nv_session") or "").strip())
+    per_min = OPS_RATE_LIMIT_POSTS_PER_MIN_AUTH if auth_hint else OPS_RATE_LIMIT_POSTS_PER_MIN_ANON
+    burst = max(1.0, float(per_min) * OPS_RATE_LIMIT_BURST_MULT)
+    refill_per_sec = float(per_min) / 60.0
+    key = f"{ip}:{'auth' if auth_hint else 'anon'}"
+    now_ts = time.time()
+
+    with OPS_METRICS_LOCK:
+        bucket = _OPS_RATE_BUCKETS.get(key)
+        if bucket is None:
+            bucket = {"tokens": burst, "last_ts": now_ts}
+            _OPS_RATE_BUCKETS[key] = bucket
+        elapsed = max(0.0, now_ts - float(bucket["last_ts"]))
+        bucket["last_ts"] = now_ts
+        bucket["tokens"] = min(burst, float(bucket["tokens"]) + elapsed * refill_per_sec)
+        if float(bucket["tokens"]) < 1.0:
+            return True
+        bucket["tokens"] = float(bucket["tokens"]) - 1.0
+        # Periodic lightweight cleanup of stale buckets.
+        if len(_OPS_RATE_BUCKETS) > 4000:
+            stale_cutoff = now_ts - 3600
+            for k in list(_OPS_RATE_BUCKETS.keys())[:1200]:
+                if float(_OPS_RATE_BUCKETS[k].get("last_ts") or 0.0) < stale_cutoff:
+                    _OPS_RATE_BUCKETS.pop(k, None)
+    return False
+
+
+def _ops_record_request(method: str, path: str, status_code: int, duration_ms: float) -> None:
+    now_ts = time.time()
+    with OPS_METRICS_LOCK:
+        _OPS_REQUEST_HISTORY.append(
+            {
+                "ts": now_ts,
+                "method": method,
+                "path": _ops_norm_path(path),
+                "status": int(status_code),
+                "duration_ms": float(duration_ms),
+            }
+        )
+        cutoff = now_ts - OPS_REQ_WINDOW_SECONDS
+        while _OPS_REQUEST_HISTORY and float(_OPS_REQUEST_HISTORY[0]["ts"]) < cutoff:
+            _OPS_REQUEST_HISTORY.popleft()
+
+        k = (method, _ops_norm_path(path))
+        stat = _OPS_PATH_STATS.get(k)
+        if stat is None:
+            stat = {"count": 0.0, "errors_5xx": 0.0, "total_ms": 0.0, "max_ms": 0.0}
+            _OPS_PATH_STATS[k] = stat
+        stat["count"] += 1.0
+        stat["total_ms"] += float(duration_ms)
+        stat["max_ms"] = max(float(stat["max_ms"]), float(duration_ms))
+        if int(status_code) >= 500:
+            stat["errors_5xx"] += 1.0
+
+        if len(_OPS_PATH_STATS) > 2000:
+            keep = sorted(_OPS_PATH_STATS.items(), key=lambda kv: kv[1].get("count", 0.0), reverse=True)[:1000]
+            _OPS_PATH_STATS.clear()
+            _OPS_PATH_STATS.update(dict(keep))
+
+
+def _article_list_load_options():
+    return load_only(
+        Article.id,
+        Article.status,
+        Article.content_mode,
+        Article.double_of_article_id,
+        Article.title,
+        Article.subtitle,
+        Article.ru_title,
+        Article.ru_summary,
+        Article.short_hook,
+        Article.source_id,
+        Article.published_at,
+        Article.created_at,
+        Article.canonical_url,
+        Article.generated_image_path,
+        Article.scheduled_publish_at,
+        Article.ml_recommendation,
+        Article.ml_recommendation_confidence,
+        Article.ml_recommendation_reason,
+        Article.ml_model_version,
+        Article.ml_recommendation_at,
+        Article.archived_kind,
+        Article.archived_reason,
+        Article.archived_at,
+        Article.ml_verdict_confirmed,
+        Article.ml_verdict_comment,
+        Article.ml_verdict_tags,
+        Article.ml_verdict_updated_at,
+    )
+
+
+def _article_preview_list_load_options():
+    return load_only(
+        ArticlePreview.id,
+        ArticlePreview.status,
+        ArticlePreview.content_mode,
+        ArticlePreview.double_of_article_id,
+        ArticlePreview.title,
+        ArticlePreview.subtitle,
+        ArticlePreview.ru_title,
+        ArticlePreview.ru_summary,
+        ArticlePreview.short_hook,
+        ArticlePreview.source_id,
+        ArticlePreview.published_at,
+        ArticlePreview.created_at,
+        ArticlePreview.canonical_url,
+        ArticlePreview.generated_image_path,
+        ArticlePreview.scheduled_publish_at,
+        ArticlePreview.ml_recommendation,
+        ArticlePreview.ml_recommendation_confidence,
+        ArticlePreview.ml_recommendation_reason,
+        ArticlePreview.ml_model_version,
+        ArticlePreview.ml_recommendation_at,
+        ArticlePreview.archived_kind,
+        ArticlePreview.archived_reason,
+        ArticlePreview.archived_at,
+        ArticlePreview.ml_verdict_confirmed,
+        ArticlePreview.ml_verdict_comment,
+        ArticlePreview.ml_verdict_tags,
+        ArticlePreview.ml_verdict_updated_at,
+    )
 
 SCORING_JOBS: dict[str, dict] = {}
 SCORING_LOCK = threading.Lock()
@@ -143,6 +438,66 @@ async def _user_llm_key_middleware(request: Request, call_next):
     except Exception as exc:
         logger.warning("telegram context preload skipped for user %s: %s", user.id, exc)
     return await call_next(request)
+
+
+@app.middleware("http")
+async def _csrf_origin_guard_middleware(request: Request, call_next):
+    method = (request.method or "").upper()
+    if method in {"POST", "PUT", "PATCH", "DELETE"}:
+        if (request.cookies.get("nv_session") or "").strip():
+            if not _origin_allowed_for_request(request):
+                return JSONResponse(status_code=403, content={"detail": "csrf_origin_blocked"})
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def _edge_post_rate_limit_middleware(request: Request, call_next):
+    if _ops_rate_limit_blocked(request):
+        return JSONResponse(status_code=429, content={"detail": "rate_limited"})
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def _ops_metrics_and_alerts_middleware(request: Request, call_next):
+    started = time.perf_counter()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = int(response.status_code)
+        return response
+    finally:
+        duration_ms = (time.perf_counter() - started) * 1000.0
+        method = (request.method or "").upper()
+        path = str(request.url.path or "")
+        _ops_record_request(method=method, path=path, status_code=status_code, duration_ms=duration_ms)
+        _ops_maybe_alert_5xx(now_ts=time.time(), path=path, method=method, status_code=status_code)
+
+
+@app.middleware("http")
+async def _disable_asset_cache_middleware(request: Request, call_next):
+    response = await call_next(request)
+    path = request.url.path or ""
+    if path == "/" or path.startswith("/assets/"):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
+
+@app.middleware("http")
+async def _security_headers_middleware(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    response.headers.setdefault("Content-Security-Policy", settings.security_csp)
+    if settings.enable_https_redirect:
+        response.headers.setdefault(
+            "Strict-Transport-Security",
+            f"max-age={max(0, int(settings.security_hsts_seconds))}; includeSubDomains",
+        )
+    return response
 
 
 def _require_session_user(request: Request) -> User:
@@ -220,6 +575,65 @@ def _matches_article_query(x: dict, q_norm: str, words: list[str]) -> bool:
     return bool(words) and all(w in blob for w in words)
 
 
+def _normalize_reason_tag(raw: str) -> str:
+    value = str(raw or "").strip().lower()
+    value = re.sub(r"[^\w-]+", "_", value)
+    value = re.sub(r"_+", "_", value).strip("_")
+    return value[:64]
+
+
+def _extract_reason_tags(text: str | None) -> list[str]:
+    src = str(text or "").replace("\r", "").strip()
+    if not src:
+        return []
+    tags: list[str] = []
+    for line in src.split("\n"):
+        line = line.strip()
+        if not re.match(r"^tags\s*=", line, flags=re.IGNORECASE):
+            continue
+        rhs = re.sub(r"^tags\s*=", "", line, flags=re.IGNORECASE).strip()
+        for part in rhs.split(","):
+            tag = _normalize_reason_tag(part)
+            if tag:
+                tags.append(tag)
+    return sorted(set(tags))
+
+
+def _tag_title_from_slug(slug: str) -> str:
+    if not slug:
+        return ""
+    title = slug.replace("_", " ").replace("-", " ").strip()
+    return title[:128] if title else slug[:128]
+
+
+def _upsert_reason_tags(session, tags: list[str], *, created_by_user_id: int | None = None) -> int:
+    inserted = 0
+    if not tags:
+        return inserted
+    existing = {
+        str(x.slug or "").strip()
+        for x in session.scalars(select(ReasonTagCatalog).where(ReasonTagCatalog.slug.in_(tags))).all()
+    }
+    now = datetime.utcnow()
+    for slug in tags:
+        if slug in existing:
+            continue
+        session.add(
+            ReasonTagCatalog(
+                slug=slug,
+                title_ru=_tag_title_from_slug(slug),
+                description="user created tag",
+                is_active=True,
+                is_system=False,
+                created_by_user_id=created_by_user_id,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        inserted += 1
+    return inserted
+
+
 class FeedbackIn(BaseModel):
     explanation_text: str = Field(min_length=5, max_length=5000)
 
@@ -227,6 +641,7 @@ class FeedbackIn(BaseModel):
 class MlVerdictIn(BaseModel):
     confirmed: bool
     comment: str = Field(default="", max_length=4000)
+    tags: list[str] = Field(default_factory=list, max_length=50)
 
 
 class RunPipelineIn(BaseModel):
@@ -348,6 +763,11 @@ class SetupTelegramIn(BaseModel):
 
 @app.on_event("startup")
 def on_startup() -> None:
+    if settings.app_env.lower() in {"prod", "production"}:
+        if settings.jwt_secret == "change_this_in_production":
+            logger.error("SECURITY: JWT_SECRET is default; set a strong secret in production.")
+        if settings.admin_password == "admin123":
+            logger.error("SECURITY: ADMIN_PASSWORD is default; rotate immediately in production.")
     init_db()
     try:
         seed_sources()
@@ -355,9 +775,88 @@ def on_startup() -> None:
         logger.warning("seed_sources skipped during startup: %s", exc)
 
 
-@app.get("/health")
-def health() -> dict[str, str]:
+def _ops_runtime_snapshot() -> dict:
+    with OPS_METRICS_LOCK:
+        rows = list(_OPS_REQUEST_HISTORY)
+        path_stats = dict(_OPS_PATH_STATS)
+        recent_5xx = len(_OPS_5XX_TIMESTAMPS)
+
+    durations = [float(r.get("duration_ms") or 0.0) for r in rows]
+    total = len(rows)
+    by_status = {
+        "2xx": sum(1 for r in rows if 200 <= int(r.get("status") or 0) < 300),
+        "4xx": sum(1 for r in rows if 400 <= int(r.get("status") or 0) < 500),
+        "5xx": sum(1 for r in rows if int(r.get("status") or 0) >= 500),
+    }
+    top_paths = []
+    for (method, path), stat in path_stats.items():
+        cnt = int(stat.get("count") or 0)
+        if cnt <= 0:
+            continue
+        top_paths.append(
+            {
+                "method": method,
+                "path": path,
+                "count": cnt,
+                "avg_ms": round(float(stat.get("total_ms") or 0.0) / cnt, 2),
+                "max_ms": round(float(stat.get("max_ms") or 0.0), 2),
+                "errors_5xx": int(stat.get("errors_5xx") or 0),
+            }
+        )
+    top_paths.sort(key=lambda x: (x["avg_ms"], x["count"]), reverse=True)
+
+    return {
+        "uptime_seconds": int((datetime.utcnow() - OPS_STARTED_AT).total_seconds()),
+        "window_seconds": OPS_REQ_WINDOW_SECONDS,
+        "requests_total": total,
+        "status_counts": by_status,
+        "latency_ms": {
+            "p50": round(_ops_percentile(durations, 0.50), 2),
+            "p95": round(_ops_percentile(durations, 0.95), 2),
+            "p99": round(_ops_percentile(durations, 0.99), 2),
+            "max": round(max(durations), 2) if durations else 0.0,
+        },
+        "recent_5xx_in_alert_window": recent_5xx,
+        "top_slow_paths": top_paths[:10],
+        "sql": get_sql_metrics_snapshot(top_n=10),
+    }
+
+
+@app.get("/health/live")
+def health_live() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/health/ready")
+def health_ready() -> dict[str, str]:
+    try:
+        with session_scope() as session:
+            session.execute(text("SELECT 1"))
+        return {"status": "ok"}
+    except Exception as exc:
+        logger.warning("health_ready db check failed: %s", exc)
+        raise HTTPException(status_code=503, detail="db_not_ready")
+
+
+@app.get("/health")
+def health() -> dict[str, object]:
+    ready = True
+    db_status = "ok"
+    try:
+        with session_scope() as session:
+            session.execute(text("SELECT 1"))
+    except Exception as exc:
+        ready = False
+        db_status = "error"
+        logger.warning("health db check failed: %s", exc)
+    return {
+        "status": "ok" if ready else "degraded",
+        "db": db_status,
+        "ops": {
+            "uptime_seconds": int((datetime.utcnow() - OPS_STARTED_AT).total_seconds()),
+            "recent_5xx_in_alert_window": int(len(_OPS_5XX_TIMESTAMPS)),
+        },
+    }
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -393,7 +892,14 @@ def login_submit(login: str = Form(...), password: str = Form(...)) -> RedirectR
         return RedirectResponse(url="/login", status_code=303)
     token = create_access_token(user)
     resp = RedirectResponse(url="/", status_code=303)
-    resp.set_cookie("nv_session", token, httponly=True, samesite="lax", max_age=60 * 60 * 24 * 7)
+    resp.set_cookie(
+        "nv_session",
+        token,
+        httponly=True,
+        secure=bool(settings.enable_https_redirect),
+        samesite="lax",
+        max_age=60 * 60 * 24 * 7,
+    )
     return resp
 
 
@@ -1292,15 +1798,26 @@ def list_articles(
     sort_dir: str = "desc",
 ) -> list[dict]:
     with session_scope() as session:
-        q = select(Article).where(Article.status != ArticleStatus.ARCHIVED)
+        q = select(ArticlePreview).options(_article_preview_list_load_options()).where(
+            ArticlePreview.status != ArticleStatus.ARCHIVED.value
+        )
         if status:
-            q = q.where(Article.status == status)
+            q = q.where(ArticlePreview.status == status)
         articles = session.scalars(q).all()
+
+        ids = [int(a.id) for a in articles]
+        source_ids = [int(sid) for sid in {int(a.source_id) for a in articles if a.source_id is not None}]
+        score_map: dict[int, Score] = {}
+        source_map: dict[int, Source] = {}
+        if ids:
+            score_map = {int(s.article_id): s for s in session.scalars(select(Score).where(Score.article_id.in_(ids))).all()}
+        if source_ids:
+            source_map = {int(s.id): s for s in session.scalars(select(Source).where(Source.id.in_(source_ids))).all()}
 
         result = []
         for a in articles:
-            score = session.get(Score, a.id)
-            source = session.get(Source, a.source_id)
+            score = score_map.get(int(a.id))
+            source = source_map.get(int(a.source_id)) if a.source_id is not None else None
             result.append(_serialize_article(a, score, source))
 
     reverse = sort_dir.lower() != "asc"
@@ -1344,28 +1861,44 @@ def article_details(article_id: int) -> dict:
         data["archived_kind"] = article.archived_kind
         data["archived_reason"] = article.archived_reason
         data["archived_at"] = _dt_to_utc_z(article.archived_at)
-        emb = session.scalars(
-            select(ArticleEmbedding)
-            .where(ArticleEmbedding.article_id == article_id)
-            .order_by(ArticleEmbedding.created_at.desc())
-            .limit(1)
-        ).first()
-        if emb and emb.embedding:
-            vec = list(emb.embedding or [])
-            data["embedding_dim"] = len(vec)
-            data["embedding_preview"] = [round(float(x), 6) for x in vec[:24]]
-            data["article_vector_model"] = settings.embedding_model
-        else:
+        try:
+            emb = session.scalars(
+                select(ArticleEmbedding)
+                .where(ArticleEmbedding.article_id == article_id)
+                .order_by(ArticleEmbedding.created_at.desc())
+                .limit(1)
+            ).first()
+            vec_raw = emb.embedding if emb is not None else None
+            if vec_raw is not None:
+                vec = list(vec_raw)
+                if vec:
+                    data["embedding_dim"] = len(vec)
+                    data["embedding_preview"] = [round(float(x), 6) for x in vec[:24]]
+                    data["article_vector_model"] = settings.embedding_model
+                else:
+                    data["embedding_dim"] = None
+                    data["embedding_preview"] = None
+                    data["article_vector_model"] = None
+            else:
+                data["embedding_dim"] = None
+                data["embedding_preview"] = None
+                data["article_vector_model"] = None
+        except Exception as exc:
+            logger.warning("article_details embedding skipped for article_id=%s: %s", article_id, exc)
             data["embedding_dim"] = None
             data["embedding_preview"] = None
             data["article_vector_model"] = None
-        latest_feedback = session.scalars(
-            select(EditorFeedback.explanation_text)
-            .where(EditorFeedback.article_id == article_id)
-            .order_by(EditorFeedback.created_at.desc())
-            .limit(1)
-        ).first()
-        data["feedback"] = latest_feedback or ""
+        try:
+            latest_feedback = session.scalars(
+                select(EditorFeedback.explanation_text)
+                .where(EditorFeedback.article_id == article_id)
+                .order_by(EditorFeedback.created_at.desc())
+                .limit(1)
+            ).first()
+            data["feedback"] = latest_feedback or ""
+        except Exception as exc:
+            logger.warning("article_details feedback skipped for article_id=%s: %s", article_id, exc)
+            data["feedback"] = ""
     return data
 
 
@@ -1375,6 +1908,7 @@ def admin_data_articles(
     view: str = "all",
     page: int = 1,
     page_size: int = 25,
+    include_total: bool = True,
     sort_by: str = "created_at",
     sort_dir: str = "desc",
     hide_double: bool = False,
@@ -1384,6 +1918,17 @@ def admin_data_articles(
     user = _get_session_user(request)
     page = max(page, 1)
     page_size = min(max(page_size, 1), 100)
+    def _not_incomplete_expr():
+        subtitle_empty = func.length(func.trim(func.coalesce(ArticlePreview.subtitle, ""))) == 0
+        ru_summary_empty = func.length(func.trim(func.coalesce(ArticlePreview.ru_summary, ""))) == 0
+        title_empty = func.length(func.trim(func.coalesce(ArticlePreview.title, ""))) == 0
+        return not_(
+            and_(
+                ArticlePreview.content_mode == "summary_only",
+                or_(title_empty, and_(subtitle_empty, ru_summary_empty)),
+            )
+        )
+
     with session_scope() as session:
         tz_name = "Europe/Moscow"
         try:
@@ -1397,16 +1942,16 @@ def admin_data_articles(
         selected_day_map: dict[int, date] = {}
         selected_any_day_ids: list[int] = []
         selected_today_ids: list[int] = []
-        base_query = select(Article)
+        base_query = select(ArticlePreview).options(_article_preview_list_load_options())
         if view == "deleted":
-            base_query = base_query.where(Article.status.in_([ArticleStatus.ARCHIVED, ArticleStatus.REJECTED]))
-            articles = session.scalars(base_query).all()
+            base_query = base_query.where(ArticlePreview.status.in_([ArticleStatus.ARCHIVED.value, ArticleStatus.REJECTED.value]))
+            articles = []
         elif view == "published":
-            base_query = base_query.where(Article.status == ArticleStatus.PUBLISHED)
-            articles = session.scalars(base_query).all()
+            base_query = base_query.where(ArticlePreview.status == ArticleStatus.PUBLISHED.value)
+            articles = []
         elif view == "selected_hour":
-            base_query = base_query.where(Article.status == ArticleStatus.SELECTED_HOURLY)
-            articles = session.scalars(base_query).all()
+            base_query = base_query.where(ArticlePreview.status == ArticleStatus.SELECTED_HOURLY.value)
+            articles = []
         elif view == "selected_day":
             rows = session.execute(
                 select(DailySelection.article_id, DailySelection.selected_date).where(
@@ -1418,8 +1963,8 @@ def admin_data_articles(
                 if prev is None or sdate > prev:
                     selected_day_map[int(aid)] = sdate
             ids = list(selected_day_map.keys())
-            base_query = base_query.where(Article.id.in_(ids)) if ids else base_query.where(Article.id == -1)
-            articles = session.scalars(base_query).all()
+            base_query = base_query.where(ArticlePreview.id.in_(ids)) if ids else base_query.where(ArticlePreview.id == -1)
+            articles = []
         elif view == "unsorted":
             # Unsorted = editor inbox excluding anything that was already "sent somewhere":
             # - published
@@ -1432,20 +1977,23 @@ def admin_data_articles(
                 ).all()
             )
             base_query = base_query.where(
-                Article.status != ArticleStatus.ARCHIVED,
-                Article.status != ArticleStatus.PUBLISHED,
-                Article.status != ArticleStatus.SELECTED_HOURLY,
-                Article.status != ArticleStatus.REJECTED,
+                ArticlePreview.status != ArticleStatus.ARCHIVED.value,
+                ArticlePreview.status != ArticleStatus.PUBLISHED.value,
+                ArticlePreview.status != ArticleStatus.SELECTED_HOURLY.value,
+                ArticlePreview.status != ArticleStatus.REJECTED.value,
             )
+            recent_days = int(max(1, get_runtime_int("unsorted_recent_days", default=3)))
+            cutoff = datetime.utcnow() - timedelta(days=recent_days)
+            base_query = base_query.where(ArticlePreview.created_at >= cutoff)
             if selected_any_day_ids:
-                base_query = base_query.where(Article.id.not_in(list(set(int(x) for x in selected_any_day_ids))))
-            articles = session.scalars(base_query).all()
+                base_query = base_query.where(ArticlePreview.id.not_in(list(set(int(x) for x in selected_any_day_ids))))
+            articles = []
         elif view == "no_double":
             base_query = base_query.where(
-                Article.status != ArticleStatus.ARCHIVED,
-                Article.status != ArticleStatus.DOUBLE,
+                ArticlePreview.status != ArticleStatus.ARCHIVED.value,
+                ArticlePreview.status != ArticleStatus.DOUBLE.value,
             )
-            articles = session.scalars(base_query).all()
+            articles = []
         elif view == "backlog":
             selected_today_ids = list(
                 int(x) for x in session.scalars(
@@ -1456,12 +2004,12 @@ def admin_data_articles(
                 ).all()
             )
             base_query = base_query.where(
-                Article.status != ArticleStatus.PUBLISHED,
-                Article.status != ArticleStatus.SELECTED_HOURLY,
+                ArticlePreview.status != ArticleStatus.PUBLISHED.value,
+                ArticlePreview.status != ArticleStatus.SELECTED_HOURLY.value,
             )
             if selected_today_ids:
-                base_query = base_query.where(Article.id.not_in(selected_today_ids))
-            articles = session.scalars(base_query).all()
+                base_query = base_query.where(ArticlePreview.id.not_in(selected_today_ids))
+            articles = []
         else:
             # "All" = broad working list for manual review/history passes.
             # Keep archived/rejected here too so editor can revisit old deletions and refine reasons.
@@ -1475,14 +2023,14 @@ def admin_data_articles(
                 ).all()
             )
             base_query = base_query.where(
-                Article.status != ArticleStatus.PUBLISHED,
-                Article.status != ArticleStatus.SELECTED_HOURLY,
+                ArticlePreview.status != ArticleStatus.PUBLISHED.value,
+                ArticlePreview.status != ArticleStatus.SELECTED_HOURLY.value,
             )
             if selected_today_ids:
-                base_query = base_query.where(Article.id.not_in(selected_today_ids))
-            articles = session.scalars(base_query).all()
+                base_query = base_query.where(ArticlePreview.id.not_in(selected_today_ids))
+            articles = []
 
-        if view in {"all", "backlog", "unsorted", "no_double", "selected_hour", "selected_day"}:
+        if view in {"all", "backlog", "unsorted", "no_double", "selected_hour", "selected_day"} and articles:
             articles = [a for a in articles if not _is_incomplete_for_review(a)]
 
         if view in {"all", "backlog"}:
@@ -1494,69 +2042,101 @@ def admin_data_articles(
                 articles = articles[working_limit:]
 
         query_text = str(q or "").strip()
-        if not query_text:
+        if not articles:
             fast_query = base_query
             if hide_double:
-                fast_query = fast_query.where(Article.status != ArticleStatus.DOUBLE)
+                fast_query = fast_query.where(ArticlePreview.status != ArticleStatus.DOUBLE.value)
+            if view in {"all", "backlog", "unsorted", "no_double", "selected_hour", "selected_day"}:
+                fast_query = fast_query.where(_not_incomplete_expr())
+            if query_text:
+                pattern = f"%{query_text}%"
+                fast_query = fast_query.where(
+                    or_(ArticlePreview.title.ilike(pattern), ArticlePreview.subtitle.ilike(pattern), ArticlePreview.ru_title.ilike(pattern))
+                )
 
-            if view in {"all", "backlog"}:
-                ordered_ids = [int(a.id) for a in articles]
-                if not ordered_ids:
-                    return {
-                        "items": [],
-                        "total": 0,
-                        "page": page,
-                        "page_size": page_size,
-                        "total_pages": 1,
-                        "view": view,
-                        "q": query_text,
-                    }
-                fast_query = select(Article).where(Article.id.in_(ordered_ids))
+            working_limit = WORKING_SET_PAGE_LIMIT * page_size
 
-            if sort_by == "score":
-                fast_query = fast_query.join(Score, Score.article_id == Article.id, isouter=True)
-                order_col = Score.final_score
-            elif sort_by == "source":
-                fast_query = fast_query.join(Source, Source.id == Article.source_id, isouter=True)
-                order_col = Source.name
-            elif sort_by in {"published_at", "published", "date"}:
-                order_col = func.coalesce(Article.published_at, Article.created_at)
+            fast_query = apply_preview_sort(fast_query, sort_by=sort_by, sort_dir=sort_dir)
+
+            offset_value = (page - 1) * page_size
+            if view == "backlog":
+                offset_value += working_limit
+
+            if view == "all":
+                window_remaining = max(0, working_limit - offset_value)
+                if window_remaining <= 0:
+                    paged_articles = []
+                else:
+                    paged_articles = session.scalars(
+                        fast_query.offset(offset_value).limit(min(page_size, window_remaining))
+                    ).all()
             else:
-                order_col = Article.created_at
+                paged_articles = session.scalars(fast_query.offset(offset_value).limit(page_size)).all()
 
-            reverse = sort_dir.lower() != "asc"
-            if reverse:
-                fast_query = fast_query.order_by(order_col.desc().nullslast(), Article.id.desc())
+            if include_total:
+                total_base = count_from_query(session, fast_query)
+                if view == "all":
+                    total = min(total_base, working_limit)
+                elif view == "backlog":
+                    total = max(total_base - working_limit, 0)
+                else:
+                    total = total_base
             else:
-                fast_query = fast_query.order_by(order_col.asc().nullslast(), Article.id.asc())
+                total = len(paged_articles)
 
-            if view in {"all", "backlog"}:
-                total = len(articles)
-            else:
-                total = int(session.scalar(select(func.count()).select_from(fast_query.order_by(None).subquery())) or 0)
-            paged_articles = session.scalars(
-                fast_query.offset((page - 1) * page_size).limit(page_size)
-            ).all()
+            ids = [int(a.id) for a in paged_articles]
+            score_map: dict[int, Score] = {}
+            source_map: dict[int, Source] = {}
+            selected_today_set: set[int] = set()
+            if ids:
+                score_map = {
+                    int(s.article_id): s
+                    for s in session.scalars(select(Score).where(Score.article_id.in_(ids))).all()
+                }
+                source_ids = [int(sid) for sid in {int(a.source_id) for a in paged_articles if a.source_id is not None}]
+                if source_ids:
+                    source_map = {int(s.id): s for s in session.scalars(select(Source).where(Source.id.in_(source_ids))).all()}
+                selected_today_set = set(
+                    int(x) for x in session.scalars(
+                        select(DailySelection.article_id).where(
+                            DailySelection.active.is_(True),
+                            DailySelection.selected_date == today,
+                            DailySelection.article_id.in_(ids),
+                        )
+                    ).all()
+                )
 
             items: list[dict] = []
             for article in paged_articles:
-                score = session.get(Score, article.id)
-                source = session.get(Source, article.source_id)
+                score = score_map.get(int(article.id))
+                source = source_map.get(int(article.source_id)) if article.source_id is not None else None
                 item = _serialize_article(article, score, source)
                 if article.id in selected_day_map:
                     item["selected_date"] = selected_day_map[article.id].isoformat()
-                item["is_selected_day"] = bool(
-                    session.scalar(
-                        select(DailySelection.id).where(
-                            DailySelection.article_id == article.id,
-                            DailySelection.selected_date == today,
-                            DailySelection.active.is_(True),
-                        )
-                    )
-                )
+                item["is_selected_day"] = int(article.id) in selected_today_set
                 items.append(item)
 
-            total_pages = max(1, (total + page_size - 1) // page_size)
+            if not items and query_text.isdigit():
+                article = session.get(ArticlePreview, int(query_text))
+                if article is not None:
+                    score = session.get(Score, article.id)
+                    source = session.get(Source, article.source_id)
+                    one = _serialize_article(article, score, source)
+                    if article.id in selected_day_map:
+                        one["selected_date"] = selected_day_map[article.id].isoformat()
+                    one["is_selected_day"] = bool(
+                        session.scalar(
+                            select(DailySelection.id).where(
+                                DailySelection.article_id == article.id,
+                                DailySelection.selected_date == today,
+                                DailySelection.active.is_(True),
+                            )
+                        )
+                    )
+                    items = [one]
+                    total = 1
+
+            total_pages = max(1, (total + page_size - 1) // page_size) if include_total else 1
             return {
                 "items": items,
                 "total": total,
@@ -1616,23 +2196,50 @@ def admin_data_articles(
             # If nothing was found in the current section, fall back to a global search
             # so old scheduled / selected items remain reachable from the UI.
             if not result:
-                all_articles = session.scalars(select(Article).order_by(Article.created_at.desc())).all()
+                pattern = f"%{query_text}%"
+                all_articles = session.scalars(
+                    select(ArticlePreview)
+                    .options(_article_preview_list_load_options())
+                    .where(
+                        or_(
+                            ArticlePreview.title.ilike(pattern),
+                            ArticlePreview.subtitle.ilike(pattern),
+                            ArticlePreview.ru_title.ilike(pattern),
+                        )
+                    )
+                    .order_by(ArticlePreview.created_at.desc())
+                    .limit(300)
+                ).all()
                 fallback: list[dict] = []
+                fallback_ids = [int(a.id) for a in all_articles]
+                score_map: dict[int, Score] = {}
+                source_map: dict[int, Source] = {}
+                selected_today_set: set[int] = set()
+                if fallback_ids:
+                    score_map = {
+                        int(s.article_id): s
+                        for s in session.scalars(select(Score).where(Score.article_id.in_(fallback_ids))).all()
+                    }
+                    source_ids = [int(sid) for sid in {int(a.source_id) for a in all_articles if a.source_id is not None}]
+                    if source_ids:
+                        source_map = {int(s.id): s for s in session.scalars(select(Source).where(Source.id.in_(source_ids))).all()}
+                    selected_today_set = set(
+                        int(x) for x in session.scalars(
+                            select(DailySelection.article_id).where(
+                                DailySelection.active.is_(True),
+                                DailySelection.selected_date == today,
+                                DailySelection.article_id.in_(fallback_ids),
+                            )
+                        ).all()
+                    )
+
                 for article in all_articles:
-                    score = session.get(Score, article.id)
-                    source = session.get(Source, article.source_id)
+                    score = score_map.get(int(article.id))
+                    source = source_map.get(int(article.source_id)) if article.source_id is not None else None
                     item = _serialize_article(article, score, source)
                     if article.id in selected_day_map:
                         item["selected_date"] = selected_day_map[article.id].isoformat()
-                    item["is_selected_day"] = bool(
-                        session.scalar(
-                            select(DailySelection.id).where(
-                                DailySelection.article_id == article.id,
-                                DailySelection.selected_date == today,
-                                DailySelection.active.is_(True),
-                            )
-                        )
-                    )
+                    item["is_selected_day"] = int(article.id) in selected_today_set
                     if _matches_article_query(item, q_norm, words):
                         fallback.append(item)
                 result = fallback
@@ -1834,6 +2441,22 @@ def admin_data_worker_status(request: Request) -> dict:
     return out
 
 
+@app.get("/admin-data/build-info")
+def admin_data_build_info(request: Request) -> dict:
+    _require_session_user(request)
+    return {
+        "ok": True,
+        "build_sha": (os.getenv("APP_BUILD_SHA", "") or "").strip() or "unknown",
+        "app_version": app.version,
+    }
+
+
+@app.get("/admin-data/ops-metrics")
+def admin_data_ops_metrics(request: Request) -> dict:
+    _require_session_user(request)
+    return {"ok": True, **_ops_runtime_snapshot()}
+
+
 @app.post("/sources/{source_id}/active")
 def set_source_active(source_id: int, body: SourceActiveIn, request: Request) -> dict:
     _require_session_user(request)
@@ -1842,7 +2465,29 @@ def set_source_active(source_id: int, body: SourceActiveIn, request: Request) ->
         if not src:
             raise HTTPException(status_code=404, detail="source_not_found")
         src.is_active = bool(body.is_active)
-    return {"ok": True, "source_id": source_id, "is_active": bool(body.is_active)}
+        archived_count = 0
+        if not bool(body.is_active):
+            targets = session.scalars(
+                select(Article).where(
+                    Article.source_id == source_id,
+                    Article.status != ArticleStatus.PUBLISHED,
+                    Article.status != ArticleStatus.ARCHIVED,
+                )
+            ).all()
+            now = datetime.utcnow()
+            for article in targets:
+                article.status = ArticleStatus.ARCHIVED
+                article.archived_kind = "source_disabled"
+                article.archived_reason = "source_disabled"
+                article.archived_at = now
+                article.updated_at = now
+                archived_count += 1
+    return {
+        "ok": True,
+        "source_id": source_id,
+        "is_active": bool(body.is_active),
+        "archived_articles": archived_count,
+    }
 
 
 @app.post("/sources/add")
@@ -2456,8 +3101,9 @@ def unselect_hour(article_id: int) -> dict:
 
 
 @app.post("/articles/{article_id}/feedback")
-def save_feedback(article_id: int, body: FeedbackIn) -> dict:
+def save_feedback(article_id: int, body: FeedbackIn, request: Request) -> dict:
     text = (body.explanation_text or "").strip()
+    user = _get_session_user(request)
     if len(text) < 5:
         raise HTTPException(status_code=400, detail="feedback_too_short")
     with session_scope() as session:
@@ -2465,20 +3111,58 @@ def save_feedback(article_id: int, body: FeedbackIn) -> dict:
         if not article:
             raise HTTPException(status_code=404, detail="Article not found")
         session.add(EditorFeedback(article_id=article_id, explanation_text=text))
+        _upsert_reason_tags(session, _extract_reason_tags(text), created_by_user_id=(user.id if user else None))
     return {"ok": True, "feedback": text}
 
 
+@app.get("/reason-tags")
+def list_reason_tags(request: Request) -> dict:
+    _require_session_user(request)
+    with session_scope() as session:
+        rows = session.scalars(
+            select(ReasonTagCatalog)
+            .where(ReasonTagCatalog.is_active.is_(True))
+            .order_by(ReasonTagCatalog.updated_at.desc(), ReasonTagCatalog.created_at.desc())
+        ).all()
+        items = []
+        seen: set[str] = set()
+        for row in rows:
+            value = _normalize_reason_tag(row.slug or "")
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            label = (row.title_ru or "").strip() or _tag_title_from_slug(value)
+            items.append({"value": value, "label": label})
+    return {"ok": True, "items": items}
+
+
 @app.post("/articles/{article_id}/ml-verdict")
-def save_ml_verdict(article_id: int, body: MlVerdictIn) -> dict:
+def save_ml_verdict(article_id: int, body: MlVerdictIn, request: Request) -> dict:
     comment = (body.comment or "").strip()
+    user = _get_session_user(request)
+    raw_tags = list(body.tags or [])
+    tags: list[str] = []
+    for item in raw_tags[:50]:
+        t = re.sub(r"[^\w-]+", "_", str(item or "").strip().lower()).strip("_")
+        if t:
+            tags.append(t)
+    tags = sorted(set(tags))
     with session_scope() as session:
         article = session.get(Article, article_id)
         if not article:
             raise HTTPException(status_code=404, detail="Article not found")
         article.ml_verdict_confirmed = bool(body.confirmed)
         article.ml_verdict_comment = comment or None
+        article.ml_verdict_tags = tags or None
         article.ml_verdict_updated_at = datetime.utcnow()
-    return {"ok": True, "confirmed": bool(body.confirmed), "comment": comment}
+        _upsert_reason_tags(session, tags, created_by_user_id=(user.id if user else None))
+        # Persist structured verdict feedback so preference backfill can learn from explicit tags.
+        if tags:
+            payload = [f"ml_verdict_confirmed={'yes' if body.confirmed else 'no'}", f"tags={','.join(tags)}"]
+            if comment:
+                payload.append(f"reason_text={comment}")
+            session.add(EditorFeedback(article_id=article_id, explanation_text="\n".join(payload)))
+    return {"ok": True, "confirmed": bool(body.confirmed), "comment": comment, "tags": tags}
 
 
 @app.post("/articles/{article_id}/status")
@@ -2498,40 +3182,56 @@ def set_article_status(article_id: int, body: StatusIn) -> dict:
 
 
 @app.delete("/articles/{article_id}")
-def delete_article(article_id: int, body: DeleteIn) -> dict:
-    with session_scope() as session:
-        article = session.get(Article, article_id)
-        if not article:
-            raise HTTPException(status_code=404, detail="Article not found")
-        score = session.get(Score, article_id)
+def delete_article(article_id: int, body: DeleteIn, request: Request) -> dict:
+    user = _get_session_user(request)
+    try:
+        with session_scope() as session:
+            # Avoid UI "endless delete" when another transaction holds locks.
+            session.execute(text("SET LOCAL lock_timeout = '2500ms'"))
+            session.execute(text("SET LOCAL statement_timeout = '8000ms'"))
 
-        delete_reason = (body.reason or "").strip()
-        if len(delete_reason) < 5:
-            raise HTTPException(status_code=400, detail="delete_reason_required")
+            article = session.get(Article, article_id)
+            if not article:
+                raise HTTPException(status_code=404, detail="Article not found")
+            score = session.get(Score, article_id)
 
-        audit(
-            action="article_delete_feedback",
-            entity_type="article",
-            entity_id=str(article_id),
-            payload={
-                "reason": delete_reason,
-                "title": article.title,
-                "canonical_url": article.canonical_url,
-                "status": str(article.status),
-                "content_mode": article.content_mode,
-                "score_10": _score_to_10(score),
-            },
-        )
+            delete_reason = (body.reason or "").strip()
+            if len(delete_reason) < 5:
+                raise HTTPException(status_code=400, detail="delete_reason_required")
+            _upsert_reason_tags(
+                session,
+                _extract_reason_tags(delete_reason),
+                created_by_user_id=(user.id if user else None),
+            )
 
-        article.status = ArticleStatus.ARCHIVED
-        article.archived_kind = "delete"
-        article.archived_reason = delete_reason
-        article.archived_at = datetime.utcnow()
-        article.updated_at = datetime.utcnow()
-        session.query(DailySelection).filter(
-            DailySelection.article_id == article_id,
-            DailySelection.active.is_(True),
-        ).update({"active": False}, synchronize_session=False)
+            audit(
+                action="article_delete_feedback",
+                entity_type="article",
+                entity_id=str(article_id),
+                payload={
+                    "reason": delete_reason,
+                    "title": article.title,
+                    "canonical_url": article.canonical_url,
+                    "status": str(article.status),
+                    "content_mode": article.content_mode,
+                    "score_10": _score_to_10(score),
+                },
+            )
+
+            article.status = ArticleStatus.ARCHIVED
+            article.archived_kind = "delete"
+            article.archived_reason = delete_reason
+            article.archived_at = datetime.utcnow()
+            article.updated_at = datetime.utcnow()
+            session.query(DailySelection).filter(
+                DailySelection.article_id == article_id,
+                DailySelection.active.is_(True),
+            ).update({"active": False}, synchronize_session=False)
+    except SQLAlchemyError as exc:
+        msg = str(exc).lower()
+        if "lock timeout" in msg or "statement timeout" in msg or "canceling statement due to" in msg:
+            raise HTTPException(status_code=409, detail="delete_conflict_retry") from exc
+        raise
     return {"ok": True, "deleted_article_id": article_id, "mode": "soft"}
 
 
@@ -2589,10 +3289,6 @@ def schedule_publish(article_id: int, body: SchedulePublishIn, request: Request)
     raw = (body.publish_at or "").strip()
     if not raw:
         raise HTTPException(status_code=400, detail="publish_at_required")
-    try:
-        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail="invalid_publish_at") from exc
     with session_scope() as session:
         ws = session.scalars(select(UserWorkspace).where(UserWorkspace.user_id == user.id)).first()
         tz_name = (ws.timezone_name if ws else "") or "Europe/Moscow"
@@ -2600,6 +3296,22 @@ def schedule_publish(article_id: int, body: SchedulePublishIn, request: Request)
         user_tz = ZoneInfo(tz_name)
     except Exception:
         user_tz = ZoneInfo("Europe/Moscow")
+
+    normalized_raw = raw
+    if re.fullmatch(r"\d{1,2}:\d{2}", raw):
+        # If only time is provided, schedule to the nearest future local slot:
+        # today HH:mm if still ahead, otherwise tomorrow HH:mm.
+        now_local = datetime.now(user_tz)
+        hh, mm = raw.split(":", 1)
+        candidate_local = now_local.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
+        if candidate_local <= now_local:
+            candidate_local = candidate_local + timedelta(days=1)
+        normalized_raw = candidate_local.strftime("%Y-%m-%dT%H:%M")
+
+    try:
+        dt = datetime.fromisoformat(normalized_raw.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid_publish_at") from exc
 
     if dt.tzinfo is None:
         dt_utc = dt.replace(tzinfo=user_tz).astimezone(timezone.utc).replace(tzinfo=None)
@@ -5212,9 +5924,12 @@ def _serialize_article(article: Article, score: Score | None, source: Source | N
         "archived_kind": article.archived_kind,
         "archived_reason": article.archived_reason,
         "archived_at": _dt_to_utc_z(article.archived_at),
-        "ml_verdict_confirmed": article.ml_verdict_confirmed,
-        "ml_verdict_comment": article.ml_verdict_comment,
-        "ml_verdict_updated_at": _dt_to_utc_z(article.ml_verdict_updated_at),
+        "ml_verdict_confirmed": getattr(article, "ml_verdict_confirmed", None),
+        "ml_verdict_comment": getattr(article, "ml_verdict_comment", None),
+        "ml_verdict_tags": list(getattr(article, "ml_verdict_tags", None) or []),
+        "ml_verdict_updated_at": _dt_to_utc_z(getattr(article, "ml_verdict_updated_at", None)),
+        # Keep list serialization lightweight; avoid full text access.
+        "english_preview": " ".join(str(article.subtitle or article.title or "").split())[:900],
     }
 
 
@@ -5233,6 +5948,30 @@ def _build_post_preview_text(article: Article) -> str:
     return "\n\n".join([p for p in parts if p])
 
 
+def _build_english_preview_text(article: Article) -> str:
+    raw = str(article.text or "").strip()
+    if not raw:
+        raw = str(article.subtitle or "").strip()
+    if not raw:
+        raw = str(article.title or "").strip()
+    if not raw:
+        return ""
+
+    text = " ".join(raw.replace("\r", "\n").split())
+    # Skip HN-style boilerplate when full text is unavailable.
+    if text.lower().startswith("article url:") and "comments url:" in text.lower():
+        fallback = str(article.subtitle or "").strip() or str(article.title or "").strip()
+        text = " ".join(fallback.split())
+    max_len = 900
+    if len(text) <= max_len:
+        return text
+    cut = text[:max_len].rstrip()
+    last_stop = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "))
+    if last_stop > 280:
+        return cut[: last_stop + 1].rstrip()
+    return cut + "…"
+
+
 def _is_incomplete_for_review(article: Article) -> bool:
     """
     Hide obviously incomplete cards from editor working queues.
@@ -5242,18 +5981,13 @@ def _is_incomplete_for_review(article: Article) -> bool:
     if mode == "summary_only":
         return True
 
-    text = str(article.text or "").strip()
     subtitle = str(article.subtitle or "").strip()
     ru_summary = str(article.ru_summary or "").strip()
 
-    if not text and not subtitle:
+    if not subtitle and not ru_summary:
         return True
 
-    low = text.lower()
-    if low.startswith("article url:") and ("comments url:" in low) and len(text) < 500:
-        return True
-
-    if len(text) < 220 and len(subtitle) < 60 and len(ru_summary) < 80:
+    if len(subtitle) < 60 and len(ru_summary) < 80:
         return True
 
     return False

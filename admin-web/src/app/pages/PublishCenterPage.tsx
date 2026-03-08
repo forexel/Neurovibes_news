@@ -3,9 +3,6 @@ import { Link, useLocation, useNavigate } from "react-router";
 import { TopNavigation } from "../components/TopNavigation";
 import { Button } from "../components/ui/button";
 import { Badge } from "../components/ui/badge";
-import { Label } from "../components/ui/label";
-import { Textarea } from "../components/ui/textarea";
-import { Input } from "../components/ui/input";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "../components/ui/dialog";
 import {
   Table,
@@ -16,14 +13,72 @@ import {
   TableRow,
 } from "../components/ui/table";
 import { StatusBadge } from "../components/StatusBadge";
-import { ScoreBadge } from "../components/ScoreBadge";
-import { CheckCircle2, Clock, Edit, Image as ImageIcon, RefreshCw, Send, Trash2 } from "lucide-react";
-import { api, ApiError, ArticleListItem, formatDateTime, SetupState } from "../lib/api";
+import { ReasonActionDialog } from "../components/ReasonActionDialog";
+import { CheckCircle2, Clock, Edit, Image as ImageIcon, Loader2, RefreshCw, Send, Trash2 } from "lucide-react";
+import { api, ApiError, ArticleDetails, ArticleListItem, formatDateTime, ReasonTagOption, SetupState } from "../lib/api";
 
 type PublishPanel = "actionable" | "scheduled" | "deleted" | "published";
 
 const ML_REVIEW_MIN = 0.4;
 const ML_REVIEW_MAX = 0.75;
+const POSITIVE_REASON_TAGS = new Set([
+  "practical_tool",
+  "practical_case",
+  "industry_watch",
+  "ru_relevance",
+  "wow_positive",
+  "future_impact",
+  "business_impact",
+  "breakthrough",
+  "product_release",
+  "benchmark",
+  "regulation",
+  "market_signal",
+  "future_trend",
+  "mass_audience",
+  "global_shift",
+]);
+const NEGATIVE_REASON_TAGS = new Set([
+  "insufficient_content",
+  "low_significance",
+  "no_business_use",
+  "no_ru",
+  "no_future_impact",
+  "too_technical",
+  "politics_noise",
+  "investment_noise",
+  "hiring_roles_noise",
+  "duplicate",
+  "non_ai",
+  "too_local",
+  "not_mass_audience",
+  "short_lived",
+]);
+
+function mlScore10(item: ArticleListItem): string {
+  if (typeof item.ml_recommendation_confidence !== "number") return "—";
+  return (item.ml_recommendation_confidence * 10).toFixed(1);
+}
+
+function statusKey(item: ArticleListItem): string {
+  return String(item.status || "").toLowerCase().replace("articlestatus.", "");
+}
+
+function isLikelyNegativeReasonTag(tag: string): boolean {
+  const t = String(tag || "").trim().toLowerCase();
+  if (!t) return false;
+  if (NEGATIVE_REASON_TAGS.has(t)) return true;
+  if (POSITIVE_REASON_TAGS.has(t)) return false;
+  return (
+    t.startsWith("no_") ||
+    t.startsWith("not_") ||
+    t.startsWith("non_") ||
+    t.startsWith("too_") ||
+    t.includes("noise") ||
+    t.includes("duplicate") ||
+    t.includes("low_")
+  );
+}
 
 export default function PublishCenterPage() {
   const navigate = useNavigate();
@@ -42,8 +97,12 @@ export default function PublishCenterPage() {
   const [reasonDialogText, setReasonDialogText] = useState("");
   const [reasonDialogTags, setReasonDialogTags] = useState<string[]>([]);
   const [reasonDialogCustomTag, setReasonDialogCustomTag] = useState("");
+  const [catalogReasonTagOptions, setCatalogReasonTagOptions] = useState<ReasonTagOption[]>([]);
+  const [previewArticle, setPreviewArticle] = useState<(ArticleListItem & Partial<ArticleDetails>) | null>(null);
+  const [previewLoadingId, setPreviewLoadingId] = useState<number | null>(null);
 
   const deleteReasonTagOptions: Array<{ value: string; label: string }> = [
+    { value: "insufficient_content", label: "Недостаточно контента" },
     { value: "low_significance", label: "Низкая значимость" },
     { value: "no_business_use", label: "Нет практической пользы" },
     { value: "no_ru", label: "Не релевантно для РФ" },
@@ -55,21 +114,51 @@ export default function PublishCenterPage() {
     { value: "duplicate", label: "Дубликат" },
     { value: "non_ai", label: "Не AI/ML" },
   ];
+  const publishReasonTagOptions: Array<{ value: string; label: string }> = [
+    { value: "practical_tool", label: "Практичный инструмент" },
+    { value: "practical_case", label: "Практичный кейс" },
+    { value: "industry_watch", label: "Радар индустрии" },
+    { value: "ru_relevance", label: "Релевантно РФ" },
+    { value: "wow_positive", label: "Вау-эффект" },
+    { value: "future_impact", label: "Влияние в будущем" },
+    { value: "business_impact", label: "Влияние на бизнес" },
+  ];
 
   async function loadData() {
     setLoading(true);
     setError("");
     try {
-      const [setup, allData, publishedData, deletedData] = await Promise.all([
+      // Fast-path: fetch only one actionable card without total counting.
+      const fastAll = await api.listArticles({
+        view: "all",
+        page: "1",
+        page_size: "1",
+        include_total: false,
+      });
+      setAllArticles(fastAll.items || []);
+      setLoading(false);
+
+      // Background loading for full data and secondary panels (do not block the whole page).
+      const [setupRes, allRes, publishedRes, deletedRes, tagsRes] = await Promise.allSettled([
         api.getSetupState(),
-        api.listArticles({ view: "all", page: "1", page_size: "300" }),
-        api.listArticles({ view: "published", page: "1", page_size: "200" }),
-        api.listArticles({ view: "deleted", page: "1", page_size: "200" }),
+        api.listArticles({ view: "all", page: "1", page_size: "50" }),
+        api.listArticles({ view: "published", page: "1", page_size: "100" }),
+        api.listArticles({ view: "deleted", page: "1", page_size: "100" }),
+        api.getReasonTags(),
       ]);
-      setSetupState(setup);
-      setAllArticles(allData.items || []);
-      setPublishedArticles(publishedData.items || []);
-      setDeletedArticles(deletedData.items || []);
+
+      const errors: string[] = [];
+      if (setupRes.status === "fulfilled") setSetupState(setupRes.value);
+      else errors.push("настройки");
+      if (allRes.status === "fulfilled") setAllArticles(allRes.value.items || []);
+      else errors.push("очередь");
+      if (publishedRes.status === "fulfilled") setPublishedArticles(publishedRes.value.items || []);
+      else errors.push("опубликованные");
+      if (deletedRes.status === "fulfilled") setDeletedArticles(deletedRes.value.items || []);
+      else errors.push("удалённые");
+      if (tagsRes.status === "fulfilled") setCatalogReasonTagOptions(Array.isArray(tagsRes.value.items) ? tagsRes.value.items : []);
+      else errors.push("теги");
+      if (errors.length) setError(`Часть данных не загрузилась (${errors.join(", ")}). Нажми «Обновить».`);
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         navigate("/login", { replace: true });
@@ -96,6 +185,12 @@ export default function PublishCenterPage() {
     } finally {
       setActionLoading(null);
     }
+  }
+
+  function openPreview(item: ArticleListItem) {
+    setPreviewLoadingId(item.id);
+    setPreviewArticle(item);
+    setPreviewLoadingId(null);
   }
 
   function openReasonDialog(action: "publish" | "delete", articleId: number) {
@@ -127,6 +222,23 @@ export default function PublishCenterPage() {
     setReasonDialogCustomTag("");
   }
 
+  const reasonTagOptions = useMemo(() => {
+    const base = reasonDialogAction === "publish" ? publishReasonTagOptions : deleteReasonTagOptions;
+    const merged = [...base];
+    const existing = new Set(merged.map((x) => x.value));
+    for (const item of catalogReasonTagOptions) {
+      if (!item?.value || existing.has(item.value)) continue;
+      const isNegative = isLikelyNegativeReasonTag(item.value);
+      if (reasonDialogAction === "publish" && isNegative) continue;
+      if (reasonDialogAction === "delete" && !isNegative) continue;
+      merged.push(item);
+      existing.add(item.value);
+    }
+    return merged;
+  }, [reasonDialogAction, catalogReasonTagOptions]);
+  const isDeletingFromReasonDialog =
+    reasonDialogAction === "delete" && Boolean(actionLoading && actionLoading.startsWith("Удалить #"));
+
   async function submitReasonDialog() {
     const articleId = reasonDialogArticleId;
     const reason = reasonDialogText.trim();
@@ -137,17 +249,33 @@ export default function PublishCenterPage() {
     }
     const tags = reasonDialogTags.map(normalizeTag).filter(Boolean);
     const label = reasonDialogAction === "publish" ? `Опубликовать #${articleId}` : `Удалить #${articleId}`;
-    await runAction(label, async () => {
-      if (reasonDialogAction === "publish") {
-        const payload = tags.length
-          ? ["decision=publish", `tags=${tags.join(",")}`, `reason_text=${reason}`].join("\n")
-          : reason;
-        await api.postArticleAction(articleId, "feedback", { explanation_text: payload });
-        await api.postArticleAction(articleId, "publish");
-      } else {
+    if (reasonDialogAction === "delete") {
+      setActionLoading(label);
+      setError("");
+      try {
         const payload = ["decision=delete", `tags=${tags.join(",")}`, `reason_text=${reason}`].join("\n");
         await api.deleteArticle(articleId, payload);
+        setReasonDialogOpen(false);
+        setReasonDialogArticleId(null);
+        setReasonDialogText("");
+        setReasonDialogTags([]);
+        setReasonDialogCustomTag("");
+        setAllArticles((prev) => prev.filter((item) => item.id !== articleId));
+        void loadData();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : `Не удалось выполнить действие: ${label}`);
+      } finally {
+        setActionLoading(null);
       }
+      return;
+    }
+
+    await runAction(label, async () => {
+      const payload = tags.length
+        ? ["decision=publish", `tags=${tags.join(",")}`, `reason_text=${reason}`].join("\n")
+        : reason;
+      await api.postArticleAction(articleId, "feedback", { explanation_text: payload });
+      await api.postArticleAction(articleId, "publish");
     });
     setReasonDialogOpen(false);
   }
@@ -160,7 +288,8 @@ export default function PublishCenterPage() {
     [allArticles],
   );
   const needsMlValidation = (item: ArticleListItem) => {
-    if (["published", "archived", "rejected", "double"].includes(String(item.status || "").toLowerCase())) {
+    const st = statusKey(item);
+    if (["published", "archived", "rejected", "double"].includes(st)) {
       return false;
     }
     if (String(item.content_mode || "").toLowerCase() === "summary_only") {
@@ -180,8 +309,9 @@ export default function PublishCenterPage() {
     () =>
       allArticles
         .filter((item) => {
+          const st = statusKey(item);
           const isOperationalQueue =
-            ["review", "scored", "selected_hourly", "ready"].includes(item.status) &&
+            ["review", "scored", "selected_hourly", "ready"].includes(st) &&
             String(item.content_mode || "").toLowerCase() !== "summary_only";
           return isOperationalQueue || needsMlValidation(item);
         })
@@ -337,11 +467,8 @@ export default function PublishCenterPage() {
           emptyText={activeList.emptyText}
           showSchedule={activeList.showSchedule}
           actionLoading={actionLoading}
-          onOpenArticle={(articleId) =>
-            navigate(`/article/${articleId}`, {
-              state: { from: `${location.pathname}${location.search || ""}` },
-            })
-          }
+          previewLoadingId={previewLoadingId}
+          onOpenArticle={(item) => openPreview(item)}
           onDeleteArticle={
             activeList.showDelete
               ? (articleId) => openReasonDialog("delete", articleId)
@@ -358,75 +485,90 @@ export default function PublishCenterPage() {
               : undefined
           }
         />
-        <Dialog open={reasonDialogOpen} onOpenChange={setReasonDialogOpen}>
-          <DialogContent className="sm:max-w-lg">
+
+        <Dialog open={Boolean(previewArticle)} onOpenChange={(open) => !open && setPreviewArticle(null)}>
+          <DialogContent className="max-w-4xl h-[92vh] overflow-hidden p-0 [&>button]:right-4 [&>button]:top-4 [&>button]:h-9 [&>button]:w-9 [&>button]:p-0 [&>button]:inline-flex [&>button]:items-center [&>button]:justify-center [&>button]:rounded-md [&>button]:border [&>button]:border-border [&>button_svg]:h-4 [&>button_svg]:w-4">
             <DialogHeader>
-              <DialogTitle>{reasonDialogAction === "publish" ? "Причина публикации" : "Причина удаления"}</DialogTitle>
+              <DialogTitle>{previewArticle?.ru_title || previewArticle?.title || "Превью статьи"}</DialogTitle>
               <DialogDescription>
-                Добавь комментарий по статье #{reasonDialogArticleId ?? "—"}.
+                {previewArticle?.source_name ? `${previewArticle.source_name} · ` : ""}
+                {formatDateTime(previewArticle?.published_at || previewArticle?.created_at)}
               </DialogDescription>
             </DialogHeader>
-            <div className="space-y-2">
-              <Label htmlFor="publish-center-reason">
-                {reasonDialogAction === "publish" ? "Почему публикуем?" : "Почему удаляем?"}
-              </Label>
-              {reasonDialogAction === "delete" ? (
-                <div className="space-y-2 rounded-md border border-border p-3">
-                  <div className="text-xs font-medium text-muted-foreground">Теги причины удаления</div>
-                  <div className="flex flex-wrap gap-2">
-                    {deleteReasonTagOptions.map((item) => {
-                      const active = reasonDialogTags.includes(item.value);
-                      return (
-                        <button
-                          key={item.value}
-                          type="button"
-                          onClick={() => toggleReasonTag(item.value)}
-                          className={`rounded-full border px-2.5 py-1 text-xs transition-colors ${
-                            active
-                              ? "border-red-500/40 bg-red-500/15 text-red-200"
-                              : "border-border bg-muted/20 text-muted-foreground hover:bg-muted/40"
-                          }`}
-                        >
-                          {item.label}
-                        </button>
-                      );
-                    })}
-                  </div>
-                  <div className="flex gap-2">
-                    <Input
-                      value={reasonDialogCustomTag}
-                      onChange={(e) => setReasonDialogCustomTag(e.target.value)}
-                      placeholder="Новый тег (например: local_policy_noise)"
-                      className="h-8"
-                    />
-                    <Button type="button" variant="outline" size="sm" onClick={addCustomReasonTag}>
-                      Добавить тег
-                    </Button>
-                  </div>
+            <div className="space-y-3 overflow-y-auto px-6 pb-2">
+              <div className="rounded-lg border border-border bg-muted/20 p-4 text-sm whitespace-pre-wrap">
+                {previewArticle?.post_preview || previewArticle?.ru_summary || previewArticle?.subtitle || "RU текст не готов."}
+              </div>
+              {previewArticle?.english_preview ? (
+                <div className="rounded-lg border border-border bg-muted/20 p-4 text-sm whitespace-pre-wrap text-muted-foreground">
+                  {previewArticle.english_preview}
                 </div>
               ) : null}
-              <Textarea
-                id="publish-center-reason"
-                value={reasonDialogText}
-                onChange={(e) => setReasonDialogText(e.target.value)}
-                rows={6}
-                placeholder="Комментарий для истории действий и обучения"
-              />
+              {previewArticle?.generated_image_path ? (
+                <Badge variant="outline" className="text-xs gap-1">
+                  <CheckCircle2 className="w-3 h-3 text-green-400" />
+                  Изображение готово
+                </Badge>
+              ) : null}
             </div>
-            <div className="flex justify-end gap-2">
-              <Button variant="outline" onClick={() => setReasonDialogOpen(false)}>
-                Отмена
-              </Button>
+            <div className="flex flex-wrap justify-end gap-2 px-6 pb-6">
               <Button
-                onClick={submitReasonDialog}
-                disabled={reasonDialogText.trim().length < 5 || actionLoading !== null}
-                className={reasonDialogAction === "delete" ? "bg-destructive text-destructive-foreground hover:bg-destructive/90" : ""}
+                variant="outline"
+                onClick={() => {
+                  if (!previewArticle) return;
+                  navigate(`/article/${previewArticle.id}`, {
+                    state: { from: `${location.pathname}${location.search || ""}` },
+                  });
+                }}
               >
-                {reasonDialogAction === "publish" ? "Опубликовать" : "Удалить"}
+                Открыть в редакторе
               </Button>
+              {previewArticle && activeList.showDelete ? (
+                <Button
+                  variant="destructive"
+                  onClick={() => {
+                    const id = previewArticle.id;
+                    setPreviewArticle(null);
+                    openReasonDialog("delete", id);
+                  }}
+                >
+                  <Trash2 className="w-4 h-4 mr-1" />
+                  Удалить
+                </Button>
+              ) : null}
+              {previewArticle && activeList.showPublishNow ? (
+                <Button
+                  onClick={() => {
+                    const id = previewArticle.id;
+                    setPreviewArticle(null);
+                    openReasonDialog("publish", id);
+                  }}
+                >
+                  <Send className="w-4 h-4 mr-1" />
+                  Опубликовать
+                </Button>
+              ) : null}
             </div>
           </DialogContent>
         </Dialog>
+
+        <ReasonActionDialog
+          open={reasonDialogOpen}
+          onOpenChange={setReasonDialogOpen}
+          action={reasonDialogAction}
+          articleId={reasonDialogArticleId}
+          text={reasonDialogText}
+          onTextChange={setReasonDialogText}
+          tags={reasonDialogTags}
+          options={reasonTagOptions}
+          onToggleTag={toggleReasonTag}
+          customTag={reasonDialogCustomTag}
+          onCustomTagChange={setReasonDialogCustomTag}
+          onAddCustomTag={addCustomReasonTag}
+          onSubmit={submitReasonDialog}
+          loading={actionLoading !== null}
+          loadingDelete={isDeletingFromReasonDialog}
+        />
       </div>
     </div>
   );
@@ -472,6 +614,7 @@ function ArticlesTable({
   emptyText,
   showSchedule = false,
   actionLoading = null,
+  previewLoadingId = null,
   onOpenArticle,
   onDeleteArticle,
   onPublishNow,
@@ -483,7 +626,8 @@ function ArticlesTable({
   emptyText: string;
   showSchedule?: boolean;
   actionLoading?: string | null;
-  onOpenArticle?: (articleId: number) => void;
+  previewLoadingId?: number | null;
+  onOpenArticle?: (item: ArticleListItem) => void;
   onDeleteArticle?: (articleId: number) => void;
   onPublishNow?: (articleId: number) => void;
   onUnschedule?: (articleId: number) => void;
@@ -522,16 +666,19 @@ function ArticlesTable({
               <TableRow
                 key={article.id}
                 className="cursor-pointer hover:bg-muted/50"
-                onClick={() => onOpenArticle?.(article.id)}
+                onClick={() => onOpenArticle?.(article)}
               >
                 <TableCell className="font-mono text-xs text-muted-foreground">#{article.id}</TableCell>
                 <TableCell>
                   <StatusBadge status={article.status} />
                 </TableCell>
-                <TableCell>{article.score_10 != null ? <ScoreBadge score={article.score_10} size="sm" /> : "—"}</TableCell>
+                <TableCell className="font-medium">{mlScore10(article)}</TableCell>
                 <TableCell>
                   <div className="space-y-1 max-w-lg">
-                    <div className="font-medium line-clamp-1">{article.ru_title || article.title}</div>
+                    <div className="font-medium line-clamp-1">
+                      {article.ru_title || article.title}
+                      {previewLoadingId === article.id ? <Loader2 className="inline-block ml-2 w-3.5 h-3.5 animate-spin" /> : null}
+                    </div>
                     {article.short_hook || article.subtitle ? (
                       <div className="text-sm text-muted-foreground line-clamp-2">{article.short_hook || article.subtitle}</div>
                     ) : null}

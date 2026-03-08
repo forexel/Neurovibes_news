@@ -18,7 +18,7 @@ from sqlalchemy.exc import IntegrityError
 from app.db import session_scope
 from app.core.config import settings
 from app.models import Article, ArticleStatus, RawFeedEntry, RawPageSnapshot, Source, SourceHealthMetric
-from app.services.runtime_settings import get_runtime_bool, get_runtime_csv_list, get_runtime_float
+from app.services.runtime_settings import get_runtime_bool, get_runtime_csv_list, get_runtime_float, get_runtime_str
 from app.services.topic_filter import passes_ai_topic_filter
 from app.services.utils import normalize_url, stable_hash, strip_html
 
@@ -229,6 +229,7 @@ def _should_use_browser_fetch(url: str, status_code: int | None, html: str | Non
     host = (urlparse(url).netloc or "").lower()
     domains = [x.strip().lower() for x in get_runtime_csv_list("browser_fetch_domains_csv")]
     force_browser_hosts = {
+        "openai.com",
         "ai.meta.com",
         "lastweekin.ai",
         "aboutamazon.com",
@@ -279,9 +280,10 @@ def _fetch_page_browser(url: str) -> tuple[str | None, str, int | None, float]:
                 viewport={"width": 1440, "height": 900},
                 locale="en-US",
             )
-            if settings.browser_cookies_json.strip():
+            cookies_raw = (get_runtime_str("browser_cookies_json", default="") or settings.browser_cookies_json or "").strip()
+            if cookies_raw:
                 try:
-                    cookies = json.loads(settings.browser_cookies_json)
+                    cookies = json.loads(cookies_raw)
                     if isinstance(cookies, list):
                         prepared = []
                         host = (urlparse(url).netloc or "").lower()
@@ -310,7 +312,32 @@ def _fetch_page_browser(url: str) -> tuple[str | None, str, int | None, float]:
                         if prepared:
                             context.add_cookies(prepared)
                 except Exception:
-                    pass
+                    # Optional fallback: plain Cookie header style "k=v; k2=v2"
+                    try:
+                        host = (urlparse(url).netloc or "").lower()
+                        prepared = []
+                        parts = [p.strip() for p in cookies_raw.split(";") if "=" in p]
+                        for part in parts:
+                            k, v = part.split("=", 1)
+                            k = k.strip()
+                            v = v.strip()
+                            if not k:
+                                continue
+                            prepared.append(
+                                {
+                                    "name": k,
+                                    "value": v,
+                                    "domain": "." + host if host else "",
+                                    "path": "/",
+                                    "httpOnly": False,
+                                    "secure": True,
+                                    "sameSite": "Lax",
+                                }
+                            )
+                        if prepared:
+                            context.add_cookies(prepared)
+                    except Exception:
+                        pass
             # basic stealth hardening
             context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
             page = context.new_page()
@@ -1144,6 +1171,17 @@ def _extract_section_links(section_url: str, html: str) -> list[str]:
             elif "venturebeat.com" in host:
                 if "/ai/" not in low and "/category/ai/" not in low:
                     continue
+            elif "openai.com" in host:
+                # For OpenAI index hub, keep only concrete release pages under /index/<slug>.
+                if "/index/" not in low:
+                    continue
+                stripped = low.rstrip("/")
+                if stripped in {"https://openai.com/index", "https://openai.com/index/"}:
+                    continue
+                tail = stripped.split("/index/", 1)[-1]
+                if not tail or "/" in tail:
+                    # Skip nested hubs like /index/<topic>/<slug>.
+                    continue
             elif "therundown.ai" in host or "superhuman.ai" in host or "mindstream.news" in host:
                 # Beehiiv-style posts usually live under /p/<slug>.
                 if "/p/" not in low:
@@ -1592,6 +1630,108 @@ def enrich_summary_only_articles(limit: int = 200, days_back: int = 30, progress
                 )
 
     return {"scanned": scanned, "upgraded_to_full": upgraded, "still_summary_only": max(0, scanned - upgraded)}
+
+
+def _is_openai_index_article_url(url: str | None) -> bool:
+    low = (url or "").strip().lower()
+    if not low:
+        return False
+    if "openai.com/index/" not in low:
+        return False
+    stripped = low.rstrip("/")
+    # Skip index hub pages; keep concrete release/article pages.
+    if stripped in {"https://openai.com/index", "https://openai.com/index/"}:
+        return False
+    tail = stripped.split("/index/", 1)[-1]
+    return bool(tail and "/" not in tail)
+
+
+def enrich_openai_summary_only_articles(limit: int = 25, days_back: int = 7, progress_cb=None) -> dict:
+    """
+    Prioritized enrichment for OpenAI Index pages.
+    Runs in the background worker cycle so OpenAI posts are upgraded to full text
+    without manual "Read From Site" actions.
+    """
+    min_dt = datetime.utcnow() - timedelta(days=days_back)
+    scanned = 0
+    upgraded = 0
+    blocked = 0
+    thin = 0
+
+    with session_scope() as session:
+        rows = session.scalars(
+            select(Article)
+            .join(Source, Source.id == Article.source_id)
+            .where(
+                Article.content_mode == "summary_only",
+                Article.created_at >= min_dt,
+                Article.status != ArticleStatus.DOUBLE,
+                Source.is_active.is_(True),
+                Article.canonical_url.is_not(None),
+                Article.canonical_url.ilike("%openai.com/index/%"),
+            )
+            .order_by(Article.created_at.desc())
+            .limit(limit)
+        ).all()
+
+        total = len(rows)
+        if progress_cb:
+            try:
+                progress_cb(0, total)
+            except Exception:
+                pass
+
+        for article in rows:
+            scanned += 1
+            if progress_cb:
+                try:
+                    progress_cb(scanned, total)
+                except Exception:
+                    pass
+
+            if not _is_openai_index_article_url(article.canonical_url):
+                continue
+
+            scraped = scrape_url(article.canonical_url)
+            status_code = int(scraped.get("status_code") or 0)
+            if status_code in {401, 403, 406, 429}:
+                blocked += 1
+            if bool(scraped.get("paywalled_or_thin")):
+                thin += 1
+
+            full_text = (scraped.get("text") or "").strip()
+            quality = float(scraped.get("parse_quality") or 0.0)
+            final_url = scraped.get("final_url") or article.canonical_url
+            html = scraped.get("html") or ""
+            latency_ms = float(scraped.get("latency_ms") or 0.0)
+            if full_text and (
+                _should_upgrade_text(article.text or "", full_text, quality)
+                or _should_set_full_when_prev_summary_only(article.content_mode, full_text, quality, article.canonical_url)
+            ):
+                article.text = full_text
+                article.content_mode = "full"
+                article.updated_at = datetime.utcnow()
+                upgraded += 1
+                session.add(
+                    RawPageSnapshot(
+                        article_id=article.id,
+                        source_id=article.source_id,
+                        url=article.canonical_url,
+                        final_url=final_url,
+                        html_text=(html or "")[:1_000_000],
+                        status_code=status_code or None,
+                        latency_ms=latency_ms,
+                        parse_quality=quality,
+                    )
+                )
+
+    return {
+        "scanned": scanned,
+        "upgraded_to_full": upgraded,
+        "still_summary_only": max(0, scanned - upgraded),
+        "blocked_http": blocked,
+        "thin_or_paywalled": thin,
+    }
 
 
 def enrich_article_from_source(article_id: int) -> dict:

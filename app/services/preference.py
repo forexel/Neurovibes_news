@@ -120,12 +120,14 @@ PRACTICAL_VALUE_BOOST = 1.30
 AUDIENCE_FIT_BOOST = 1.25
 ACTIONABILITY_BOOST = 1.35
 _TAGS = [
+    "insufficient_content",
     "breakthrough",
     "funding",
     "product_release",
     "benchmark",
     "regulation",
     "practical_tool",
+    "industry_watch",
     "global_shift",
     "hype",
     "too_local",
@@ -142,12 +144,14 @@ _TAGS = [
     "ru_relevance",
 ]
 _BASE_REASON_TAGS_RU: dict[str, str] = {
+    "insufficient_content": "Недостаточно контента",
     "breakthrough": "Потенциальный прорыв",
     "funding": "Инвестиции / сделка",
     "product_release": "Релиз / новая версия",
     "benchmark": "Бенчмарк / цифры / сравнение",
     "regulation": "Безопасность / регулирование / риски",
     "practical_tool": "Понятная практическая польза",
+    "industry_watch": "Радар индустрии / важно держать в поле зрения",
     "global_shift": "Сильный сигнал рынку / крупным игрокам",
     "hype": "Хайп / короткая значимость / шум",
     "too_local": "Слишком локально / не для РФ",
@@ -170,6 +174,7 @@ _POSITIVE_DEFAULT_TAGS = {
     "breakthrough",
     "product_release",
     "practical_tool",
+    "industry_watch",
     "global_shift",
     "market_signal",
     "future_trend",
@@ -180,6 +185,7 @@ _POSITIVE_DEFAULT_TAGS = {
     "regulation",
 }
 _NEGATIVE_DEFAULT_TAGS = {
+    "insufficient_content",
     "too_local",
     "duplicate",
     "too_technical",
@@ -364,6 +370,15 @@ def _guess_reason_tags(reason_text: str | None) -> list[str]:
             tags.extend(mapped)
 
     rules = {
+        "insufficient_content": [
+            "недостаточно контента",
+            "мало контента",
+            "слишком мало текста",
+            "короткий summary",
+            "too little content",
+            "insufficient content",
+            "summary_only",
+        ],
         "breakthrough": ["прорыв", "breakthrough", "революц", "first", "впервые"],
         "funding": ["инвест", "funding", "m&a", "сделк", "acquire", "раунд", "финанс", "valuation", "оценк"],
         "product_release": ["релиз", "release", "launch", "launched", "update", "версия", "запуск", "доступн", "rollout"],

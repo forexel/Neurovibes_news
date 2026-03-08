@@ -10,6 +10,7 @@ import { Label } from "../components/ui/label";
 import { Progress } from "../components/ui/progress";
 import { StatusBadge } from "../components/StatusBadge";
 import { ScoreBadge } from "../components/ScoreBadge";
+import { ReasonActionDialog } from "../components/ReasonActionDialog";
 import {
   Table,
   TableBody,
@@ -35,6 +36,8 @@ import {
 import {
   Activity,
   Archive,
+  ArrowDown,
+  ArrowUp,
   Calendar,
   CheckCircle2,
   ChevronLeft,
@@ -51,7 +54,7 @@ import {
   Send,
   Trash2,
 } from "lucide-react";
-import { api, AggregateJobStatus, ApiError, ArticleDetails, ArticleListItem, CostSummary, formatDateTime, WorkerStatus } from "../lib/api";
+import { api, AggregateJobStatus, ApiError, ArticleDetails, ArticleListItem, CostSummary, formatDateTime, ReasonTagOption, WorkerStatus } from "../lib/api";
 
 const sections = [
   { id: "all", label: "Все статьи" },
@@ -85,11 +88,61 @@ const sectionToPath: Record<(typeof sections)[number]["id"], string> = {
   deleted: "/deleted",
 };
 
+const POSITIVE_REASON_TAGS = new Set([
+  "practical_tool",
+  "practical_case",
+  "industry_watch",
+  "ru_relevance",
+  "wow_positive",
+  "future_impact",
+  "business_impact",
+  "breakthrough",
+  "product_release",
+  "benchmark",
+  "regulation",
+  "market_signal",
+  "future_trend",
+  "mass_audience",
+  "global_shift",
+]);
+const NEGATIVE_REASON_TAGS = new Set([
+  "insufficient_content",
+  "low_significance",
+  "no_business_use",
+  "no_ru",
+  "no_future_impact",
+  "too_technical",
+  "politics_noise",
+  "investment_noise",
+  "hiring_roles_noise",
+  "duplicate",
+  "non_ai",
+  "too_local",
+  "not_mass_audience",
+  "short_lived",
+]);
+
+function isLikelyNegativeReasonTag(tag: string): boolean {
+  const t = String(tag || "").trim().toLowerCase();
+  if (!t) return false;
+  if (NEGATIVE_REASON_TAGS.has(t)) return true;
+  if (POSITIVE_REASON_TAGS.has(t)) return false;
+  return (
+    t.startsWith("no_") ||
+    t.startsWith("not_") ||
+    t.startsWith("non_") ||
+    t.startsWith("too_") ||
+    t.includes("noise") ||
+    t.includes("duplicate") ||
+    t.includes("low_")
+  );
+}
+
 function mlRecommendationLabel(article: ArticleListItem) {
   const value = String(article.ml_recommendation || "").toLowerCase();
   const conf =
     typeof article.ml_recommendation_confidence === "number"
-      ? `${Math.round(article.ml_recommendation_confidence * 100)}%`
+      ? `${(article.ml_recommendation_confidence * 10).toFixed(1)}/10`
       : null;
   if (value === "publish_candidate") {
     return { text: conf ? `ML: к публикации (${conf})` : "ML: к публикации", className: "bg-green-500/20 text-green-300 border-green-500/30" };
@@ -104,6 +157,11 @@ function mlRecommendationLabel(article: ArticleListItem) {
     return { text: "ML: нет модели", className: "bg-gray-500/20 text-gray-300 border-gray-500/30" };
   }
   return null;
+}
+
+function mlScoreValue(article: ArticleListItem): number | null {
+  if (typeof article.ml_recommendation_confidence !== "number") return null;
+  return article.ml_recommendation_confidence * 10;
 }
 
 function sanitizePreviewHtml(input: string): string {
@@ -201,6 +259,7 @@ const ML_TAG_LABELS: Record<string, string> = {
   politics_noise: "Политический шум",
   too_technical: "Слишком техническая",
   no_business_use: "Нет практической пользы",
+  industry_watch: "Радар индустрии",
 };
 
 function formatMlTag(tag: string): string {
@@ -220,6 +279,8 @@ export default function ArticlesDashboard() {
   const [searchQuery, setSearchQuery] = useState("");
   const [pageSize, setPageSize] = useState("25");
   const [currentPage, setCurrentPage] = useState(1);
+  const [sortBy, setSortBy] = useState<"published_at" | "created_at" | "score">("published_at");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [noDoubleFilter, setNoDoubleFilter] = useState(false);
   const [loading, setLoading] = useState(true);
   const [previewArticle, setPreviewArticle] = useState<ArticleDetails | null>(null);
@@ -242,9 +303,14 @@ export default function ArticlesDashboard() {
   const [reasonDialogText, setReasonDialogText] = useState("");
   const [reasonDialogTags, setReasonDialogTags] = useState<string[]>([]);
   const [reasonDialogCustomTag, setReasonDialogCustomTag] = useState("");
+  const [catalogReasonTagOptions, setCatalogReasonTagOptions] = useState<ReasonTagOption[]>([]);
   const actionsRef = useRef<HTMLDivElement | null>(null);
+  const loadRequestSeq = useRef(0);
+  const hasLoadedOnceRef = useRef(false);
+  const [refreshing, setRefreshing] = useState(false);
 
   const deleteReasonTagOptions: Array<{ value: string; label: string }> = [
+    { value: "insufficient_content", label: "Недостаточно контента" },
     { value: "low_significance", label: "Низкая значимость" },
     { value: "no_business_use", label: "Нет практической пользы" },
     { value: "no_ru", label: "Не релевантно для РФ" },
@@ -255,6 +321,15 @@ export default function ArticlesDashboard() {
     { value: "hiring_roles_noise", label: "Найм/роли, не по теме" },
     { value: "duplicate", label: "Дубликат" },
     { value: "non_ai", label: "Не AI/ML" },
+  ];
+  const publishReasonTagOptions: Array<{ value: string; label: string }> = [
+    { value: "practical_tool", label: "Практичный инструмент" },
+    { value: "practical_case", label: "Практичный кейс" },
+    { value: "industry_watch", label: "Радар индустрии" },
+    { value: "ru_relevance", label: "Релевантно РФ" },
+    { value: "wow_positive", label: "Вау-эффект" },
+    { value: "future_impact", label: "Влияние в будущем" },
+    { value: "business_impact", label: "Влияние на бизнес" },
   ];
 
   const totalPages = useMemo(() => Math.max(1, Math.ceil(total / Number(pageSize))), [pageSize, total]);
@@ -300,36 +375,55 @@ export default function ArticlesDashboard() {
   }, [aggregateJob?.job_id, aggregateJob?.status]);
 
   async function loadDashboard() {
-    setLoading(true);
+    const requestId = ++loadRequestSeq.current;
+    const initialLoad = !hasLoadedOnceRef.current;
+    if (initialLoad) setLoading(true);
+    else setRefreshing(true);
     setError("");
     try {
       const articleData = await api.listArticles({
         view: selectedSection,
         page: String(currentPage),
         page_size: pageSize,
+        sort_by: sortBy,
+        sort_dir: sortDir,
         q: searchQuery.trim(),
         ...(noDoubleFilter ? { hide_double: "1" } : {}),
       });
+      if (requestId !== loadRequestSeq.current) return;
       setArticles(articleData.items || []);
       setTotal(articleData.total || 0);
+      hasLoadedOnceRef.current = true;
 
       const [costResult, workerResult] = await Promise.allSettled([api.getCosts(), api.getWorkerStatus()]);
+      if (requestId !== loadRequestSeq.current) return;
       if (costResult.status === "fulfilled") setCosts(costResult.value);
       if (workerResult.status === "fulfilled") setWorker(workerResult.value);
+      try {
+        const tags = await api.getReasonTags();
+        if (requestId !== loadRequestSeq.current) return;
+        setCatalogReasonTagOptions(Array.isArray(tags.items) ? tags.items : []);
+      } catch {
+        if (requestId !== loadRequestSeq.current) return;
+        setCatalogReasonTagOptions([]);
+      }
     } catch (err) {
+      if (requestId !== loadRequestSeq.current) return;
       if (err instanceof ApiError && err.status === 401) {
         navigate("/login", { replace: true });
         return;
       }
       setError(err instanceof Error ? err.message : "Не удалось загрузить статьи.");
     } finally {
+      if (requestId !== loadRequestSeq.current) return;
       setLoading(false);
+      setRefreshing(false);
     }
   }
 
   useEffect(() => {
     loadDashboard();
-  }, [currentPage, navigate, noDoubleFilter, pageSize, searchQuery, selectedSection]);
+  }, [currentPage, navigate, noDoubleFilter, pageSize, searchQuery, selectedSection, sortBy, sortDir]);
 
   useEffect(() => {
     setPreviewMlConfirmed(Boolean(previewArticle?.ml_verdict_confirmed));
@@ -402,6 +496,23 @@ export default function ArticlesDashboard() {
         ? 8
         : 0;
 
+  function toggleColumnSort(column: "score" | "published_at") {
+    setCurrentPage(1);
+    setSortBy((prevBy) => {
+      if (prevBy === column) {
+        setSortDir((prevDir) => (prevDir === "desc" ? "asc" : "desc"));
+        return prevBy;
+      }
+      setSortDir("desc");
+      return column;
+    });
+  }
+
+  function sortIcon(column: "score" | "published_at") {
+    if (sortBy !== column) return null;
+    return sortDir === "desc" ? <ArrowDown className="w-3.5 h-3.5" /> : <ArrowUp className="w-3.5 h-3.5" />;
+  }
+
   function openReasonDialog(action: "publish" | "delete", id: number) {
     setReasonDialogAction(action);
     setReasonDialogArticleId(id);
@@ -431,6 +542,21 @@ export default function ArticlesDashboard() {
     setReasonDialogCustomTag("");
   }
 
+  const reasonTagOptions = useMemo(() => {
+    const base = reasonDialogAction === "publish" ? publishReasonTagOptions : deleteReasonTagOptions;
+    const merged = [...base];
+    const existing = new Set(merged.map((x) => x.value));
+    for (const item of catalogReasonTagOptions) {
+      if (!item?.value || existing.has(item.value)) continue;
+      const isNegative = isLikelyNegativeReasonTag(item.value);
+      if (reasonDialogAction === "publish" && isNegative) continue;
+      if (reasonDialogAction === "delete" && !isNegative) continue;
+      merged.push(item);
+      existing.add(item.value);
+    }
+    return merged;
+  }, [reasonDialogAction, catalogReasonTagOptions]);
+
   async function submitReasonDialog() {
     const id = reasonDialogArticleId;
     const reason = reasonDialogText.trim();
@@ -447,10 +573,17 @@ export default function ArticlesDashboard() {
         `reason_text=${reason}`,
       ].join("\n");
       setPreviewActionLoading("delete");
+      setError("");
       try {
-        await runAction(() => api.deleteArticle(id, payload));
+        await api.deleteArticle(id, payload);
         setPreviewArticle(null);
         setReasonDialogOpen(false);
+        setOpenActionsId(null);
+        setArticles((prev) => prev.filter((item) => item.id !== id));
+        setTotal((prev) => Math.max(0, prev - 1));
+        void loadDashboard();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Операция завершилась ошибкой.");
       } finally {
         setPreviewActionLoading(null);
       }
@@ -558,6 +691,31 @@ export default function ArticlesDashboard() {
               </Select>
             </div>
 
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-muted-foreground">Сортировка:</span>
+              <Select
+                value={`${sortBy}:${sortDir}`}
+                onValueChange={(value) => {
+                  const [by, dir] = value.split(":");
+                  if ((by === "published_at" || by === "created_at" || by === "score") && (dir === "asc" || dir === "desc")) {
+                    setCurrentPage(1);
+                    setSortBy(by);
+                    setSortDir(dir);
+                  }
+                }}
+              >
+                <SelectTrigger className="w-60 h-8">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="published_at:desc">Сначала новые</SelectItem>
+                  <SelectItem value="published_at:asc">Сначала старые</SelectItem>
+                  <SelectItem value="score:asc">Оценка: низкие сначала</SelectItem>
+                  <SelectItem value="score:desc">Оценка: высокие сначала</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
             <div className="flex-1 max-w-md">
               <div className="relative">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
@@ -573,12 +731,18 @@ export default function ArticlesDashboard() {
               </div>
             </div>
 
-            <div className="flex items-center gap-3 ml-auto">
+          <div className="flex items-center gap-3 ml-auto">
+            {refreshing ? (
               <Badge variant="outline" className="gap-1 bg-muted">
-                <DollarSign className="w-3 h-3" />
-                <span className="text-xs">
-                  ${Number(costs?.estimated_cost_usd_total || 0).toFixed(3)} / 24h ${Number(costs?.estimated_cost_usd_24h || 0).toFixed(3)}
-                </span>
+                <Loader2 className="w-3 h-3 animate-spin" />
+                <span className="text-xs">Обновление...</span>
+              </Badge>
+            ) : null}
+            <Badge variant="outline" className="gap-1 bg-muted">
+              <DollarSign className="w-3 h-3" />
+              <span className="text-xs">
+                ${Number(costs?.estimated_cost_usd_total || 0).toFixed(3)} / 24h ${Number(costs?.estimated_cost_usd_24h || 0).toFixed(3)}
+              </span>
               </Badge>
               <Badge variant="outline" className="gap-1 bg-green-500/20 text-green-300 border-green-500/30">
                 <Activity className="w-3 h-3" />
@@ -682,15 +846,33 @@ export default function ArticlesDashboard() {
                 <TableHead className="w-16">ID</TableHead>
                 <TableHead className="w-32">Статус</TableHead>
                 <TableHead className="w-24">Режим</TableHead>
-                <TableHead className="w-20">Оценка</TableHead>
+                <TableHead className="w-20">
+                  <button
+                    type="button"
+                    className="inline-flex items-center gap-1 hover:text-foreground"
+                    onClick={() => toggleColumnSort("score")}
+                  >
+                    Оценка
+                    {sortIcon("score")}
+                  </button>
+                </TableHead>
                 <TableHead>Заголовок</TableHead>
                 <TableHead className="w-40">Источник</TableHead>
-                <TableHead className="w-40">Дата</TableHead>
+                <TableHead className="w-40">
+                  <button
+                    type="button"
+                    className="inline-flex items-center gap-1 hover:text-foreground"
+                    onClick={() => toggleColumnSort("published_at")}
+                  >
+                    Дата
+                    {sortIcon("published_at")}
+                  </button>
+                </TableHead>
                 <TableHead className="w-16" />
               </TableRow>
             </TableHeader>
             <TableBody>
-              {loading ? (
+              {loading && articles.length === 0 ? (
                 <TableRow>
                   <TableCell colSpan={8} className="h-32 text-center text-muted-foreground">
                     Загрузка...
@@ -704,7 +886,6 @@ export default function ArticlesDashboard() {
                 </TableRow>
               ) : (
                 articles.map((article) => {
-                  const mlLabel = mlRecommendationLabel(article);
                   return (
                   <TableRow
                     key={article.id}
@@ -713,21 +894,16 @@ export default function ArticlesDashboard() {
                   >
                     <TableCell className="font-mono text-xs text-muted-foreground">#{article.id}</TableCell>
                     <TableCell>
-                      <div className="space-y-1">
-                        <StatusBadge status={article.status} />
-                        {mlLabel ? (
-                          <Badge variant="outline" className={`text-[10px] ${mlLabel.className}`}>
-                            {mlLabel.text}
-                          </Badge>
-                        ) : null}
-                      </div>
+                      <StatusBadge status={article.status} />
                     </TableCell>
                     <TableCell>
                       <Badge variant="outline" className="text-xs">
                         {article.content_mode || "summary_only"}
                       </Badge>
                     </TableCell>
-                    <TableCell>{article.score_10 != null ? <ScoreBadge score={article.score_10} size="sm" /> : "—"}</TableCell>
+                    <TableCell>
+                      {mlScoreValue(article) !== null ? <ScoreBadge score={mlScoreValue(article) as number} size="sm" /> : "—"}
+                    </TableCell>
                     <TableCell>
                       <div className="space-y-1 max-w-lg">
                         <div className="font-medium line-clamp-1">{article.ru_title || article.title}</div>
@@ -863,7 +1039,6 @@ export default function ArticlesDashboard() {
             <DialogTitle className="pr-20 leading-tight">{previewArticle?.ru_title || previewArticle?.title}</DialogTitle>
             <DialogDescription className="flex items-center gap-2 flex-wrap">
               {previewArticle ? <StatusBadge status={previewArticle.status} /> : null}
-              {previewArticle?.score_10 != null ? <ScoreBadge score={previewArticle.score_10} size="sm" /> : null}
               <span>{previewArticle?.source_name}</span>
               <span>•</span>
               <span>{formatDateTime(previewArticle?.published_at || previewArticle?.created_at)}</span>
@@ -878,6 +1053,14 @@ export default function ArticlesDashboard() {
                 ),
               }}
             />
+            {previewArticle?.english_preview ? (
+              <div className="rounded-lg border border-border bg-muted/40 p-3 text-sm">
+                <div className="font-medium">English summary</div>
+                <div className="mt-2 text-muted-foreground whitespace-pre-wrap break-words">
+                  {previewArticle.english_preview}
+                </div>
+              </div>
+            ) : null}
             {previewArticle?.archived_reason ? (
               <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-sm">
                 <div className="font-medium text-red-300">Причина удаления</div>
@@ -993,7 +1176,7 @@ export default function ArticlesDashboard() {
                   Опубликовать
                 </Button>
               ) : null}
-              {previewArticle && !["ARCHIVED", "REJECTED"].includes(String(previewArticle.status || "").toUpperCase()) ? (
+              {previewArticle && String(previewArticle.status || "").toUpperCase() !== "PUBLISHED" ? (
                 <Button
                   variant="outline"
                   className="gap-2 w-full border-red-500/30 text-red-300 hover:bg-red-500/10"
@@ -1010,75 +1193,23 @@ export default function ArticlesDashboard() {
           </DialogContent>
         </Dialog>
       ) : null}
-      <Dialog open={reasonDialogOpen} onOpenChange={setReasonDialogOpen}>
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle>{reasonDialogAction === "publish" ? "Причина публикации" : "Причина удаления"}</DialogTitle>
-            <DialogDescription>
-              Добавь комментарий по статье #{reasonDialogArticleId ?? "—"}.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-2">
-            <Label htmlFor="reason-dialog-text">
-              {reasonDialogAction === "publish" ? "Почему публикуем?" : "Почему удаляем?"}
-            </Label>
-            {reasonDialogAction === "delete" ? (
-              <div className="space-y-2 rounded-md border border-border p-3">
-                <div className="text-xs font-medium text-muted-foreground">Теги причины удаления</div>
-                <div className="flex flex-wrap gap-2">
-                  {deleteReasonTagOptions.map((item) => {
-                    const active = reasonDialogTags.includes(item.value);
-                    return (
-                      <button
-                        key={item.value}
-                        type="button"
-                        onClick={() => toggleReasonTag(item.value)}
-                        className={`rounded-full border px-2.5 py-1 text-xs transition-colors ${
-                          active
-                            ? "border-red-500/40 bg-red-500/15 text-red-200"
-                            : "border-border bg-muted/20 text-muted-foreground hover:bg-muted/40"
-                        }`}
-                      >
-                        {item.label}
-                      </button>
-                    );
-                  })}
-                </div>
-                <div className="flex gap-2">
-                  <Input
-                    value={reasonDialogCustomTag}
-                    onChange={(e) => setReasonDialogCustomTag(e.target.value)}
-                    placeholder="Новый тег (например: local_policy_noise)"
-                    className="h-8"
-                  />
-                  <Button type="button" variant="outline" size="sm" onClick={addCustomReasonTag}>
-                    Добавить тег
-                  </Button>
-                </div>
-              </div>
-            ) : null}
-            <Textarea
-              id="reason-dialog-text"
-              value={reasonDialogText}
-              onChange={(e) => setReasonDialogText(e.target.value)}
-              rows={6}
-              placeholder="Напиши комментарий для модели и истории действий"
-            />
-          </div>
-          <div className="flex justify-end gap-2">
-            <Button variant="outline" onClick={() => setReasonDialogOpen(false)}>
-              Отмена
-            </Button>
-            <Button
-              onClick={submitReasonDialog}
-              disabled={reasonDialogText.trim().length < 5 || previewActionLoading !== null}
-              className={reasonDialogAction === "delete" ? "bg-destructive text-destructive-foreground hover:bg-destructive/90" : ""}
-            >
-              {reasonDialogAction === "publish" ? "Опубликовать" : "Удалить"}
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
+      <ReasonActionDialog
+        open={reasonDialogOpen}
+        onOpenChange={setReasonDialogOpen}
+        action={reasonDialogAction}
+        articleId={reasonDialogArticleId}
+        text={reasonDialogText}
+        onTextChange={setReasonDialogText}
+        tags={reasonDialogTags}
+        options={reasonTagOptions}
+        onToggleTag={toggleReasonTag}
+        customTag={reasonDialogCustomTag}
+        onCustomTagChange={setReasonDialogCustomTag}
+        onAddCustomTag={addCustomReasonTag}
+        onSubmit={submitReasonDialog}
+        loading={previewActionLoading !== null}
+        loadingDelete={previewActionLoading === "delete"}
+      />
     </div>
   );
 }

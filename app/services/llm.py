@@ -1,8 +1,9 @@
 from contextvars import ContextVar
+from datetime import datetime, timedelta
 
 from openai import OpenAI
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.core.config import settings
 from app.db import session_scope
@@ -37,6 +38,43 @@ def get_client() -> OpenAI:
         timeout=settings.openai_timeout_seconds,
         max_retries=settings.openai_max_retries,
     )
+
+
+def llm_budget_allows(operation: str, *, feature: str = "content") -> bool:
+    now = datetime.utcnow()
+    day_from = now - timedelta(hours=24)
+    five_m_from = now - timedelta(minutes=5)
+    feature_prefix = f"{feature}."
+    with session_scope() as session:
+        total_24h = float(
+            session.scalar(
+                select(func.coalesce(func.sum(LLMUsageLog.estimated_cost_usd), 0.0)).where(LLMUsageLog.created_at >= day_from)
+            )
+            or 0.0
+        )
+        feature_24h = float(
+            session.scalar(
+                select(func.coalesce(func.sum(LLMUsageLog.estimated_cost_usd), 0.0)).where(
+                    LLMUsageLog.created_at >= day_from,
+                    LLMUsageLog.operation.like(f"{feature_prefix}%"),
+                )
+            )
+            or 0.0
+        )
+        spike_5m = float(
+            session.scalar(
+                select(func.coalesce(func.sum(LLMUsageLog.estimated_cost_usd), 0.0)).where(LLMUsageLog.created_at >= five_m_from)
+            )
+            or 0.0
+        )
+
+    if settings.llm_daily_quota_usd > 0 and total_24h >= float(settings.llm_daily_quota_usd):
+        return False
+    if settings.llm_feature_quota_usd > 0 and feature_24h >= float(settings.llm_feature_quota_usd):
+        return False
+    if settings.llm_spike_5m_quota_usd > 0 and spike_5m >= float(settings.llm_spike_5m_quota_usd):
+        return False
+    return True
 
 
 def track_usage_from_response(resp, operation: str, model: str | None = None, kind: str = "chat") -> None:

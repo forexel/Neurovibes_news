@@ -18,6 +18,7 @@ from sqlalchemy import case, func, select
 from app.services.bootstrap import seed_sources
 from app.services.pipeline import pick_hourly_top, run_hourly_cycle
 from app.services.preference import reretag_today_training_event_reasons, train_editor_choice_model
+from app.services.scoring import archive_stale_unsorted, prune_bad_articles
 from app.services.telegram_publisher import publish_scheduled_due
 from app.services.telegram_review import (
     poll_review_updates,
@@ -251,10 +252,26 @@ def _run_daily_ml_maintenance_thread(local_day_key: str) -> None:
     try:
         reasons_out = reretag_today_training_event_reasons(limit=50, overwrite=False)
         editor_out = train_editor_choice_model(days_back=1, min_samples=8)
+        cleanup_out = {"ok": True, "enabled": False}
+        if get_runtime_bool("daily_cleanup_enabled", default=True):
+            cleanup_out = {
+                "ok": True,
+                "enabled": True,
+                "prune_bad": prune_bad_articles(
+                    limit=50000,
+                    archive_summary_only=get_runtime_bool("daily_cleanup_archive_summary_only", default=True),
+                    archive_low_relevance=False,
+                ),
+                "hide_old_unsorted": archive_stale_unsorted(
+                    days_back=int(max(1, get_runtime_int("daily_cleanup_hide_old_unsorted_days", default=3))),
+                    limit=50000,
+                ),
+            }
         source_out = _auto_disable_cold_sources()
         result = {
             "reason_retag_today": reasons_out,
             "editor_choice_train": editor_out,
+            "daily_cleanup": cleanup_out,
             "source_auto_disable": source_out,
         }
         print("[worker] daily ml maintenance", result, flush=True)

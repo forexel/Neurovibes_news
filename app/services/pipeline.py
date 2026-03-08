@@ -12,7 +12,7 @@ from app.db import session_scope
 from app.models import Article, ArticleStatus, DecisionMode, Score
 from app.services.content_generation import generate_image_card, generate_ru_summary
 from app.services.embedding_dedup import process_embeddings_and_dedup
-from app.services.ingestion import enrich_summary_only_articles, run_ingestion_fast
+from app.services.ingestion import enrich_openai_summary_only_articles, enrich_summary_only_articles, run_ingestion_fast
 from app.services.llm import get_client, track_usage_from_response
 from app.services.preference import (
     get_active_profile,
@@ -215,11 +215,13 @@ def _is_incomplete_candidate(article: Article) -> bool:
     return False
 
 
-def _hourly_candidates(limit: int = 50) -> list[tuple[Article, Score]]:
+def _hourly_candidates(limit: int = 50, hours_window: int = 1) -> list[tuple[Article, Score]]:
     now = datetime.utcnow()
     tz_name = _get_tz_name()
     bucket_start = _previous_completed_hour_bucket_utc(now, tz_name)
     bucket_end = bucket_start + timedelta(hours=1)
+    window_hours = max(1, int(hours_window or 1))
+    primary_start = bucket_end - timedelta(hours=window_hours)
     day_ago = now - timedelta(hours=24)
     three_days_ago = now - timedelta(days=3)
 
@@ -258,8 +260,8 @@ def _hourly_candidates(limit: int = 50) -> list[tuple[Article, Score]]:
         )
         rows = session.execute(
             base.where(
-                ((Article.created_at >= bucket_start) & (Article.created_at < bucket_end))
-                | ((Article.published_at >= bucket_start) & (Article.published_at < bucket_end))
+                ((Article.created_at >= primary_start) & (Article.created_at < bucket_end))
+                | ((Article.published_at >= primary_start) & (Article.published_at < bucket_end))
             )
         ).all()
 
@@ -349,12 +351,12 @@ Return JSON only:
 
 
 def pick_hourly_top(strategy: str | None = None) -> int | None:
-    candidates = _hourly_candidates(limit=50)
-    if not candidates:
-        return None
-
     resolved_strategy = (strategy or _resolve_hourly_selection_strategy()).strip().lower()
     if resolved_strategy == "off":
+        return None
+    interval_hours = int(max(1, round(get_runtime_float("ml_review_every_n_hours", default=2.0))))
+    candidates = _hourly_candidates(limit=50, hours_window=(interval_hours if resolved_strategy == "ml" else 1))
+    if not candidates:
         return None
 
     if resolved_strategy == "script":
@@ -631,7 +633,7 @@ def pick_hourly_backfill(hours_back: int = 24, per_hour: int = 1) -> dict:
 
 
 def auto_select_by_profile(top_n: int = 5) -> dict:
-    candidates = _hourly_candidates(limit=max(top_n, 5))
+    candidates = _hourly_candidates(limit=max(top_n, 5), hours_window=1)
     if not candidates:
         return {"ok": False, "reason": "no_candidates"}
     selected_id, explain = _choose_with_profile(candidates[:top_n], top_n=top_n)
@@ -649,6 +651,25 @@ def run_hourly_cycle(backfill_days: int = 1, select_hourly_top: bool = True) -> 
         ingest = run_ingestion_fast(days_back=backfill_days, max_entries=200)
     except Exception as exc:
         raise RuntimeError(f"cycle_stage_failed: ingestion_fast: {exc}") from exc
+
+    try:
+        _stage("enrich_openai_summary_only")
+        openai_enrich = {"scanned": 0, "upgraded_to_full": 0, "still_summary_only": 0, "blocked_http": 0, "thin_or_paywalled": 0}
+        if get_runtime_str("openai_hourly_enrich_enabled", default="true").strip().lower() in {"1", "true", "yes", "on"}:
+            openai_limit = int(max(1, get_runtime_float("openai_hourly_enrich_limit", default=25.0)))
+            openai_days_back = int(max(1, get_runtime_float("openai_hourly_enrich_days_back", default=7.0)))
+
+            def _openai_progress(processed: int, total: int) -> None:
+                if total and (processed == total or processed % 5 == 0):
+                    print("[cycle] openai_enrich", {"processed": processed, "total": total}, flush=True)
+
+            openai_enrich = enrich_openai_summary_only_articles(
+                limit=openai_limit,
+                days_back=openai_days_back,
+                progress_cb=_openai_progress,
+            )
+    except Exception as exc:
+        raise RuntimeError(f"cycle_stage_failed: enrich_openai_summary_only: {exc}") from exc
 
     try:
         _stage("enrich_summary_only")
@@ -708,6 +729,7 @@ def run_hourly_cycle(backfill_days: int = 1, select_hourly_top: bool = True) -> 
 
     return {
         "ingestion": ingest,
+        "enrich_openai_summary_only": openai_enrich,
         "enrich_summary_only": enrich,
         "embedded": embedded,
         "embedded_error": embedded_error,

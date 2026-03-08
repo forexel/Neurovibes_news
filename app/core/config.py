@@ -2,10 +2,35 @@ import os
 from dataclasses import dataclass
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_prod_env() -> bool:
+    return str(os.getenv("APP_ENV", "development")).strip().lower() in {"prod", "production"}
+
+
 @dataclass(frozen=True)
 class Settings:
     app_env: str = os.getenv("APP_ENV", "development")
     database_url: str = os.getenv("DATABASE_URL", "postgresql+psycopg://news_user:news_pass_local@db:5432/news_publisher")
+    db_auto_patch_schema: bool = _env_bool("DB_AUTO_PATCH_SCHEMA", default=not _is_prod_env())
+    db_auto_create: bool = _env_bool("DB_AUTO_CREATE", default=False)
+
+    trusted_hosts: str = os.getenv("TRUSTED_HOSTS", "localhost,127.0.0.1,77.222.55.88")
+    proxy_trusted_ips: str = os.getenv("PROXY_TRUSTED_IPS", "127.0.0.1,::1")
+    cors_allowed_origins: str = os.getenv("CORS_ALLOWED_ORIGINS", "")
+    enable_https_redirect: bool = _env_bool("ENABLE_HTTPS_REDIRECT", default=False)
+    security_hsts_seconds: int = int(os.getenv("SECURITY_HSTS_SECONDS", "31536000"))
+    security_csp: str = os.getenv(
+        "SECURITY_CSP",
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: https:; connect-src 'self' https://api.telegram.org https://openrouter.ai; "
+        "frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+    )
 
     openrouter_api_key: str = os.getenv("OPENROUTER_API_KEY", "")
     openrouter_base_url: str = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
@@ -57,6 +82,10 @@ class Settings:
     llm_chat_input_cost_per_mtok: float = float(os.getenv("LLM_CHAT_INPUT_COST_PER_MTOK", "0.15"))
     llm_chat_output_cost_per_mtok: float = float(os.getenv("LLM_CHAT_OUTPUT_COST_PER_MTOK", "0.60"))
     llm_embedding_input_cost_per_mtok: float = float(os.getenv("LLM_EMBED_INPUT_COST_PER_MTOK", "0.02"))
+    llm_daily_quota_usd: float = float(os.getenv("LLM_DAILY_QUOTA_USD", "15"))
+    llm_feature_quota_usd: float = float(os.getenv("LLM_FEATURE_QUOTA_USD", "6"))
+    llm_spike_5m_quota_usd: float = float(os.getenv("LLM_SPIKE_5M_QUOTA_USD", "2.5"))
+    allow_online_llm_generation: bool = _env_bool("ALLOW_ONLINE_LLM_GENERATION", default=False)
 
 
 settings = Settings()

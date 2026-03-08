@@ -5,13 +5,27 @@ services:
       dockerfile: Dockerfile
     env_file:
       - .env
+    environment:
+      APP_BUILD_SHA: ${APP_BUILD_SHA:-dev}
+      DB_AUTO_PATCH_SCHEMA: "0"
+      DB_AUTO_CREATE: "0"
+      ALLOW_ONLINE_LLM_GENERATION: "0"
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2", "--timeout-keep-alive", "20"]
     ports:
       - "18100:8000"
     volumes:
       - model_artifacts:/app/app/static/models
     networks:
       - apps-net
+    mem_limit: 768m
+    mem_reservation: 512m
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health/ready || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   admin:
     build:
@@ -19,6 +33,11 @@ services:
       dockerfile: Dockerfile
     env_file:
       - .env
+    environment:
+      APP_BUILD_SHA: ${APP_BUILD_SHA:-dev}
+      DB_AUTO_PATCH_SCHEMA: "0"
+      DB_AUTO_CREATE: "0"
+      ALLOW_ONLINE_LLM_GENERATION: "0"
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
     ports:
       - "18101:8000"
@@ -26,7 +45,15 @@ services:
       - model_artifacts:/app/app/static/models
     networks:
       - apps-net
+    mem_limit: 768m
+    mem_reservation: 512m
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health/ready || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   pipeline:
     build:
@@ -34,11 +61,17 @@ services:
       dockerfile: Dockerfile
     env_file:
       - .env
+    environment:
+      DB_AUTO_PATCH_SCHEMA: "0"
+      DB_AUTO_CREATE: "0"
+      ALLOW_ONLINE_LLM_GENERATION: "0"
     command: ["python", "-m", "app.tasks.worker"]
     volumes:
       - model_artifacts:/app/app/static/models
     networks:
       - apps-net
+    mem_limit: 1280m
+    mem_reservation: 896m
     restart: unless-stopped
 
   neuro-db:
@@ -51,6 +84,8 @@ services:
       - neurovibes_pg:/var/lib/postgresql/data
     networks:
       - apps-net
+    mem_limit: 512m
+    mem_reservation: 384m
     restart: unless-stopped
 
   # local-only helpers (do not start unless profile is enabled)

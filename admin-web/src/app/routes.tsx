@@ -1,15 +1,12 @@
 import { createBrowserRouter } from "react-router";
+import type { ComponentType } from "react";
 import Root from "./components/Root";
 import RouteErrorPage from "./components/RouteErrorPage";
-import LoginPage from "./pages/LoginPage";
-import RegisterPage from "./pages/RegisterPage";
-import SetupWizard from "./pages/SetupWizard";
-import ArticlesDashboard from "./pages/ArticlesDashboard";
-import ArticleEditor from "./pages/ArticleEditor";
-import SourcesPage from "./pages/SourcesPage";
-import ScoreSettingsPage from "./pages/ScoreSettingsPage";
-import BotControlPage from "./pages/BotControlPage";
-import PublishCenterPage from "./pages/PublishCenterPage";
+
+const lazyPage = (importer: () => Promise<{ default: ComponentType }>) => async () => {
+  const mod = await importer();
+  return { Component: mod.default };
+};
 
 export const router = createBrowserRouter(
   [
@@ -18,25 +15,25 @@ export const router = createBrowserRouter(
       Component: Root,
       errorElement: <RouteErrorPage />,
       children: [
-        { index: true, Component: PublishCenterPage },
-        { path: "login", Component: LoginPage },
-        { path: "register", Component: RegisterPage },
-        { path: "setup", Component: SetupWizard },
-        { path: "dashboard", Component: ArticlesDashboard },
-        { path: "published", Component: ArticlesDashboard },
-        { path: "backlog", Component: ArticlesDashboard },
-        { path: "selected-day", Component: ArticlesDashboard },
-        { path: "selected-hour", Component: ArticlesDashboard },
-        { path: "unsorted", Component: ArticlesDashboard },
-        { path: "no-double", Component: ArticlesDashboard },
-        { path: "deleted", Component: ArticlesDashboard },
-        { path: "article/:id", Component: ArticleEditor },
-        { path: "sources", Component: SourcesPage },
-        { path: "score", Component: ScoreSettingsPage },
-        { path: "score-settings", Component: ScoreSettingsPage },
-        { path: "bot", Component: BotControlPage },
-        { path: "bot-control", Component: BotControlPage },
-        { path: "publish", Component: PublishCenterPage },
+        { index: true, lazy: lazyPage(() => import("./pages/PublishCenterPage")) },
+        { path: "login", lazy: lazyPage(() => import("./pages/LoginPage")) },
+        { path: "register", lazy: lazyPage(() => import("./pages/RegisterPage")) },
+        { path: "setup", lazy: lazyPage(() => import("./pages/SetupWizard")) },
+        { path: "dashboard", lazy: lazyPage(() => import("./pages/ArticlesDashboard")) },
+        { path: "published", lazy: lazyPage(() => import("./pages/ArticlesDashboard")) },
+        { path: "backlog", lazy: lazyPage(() => import("./pages/ArticlesDashboard")) },
+        { path: "selected-day", lazy: lazyPage(() => import("./pages/ArticlesDashboard")) },
+        { path: "selected-hour", lazy: lazyPage(() => import("./pages/ArticlesDashboard")) },
+        { path: "unsorted", lazy: lazyPage(() => import("./pages/ArticlesDashboard")) },
+        { path: "no-double", lazy: lazyPage(() => import("./pages/ArticlesDashboard")) },
+        { path: "deleted", lazy: lazyPage(() => import("./pages/ArticlesDashboard")) },
+        { path: "article/:id", lazy: lazyPage(() => import("./pages/ArticleEditor")) },
+        { path: "sources", lazy: lazyPage(() => import("./pages/SourcesPage")) },
+        { path: "score", lazy: lazyPage(() => import("./pages/ScoreSettingsPage")) },
+        { path: "score-settings", lazy: lazyPage(() => import("./pages/ScoreSettingsPage")) },
+        { path: "bot", lazy: lazyPage(() => import("./pages/BotControlPage")) },
+        { path: "bot-control", lazy: lazyPage(() => import("./pages/BotControlPage")) },
+        { path: "publish", lazy: lazyPage(() => import("./pages/PublishCenterPage")) },
       ],
     },
   ],

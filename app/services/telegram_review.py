@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 import re
+import time
 from datetime import datetime, timedelta
 from html import escape
 from zoneinfo import ZoneInfo
@@ -16,6 +18,7 @@ from app.models import (
     AuditLog,
     DailySelection,
     EditorFeedback,
+    ReasonTagCatalog,
     Score,
     SelectionDecision,
     TelegramBotKV,
@@ -30,10 +33,13 @@ from app.services.telegram_context import (
     telegram_signature,
     telegram_timezone_name,
 )
-from app.services.runtime_settings import get_runtime_str
+from app.services.runtime_settings import get_runtime_float, get_runtime_int, get_runtime_str
 from app.services.pipeline import pick_hourly_backfill, pick_hourly_top
 from app.services.preference import log_training_event
 from app.services.scoring import reclassify_all_articles
+from app.services.scoring import score_article_by_id
+
+logger = logging.getLogger(__name__)
 
 _SQLI_PATTERNS = [
     re.compile(r"(?i)(?:'|\"|`)\s*or\s+1\s*=\s*1"),
@@ -45,6 +51,7 @@ _SQLI_PATTERNS = [
 _PUBLISH_TAGS_RU_TO_EN = [
     ("Практичный инструмент", "practical_tool"),
     ("Практичный кейс", "practical_case"),
+    ("Радар индустрии", "industry_watch"),
     ("Релевантно РФ", "ru_relevance"),
     ("Вау-эффект", "wow_positive"),
     ("Влияние в будущем", "future_impact"),
@@ -52,6 +59,7 @@ _PUBLISH_TAGS_RU_TO_EN = [
 ]
 
 _DELETE_TAGS_RU_TO_EN = [
+    ("Недостаточно контента", "insufficient_content"),
     ("Слишком техническое", "too_technical"),
     ("Политика/шум", "politics_noise"),
     ("Инвестиции/оценка", "investment_noise"),
@@ -59,9 +67,93 @@ _DELETE_TAGS_RU_TO_EN = [
     ("Низкая значимость", "low_significance"),
     ("Нет практической пользы", "no_business_use"),
     ("Не про AI/ML", "non_ai"),
-    ("Недостаточно контента", "content_incomplete"),
     ("Дубль", "duplicate"),
 ]
+
+_CUSTOM_TAG_INPUT_RE = re.compile(r"^\s*([a-z][a-z0-9_]{1,63})\s-\s(.{2,120})\s*$")
+_TG_REVIEW_MAX_RETRIES = 3
+_TG_REVIEW_BASE_DELAY_SECONDS = 0.7
+
+
+def _tg_request(method: str, payload: dict, *, timeout: float = 30.0) -> dict:
+    base = _bot_base_url()
+    if not base:
+        return {"ok": False, "error": "telegram_not_configured"}
+    url = f"{base}/{method}"
+    last_error = "telegram_request_failed"
+    for attempt in range(1, _TG_REVIEW_MAX_RETRIES + 1):
+        try:
+            resp = httpx.post(url, json=payload, timeout=timeout)
+            data = resp.json()
+            if data.get("ok"):
+                return {"ok": True, "result": data.get("result") or {}}
+            error_code = int(data.get("error_code") or 0)
+            retry_after = 0
+            try:
+                retry_after = int((data.get("parameters") or {}).get("retry_after") or 0)
+            except Exception:
+                retry_after = 0
+            if error_code == 429 and attempt < _TG_REVIEW_MAX_RETRIES:
+                time.sleep(max(_TG_REVIEW_BASE_DELAY_SECONDS, float(retry_after or 1)))
+                continue
+            last_error = str(data)
+        except Exception as exc:
+            last_error = str(exc)
+            if attempt < _TG_REVIEW_MAX_RETRIES:
+                time.sleep(_TG_REVIEW_BASE_DELAY_SECONDS * attempt)
+                continue
+    return {"ok": False, "error": last_error}
+
+
+def _reason_scope_for_action(action: str) -> str:
+    action_l = str(action or "").strip().lower()
+    if action_l in {"publish_now", "schedule_1h", "schedule_custom", "publish"}:
+        return "publish"
+    return "delete"
+
+
+def _reason_tag_scope_kv_key(slug: str) -> str:
+    return f"telegram_reason_tag_scope:{_normalize_reason_tag_slug(slug)}"
+
+
+def _set_reason_tag_scope(slug: str, scope: str) -> None:
+    clean_slug = _normalize_reason_tag_slug(slug)
+    clean_scope = str(scope or "").strip().lower()
+    if not clean_slug or clean_scope not in {"publish", "delete", "both"}:
+        return
+    with session_scope() as session:
+        current = (_get_kv(session, _reason_tag_scope_kv_key(clean_slug), "") or "").strip().lower()
+        if current in {"publish", "delete"} and clean_scope in {"publish", "delete"} and current != clean_scope:
+            _set_kv(session, _reason_tag_scope_kv_key(clean_slug), "both")
+            return
+        if current != clean_scope:
+            _set_kv(session, _reason_tag_scope_kv_key(clean_slug), clean_scope)
+
+
+def _parse_ml_reason_payload(raw: str | None) -> tuple[str, list[str], float | None]:
+    text = str(raw or "").strip()
+    if not text:
+        return "", [], None
+    lines = [ln.strip() for ln in text.replace("\r", "").split("\n") if ln.strip()]
+    reason = ""
+    tags: list[str] = []
+    ml_prob: float | None = None
+    for ln in lines:
+        low = ln.lower()
+        if low.startswith("reason_text="):
+            reason = ln.split("=", 1)[1].strip()
+        elif low.startswith("reason=") and not reason:
+            reason = ln.split("=", 1)[1].strip()
+        elif low.startswith("tags="):
+            tags = [x.strip() for x in ln.split("=", 1)[1].split(",") if x.strip()]
+        elif low.startswith("ml_prob="):
+            try:
+                ml_prob = float(ln.split("=", 1)[1].strip())
+            except Exception:
+                ml_prob = None
+    if not reason:
+        reason = text[:220]
+    return reason, tags, ml_prob
 
 def _post_decision_recalc() -> None:
     # Cheap recalc only: re-apply gates and update hourly selection using existing scores.
@@ -100,10 +192,13 @@ def _safe_log_training_event(**kwargs) -> None:
     try:
         log_training_event(**kwargs)
     except Exception as exc:
-        try:
-            print("[tg] training_event_failed", {"error": str(exc), "kwargs": {k: kwargs.get(k) for k in ("article_id", "decision", "label")}}, flush=True)
-        except Exception:
-            pass
+        logger.warning(
+            "tg training_event_failed error=%s article_id=%s decision=%s label=%s",
+            str(exc),
+            kwargs.get("article_id"),
+            kwargs.get("decision"),
+            kwargs.get("label"),
+        )
 
 
 def _bot_base_url() -> str | None:
@@ -176,6 +271,24 @@ def _current_window_local() -> tuple[datetime, datetime, str]:
     if now == end:
         end = end - timedelta(hours=1)
     start = end - timedelta(hours=1)
+    return start, end, tz_label
+
+
+def _previous_completed_window_local(hours: int = 1) -> tuple[datetime, datetime, str]:
+    hours_n = max(1, int(hours or 1))
+    try:
+        tz_name = telegram_timezone_name() or get_runtime_str("timezone_name") or "Europe/Moscow"
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz_name = "Europe/Moscow"
+        tz = ZoneInfo("Europe/Moscow")
+    tz_label = "МСК" if tz_name == "Europe/Moscow" else tz_name
+
+    now = datetime.now(tz=tz)
+    end = now.replace(minute=0, second=0, microsecond=0)
+    if now == end:
+        end = end - timedelta(hours=1)
+    start = end - timedelta(hours=hours_n)
     return start, end, tz_label
 
 def _slot_window_local(slot_key: str) -> tuple[datetime, datetime, str]:
@@ -278,16 +391,22 @@ def send_review_status_once_per_hour(kind: str, text: str) -> dict:
 _send_review_status_once_per_hour = send_review_status_once_per_hour
 
 
-def _build_review_text(article: Article, window: tuple[datetime, datetime, str] | None = None) -> str:
+def _build_review_text(
+    article: Article,
+    window: tuple[datetime, datetime, str] | None = None,
+    *,
+    origin: str = "hourly",
+) -> str:
     title = (article.ru_title or "").strip()
     summary = (article.ru_summary or "").strip()
     if not title or not summary:
-        generate_ru_summary(article.id)
-        with session_scope() as session:
-            fresh = session.get(Article, article.id)
-            if fresh:
-                title = (fresh.ru_title or "").strip()
-                summary = (fresh.ru_summary or "").strip()
+        if settings.allow_online_llm_generation:
+            generate_ru_summary(article.id)
+            with session_scope() as session:
+                fresh = session.get(Article, article.id)
+                if fresh:
+                    title = (fresh.ru_title or "").strip()
+                    summary = (fresh.ru_summary or "").strip()
     if not title:
         title = (article.title or "").strip()
     if not summary:
@@ -328,6 +447,8 @@ def _build_review_text(article: Article, window: tuple[datetime, datetime, str] 
 
     selector_line = ""
     criteria_lines: list[str] = []
+    ml_reason_line = ""
+    ml_tags_line = ""
     with session_scope() as session:
         selection = session.scalars(
             select(SelectionDecision)
@@ -336,6 +457,7 @@ def _build_review_text(article: Article, window: tuple[datetime, datetime, str] 
             .limit(1)
         ).first()
         score = session.get(Score, int(article.id))
+        ml_reason_text, ml_reason_tags, ml_prob_from_reason = _parse_ml_reason_payload(article.ml_recommendation_reason)
         if selection is not None:
             selector_kind = (selection.selector_kind or "").strip().lower()
             if selector_kind == "ml":
@@ -366,8 +488,19 @@ def _build_review_text(article: Article, window: tuple[datetime, datetime, str] 
                 novelty_reason = str(chosen.get("novelty_reason") or "").strip()
                 if novelty_reason:
                     criteria_lines.append("Комментарий: " + novelty_reason[:180])
-        if score is not None and score.final_score is not None:
-            criteria_lines.append(f"Скор статьи: {max(0.0, min(10.0, float(score.final_score) * 10.0)):.1f}/10")
+        confidence_01 = None
+        if isinstance(ml_prob_from_reason, float):
+            confidence_01 = ml_prob_from_reason
+        elif article.ml_recommendation_confidence is not None:
+            confidence_01 = float(article.ml_recommendation_confidence)
+        elif score is not None and score.final_score is not None:
+            confidence_01 = float(score.final_score)
+        if confidence_01 is not None:
+            criteria_lines.append(f"Уверенность ML: {max(0.0, min(10.0, float(confidence_01) * 10.0)):.1f}/10")
+        if ml_reason_text:
+            ml_reason_line = "Причина ML: " + ml_reason_text[:220]
+        if ml_reason_tags:
+            ml_tags_line = "Теги ML: " + ", ".join(ml_reason_tags[:8])
 
     if selector_line:
         meta = meta + "\n" + escape(selector_line)
@@ -375,18 +508,28 @@ def _build_review_text(article: Article, window: tuple[datetime, datetime, str] 
         meta = meta + "\n" + escape("Критерии ML:")
         for line in criteria_lines:
             meta = meta + "\n" + escape(f"• {line}")
+    if ml_reason_line:
+        meta = meta + "\n" + escape(ml_reason_line)
+    if ml_tags_line:
+        meta = meta + "\n" + escape(ml_tags_line)
 
-    if window is None:
-        start_local, end_local, tz_label = _window_for_article_local(article, tz)
+    origin_l = str(origin or "hourly").strip().lower()
+    if origin_l == "request":
+        body = (
+            "Статья по запросу\n\n"
+            f"{meta}\n\n"
+        )
     else:
-        start_local, end_local, tz_label = window
-    window_label = _hour_window_label_ru(start_local, end_local, tz_label)
-
-    body = (
-        f"{escape(window_label)}\n"
-        "Кандидат на публикацию. Публиковать?\n\n"
-        f"{meta}\n\n"
-    )
+        if window is None:
+            start_local, end_local, tz_label = _window_for_article_local(article, tz)
+        else:
+            start_local, end_local, tz_label = window
+        window_label = _hour_window_label_ru(start_local, end_local, tz_label)
+        body = (
+            f"{escape(window_label)}\n"
+            "Кандидат на публикацию. Публиковать?\n\n"
+            f"{meta}\n\n"
+        )
     if badge:
         body += f"{escape(badge)}\n\n"
     body += (
@@ -399,79 +542,43 @@ def _build_review_text(article: Article, window: tuple[datetime, datetime, str] 
 
 
 def _send_message(chat_id: str, text: str, reply_markup: dict | None = None, force_reply: bool = False) -> dict:
-    base = _bot_base_url()
-    if not base:
-        return {"ok": False, "error": "telegram_not_configured"}
     payload: dict = {"chat_id": chat_id, "text": text[:4096], "parse_mode": "HTML"}
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup
     if force_reply:
         payload["reply_markup"] = {"force_reply": True, "input_field_placeholder": "Напиши причину и отправь ответом"}
-    try:
-        resp = httpx.post(f"{base}/sendMessage", json=payload, timeout=30)
-        data = resp.json()
-        if not data.get("ok"):
-            return {"ok": False, "error": str(data)}
-        return {"ok": True, "result": data.get("result") or {}}
-    except Exception as exc:
-        return {"ok": False, "error": str(exc)}
+    return _tg_request("sendMessage", payload, timeout=30)
 
 
 def _answer_callback(callback_query_id: str, text: str = "") -> None:
-    base = _bot_base_url()
-    if not base:
-        return
-    try:
-        httpx.post(
-            f"{base}/answerCallbackQuery",
-            json={"callback_query_id": callback_query_id, "text": text[:180]},
-            timeout=20,
-        )
-    except Exception:
-        pass
+    _tg_request("answerCallbackQuery", {"callback_query_id": callback_query_id, "text": text[:180]}, timeout=20)
 
 
-def _edit_message_reply_markup(chat_id: str, message_id: str) -> None:
-    base = _bot_base_url()
-    if not base or not chat_id or not message_id:
+def _edit_message_reply_markup(chat_id: str, message_id: str, reply_markup: dict | None = None) -> None:
+    if not chat_id or not message_id:
         return
-    try:
-        httpx.post(
-            f"{base}/editMessageReplyMarkup",
-            json={"chat_id": chat_id, "message_id": int(message_id), "reply_markup": {"inline_keyboard": []}},
-            timeout=20,
-        )
-    except Exception:
-        pass
+    markup = reply_markup if reply_markup is not None else {"inline_keyboard": []}
+    _tg_request(
+        "editMessageReplyMarkup",
+        {"chat_id": chat_id, "message_id": int(message_id), "reply_markup": markup},
+        timeout=20,
+    )
 
 
 def _edit_message_caption_action(chat_id: str, message_id: str, action_label: str) -> None:
-    base = _bot_base_url()
-    if not base or not chat_id or not message_id:
+    if not chat_id or not message_id:
         return
-    try:
-        # Try to append action hint to existing message text when possible.
-        httpx.post(
-            f"{base}/editMessageReplyMarkup",
-            json={"chat_id": chat_id, "message_id": int(message_id), "reply_markup": {"inline_keyboard": []}},
-            timeout=20,
-        )
-    except Exception:
-        pass
+    _tg_request(
+        "editMessageReplyMarkup",
+        {"chat_id": chat_id, "message_id": int(message_id), "reply_markup": {"inline_keyboard": []}},
+        timeout=20,
+    )
 
 
 def _delete_message(chat_id: str, message_id: str) -> None:
-    base = _bot_base_url()
-    if not base or not chat_id or not message_id:
+    if not chat_id or not message_id:
         return
-    try:
-        httpx.post(
-            f"{base}/deleteMessage",
-            json={"chat_id": chat_id, "message_id": int(message_id)},
-            timeout=20,
-        )
-    except Exception:
-        pass
+    _tg_request("deleteMessage", {"chat_id": chat_id, "message_id": int(message_id)}, timeout=20)
 
 
 def _get_kv(session, key: str, default: str = "0") -> str:
@@ -519,20 +626,229 @@ def _consume_pending_tags(chat_id: str, article_id: int, action: str) -> list[st
         return tags
 
 
-def _build_tag_picker_kb(article_id: int, action: str) -> dict:
+def _build_tag_picker_kb(article_id: int, action: str, selected_tags: list[str] | None = None) -> dict:
     action_l = (action or "").strip().lower()
-    pairs = _PUBLISH_TAGS_RU_TO_EN if action_l in {"publish_now", "schedule_1h", "schedule_custom"} else _DELETE_TAGS_RU_TO_EN
+    scope = _reason_scope_for_action(action_l)
+    selected = {str(x or "").strip().lower() for x in (selected_tags or []) if str(x or "").strip()}
+    base_pairs = _PUBLISH_TAGS_RU_TO_EN if action_l in {"publish_now", "schedule_1h", "schedule_custom"} else _DELETE_TAGS_RU_TO_EN
+    pairs: list[tuple[str, str]] = list(base_pairs)
+    for _, slug in base_pairs:
+        _set_reason_tag_scope(slug, scope)
+    existing_slugs = {str(slug or "").strip().lower() for _, slug in pairs}
+    with session_scope() as session:
+        rows = session.scalars(
+            select(ReasonTagCatalog)
+            .where(ReasonTagCatalog.is_active.is_(True))
+            .order_by(ReasonTagCatalog.updated_at.desc(), ReasonTagCatalog.created_at.desc())
+            .limit(300)
+        ).all()
+        for row in rows:
+            slug = _normalize_reason_tag_slug(row.slug or "")
+            if not slug or slug in existing_slugs:
+                continue
+            tag_scope = (_get_kv(session, _reason_tag_scope_kv_key(slug), "") or "").strip().lower()
+            if tag_scope not in {"both", scope}:
+                continue
+            title = (row.title_ru or "").strip() or slug
+            pairs.append((title, slug))
+            existing_slugs.add(slug)
     rows: list[list[dict[str, str]]] = []
     row: list[dict[str, str]] = []
     for ru_label, en_tag in pairs:
+        if str(en_tag or "").strip().lower() in selected:
+            continue
         row.append({"text": ru_label, "callback_data": f"rv:tag:{int(article_id)}:{action_l}:{en_tag}"})
         if len(row) >= 2:
             rows.append(row)
             row = []
     if row:
         rows.append(row)
+    rows.append([{"text": "Добавить тег (key - label)", "callback_data": f"rv:addtag:{int(article_id)}:{action_l}"}])
     rows.append([{"text": "Готово, ввести причину", "callback_data": f"rv:tagdone:{int(article_id)}:{action_l}"}])
     return {"inline_keyboard": rows}
+
+
+def _normalize_reason_tag_slug(raw: str) -> str:
+    val = str(raw or "").strip().lower()
+    val = re.sub(r"[^a-z0-9_]+", "_", val)
+    val = re.sub(r"_+", "_", val).strip("_")
+    return val[:64]
+
+
+def _parse_custom_tag_line(raw: str) -> tuple[str | None, str | None, str | None]:
+    text = str(raw or "").strip()
+    m = _CUSTOM_TAG_INPUT_RE.match(text)
+    if not m:
+        return None, None, "Неверный формат. Нужно строго: key - label (с пробелами вокруг дефиса)."
+    slug = _normalize_reason_tag_slug(m.group(1))
+    title_ru = re.sub(r"\s+", " ", m.group(2)).strip()
+    if not slug:
+        return None, None, "Ключ тега пустой."
+    if not title_ru:
+        return None, None, "Лейбл тега пустой."
+    return slug, title_ru[:120], None
+
+
+def _upsert_reason_tag_catalog(
+    slug: str,
+    title_ru: str,
+    created_by_user_id: int | None = None,
+    scope: str | None = None,
+) -> None:
+    if not slug or not title_ru:
+        return
+    with session_scope() as session:
+        row = session.scalars(select(ReasonTagCatalog).where(ReasonTagCatalog.slug == slug)).first()
+        if row:
+            row.title_ru = title_ru
+            row.is_active = True
+            row.updated_at = datetime.utcnow()
+            return
+        session.add(
+            ReasonTagCatalog(
+                slug=slug,
+                title_ru=title_ru,
+                description="",
+                is_active=True,
+                is_system=False,
+                created_by_user_id=created_by_user_id,
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow(),
+            )
+        )
+    if scope:
+        _set_reason_tag_scope(slug, _reason_scope_for_action(scope))
+
+
+def _review_actions_kb(article_id: int) -> dict:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "Опубликовать", "callback_data": f"rv:pub:{int(article_id)}"},
+                {"text": "Скрыть", "callback_data": f"rv:hide:{int(article_id)}"},
+                {"text": "Удалить", "callback_data": f"rv:del:{int(article_id)}"},
+            ],
+        ]
+    }
+
+
+def _pick_best_unsorted_article_id() -> int | None:
+    with session_scope() as session:
+        selected_any_day_ids = list(
+            int(x)
+            for x in session.scalars(select(DailySelection.article_id).where(DailySelection.active.is_(True))).all()
+        )
+        recent_days = int(max(1, get_runtime_int("unsorted_recent_days", default=3)))
+        cutoff = datetime.utcnow() - timedelta(days=recent_days)
+        q = (
+            select(Article.id)
+            .join(Score, Score.article_id == Article.id, isouter=True)
+            .where(
+                Article.status != ArticleStatus.ARCHIVED,
+                Article.status != ArticleStatus.PUBLISHED,
+                Article.status != ArticleStatus.SELECTED_HOURLY,
+                Article.status != ArticleStatus.REJECTED,
+                Article.created_at >= cutoff,
+            )
+            .order_by(Score.final_score.desc().nullslast(), Article.created_at.desc())
+            .limit(1)
+        )
+        if selected_any_day_ids:
+            q = q.where(Article.id.not_in(list(set(int(x) for x in selected_any_day_ids))))
+        row = session.execute(q).first()
+        return int(row[0]) if row else None
+
+
+def _pick_best_recent_ml_article_id() -> int | None:
+    """Fallback candidate for /new_article when unsorted queue is empty.
+
+    Picks the strongest recent article by ML confidence, then score, then recency.
+    """
+    with session_scope() as session:
+        q = (
+            select(Article.id)
+            .join(Score, Score.article_id == Article.id, isouter=True)
+            .where(
+                Article.status != ArticleStatus.PUBLISHED,
+                Article.status != ArticleStatus.ARCHIVED,
+                Article.status != ArticleStatus.REJECTED,
+                Article.status != ArticleStatus.DOUBLE,
+                Article.ml_recommendation_confidence.is_not(None),
+            )
+            .order_by(
+                Article.ml_recommendation_confidence.desc().nullslast(),
+                Score.final_score.desc().nullslast(),
+                Article.created_at.desc(),
+            )
+            .limit(1)
+        )
+        row = session.execute(q).first()
+        return int(row[0]) if row else None
+
+
+def send_best_unsorted_for_review(chat_id: str | None = None) -> dict:
+    configured_chat = _review_chat_id()
+    if not configured_chat and not chat_id:
+        return {"ok": False, "error": "telegram_review_chat_not_configured"}
+    with session_scope() as session:
+        runtime_chat = _get_kv(session, "telegram_review_runtime_chat_id", "").strip()
+    target_chat = str(chat_id or runtime_chat or configured_chat).strip()
+    if not target_chat:
+        return {"ok": False, "error": "telegram_review_chat_not_configured"}
+
+    target_article_id = _pick_best_unsorted_article_id()
+    fallback_used = False
+    if not target_article_id:
+        target_article_id = _pick_best_recent_ml_article_id()
+        fallback_used = bool(target_article_id)
+    if not target_article_id:
+        return {"ok": False, "error": "no_unsorted_candidate"}
+
+    try:
+        score_article_by_id(int(target_article_id))
+    except Exception:
+        pass
+    if settings.allow_online_llm_generation:
+        try:
+            generate_ru_summary(int(target_article_id))
+        except Exception:
+            pass
+
+    with session_scope() as session:
+        article = session.get(Article, int(target_article_id))
+        if not article:
+            return {"ok": False, "error": "article_not_found"}
+        text = _build_review_text(article, origin="request")
+
+    out = _send_message(chat_id=target_chat, text=text, reply_markup=_review_actions_kb(int(target_article_id)))
+    if not out.get("ok"):
+        return {"ok": False, "error": out.get("error"), "article_id": int(target_article_id), "chat_id": target_chat}
+    message_id = str((out.get("result") or {}).get("message_id") or "")
+    with session_scope() as session:
+        existing = session.scalars(select(TelegramReviewJob).where(TelegramReviewJob.article_id == int(target_article_id))).first()
+        if existing:
+            existing.chat_id = target_chat
+            existing.review_message_id = message_id or None
+            existing.status = "resent"
+            existing.updated_at = datetime.utcnow()
+        else:
+            session.add(
+                TelegramReviewJob(
+                    article_id=int(target_article_id),
+                    chat_id=target_chat,
+                    review_message_id=message_id or None,
+                    status="sent",
+                    created_at=datetime.utcnow(),
+                    updated_at=datetime.utcnow(),
+                )
+            )
+    return {
+        "ok": True,
+        "article_id": int(target_article_id),
+        "chat_id": target_chat,
+        "message_id": message_id,
+        "fallback": fallback_used,
+    }
 
 
 def _reason_with_tags(action: str, reason: str, tags: list[str]) -> str:
@@ -654,20 +970,11 @@ def send_hourly_top_for_review(article_id: int | None = None, force: bool = Fals
         article = session.get(Article, target_article_id)
         if not article:
             return {"ok": False, "error": "article_not_found"}
-        # Always show the previous completed hour relative to current local time (Moscow/user TZ).
-        # This removes ambiguity and keeps UI expectation: at 22:45 -> 21:00..22:00.
-        window = _current_window_local()
-        text = _build_review_text(article, window=window)
+        interval_hours = int(max(1, round(get_runtime_float("ml_review_every_n_hours", default=2.0))))
+        window = _previous_completed_window_local(hours=interval_hours)
+        text = _build_review_text(article, window=window, origin="hourly")
 
-    markup = {
-        "inline_keyboard": [
-            [
-                {"text": "Опубликовать", "callback_data": f"rv:pub:{target_article_id}"},
-                {"text": "Скрыть", "callback_data": f"rv:hide:{target_article_id}"},
-                {"text": "Удалить", "callback_data": f"rv:del:{target_article_id}"},
-            ]
-        ]
-    }
+    markup = _review_actions_kb(target_article_id)
     sent = _send_message(chat_id=chat_id, text=text, reply_markup=markup)
     if not sent.get("ok"):
         return {**sent, "chat_id": chat_id, "article_id": target_article_id}
@@ -764,15 +1071,7 @@ def send_selected_backlog_for_review(limit: int = 20) -> dict:
                 continue
             text = _build_review_text(article)
 
-        markup = {
-            "inline_keyboard": [
-                [
-                    {"text": "Опубликовать", "callback_data": f"rv:pub:{target_article_id}"},
-                    {"text": "Скрыть", "callback_data": f"rv:hide:{target_article_id}"},
-                    {"text": "Удалить", "callback_data": f"rv:del:{target_article_id}"},
-                ]
-            ]
-        }
+        markup = _review_actions_kb(target_article_id)
         out = _send_message(chat_id=chat_id, text=text, reply_markup=markup)
         if not out.get("ok"):
             return {
@@ -867,15 +1166,7 @@ def send_hourly_backfill_for_review(hours_back: int = 24, limit: int = 24, force
                 continue
             text = _build_review_text(article)
 
-        markup = {
-            "inline_keyboard": [
-                [
-                    {"text": "Опубликовать", "callback_data": f"rv:pub:{target_article_id}"},
-                    {"text": "Скрыть", "callback_data": f"rv:hide:{target_article_id}"},
-                    {"text": "Удалить", "callback_data": f"rv:del:{target_article_id}"},
-                ]
-            ]
-        }
+        markup = _review_actions_kb(target_article_id)
         out = _send_message(chat_id=chat_id, text=text, reply_markup=markup)
         if not out.get("ok"):
             return {
@@ -952,11 +1243,8 @@ def _handle_callback(update: dict) -> dict:
     chat_id = str(chat.get("id") or "")
     message_id = str(msg.get("message_id") or "")
 
-    # Log callback data for diagnostics (helps catch wrong button mappings).
-    try:
-        print("[tg] callback", {"data": data, "chat_id": chat_id, "message_id": message_id, "user_id": user_id}, flush=True)
-    except Exception:
-        pass
+    # Do not log raw callback payload to avoid leaking user data/tags.
+    logger.debug("tg callback chat_id=%s message_id=%s user_id=%s", chat_id, message_id, user_id)
 
     if not data.startswith("rv:") or not chat_id:
         if callback_id:
@@ -981,6 +1269,8 @@ def _handle_callback(update: dict) -> dict:
             "del": "pending: жду причину",
             "hide": "pending: жду причину",
             "later": "pending: жду причину",
+            "review": "ищу лучшую статью",
+            "addtag": "жду формат: key - label",
         }
         _answer_callback(callback_id, ack_map.get(action, "pending"))
 
@@ -1006,6 +1296,9 @@ def _handle_callback(update: dict) -> dict:
         pending_action = str(parts[3] or "").strip().lower()
         tag = str(parts[4] or "").strip().lower()
         tags = _append_pending_tag(chat_id, article_id, pending_action, tag)
+        # Refresh picker in-place: hide already selected tags so user sees progress.
+        kb = _build_tag_picker_kb(article_id, pending_action, selected_tags=tags)
+        _edit_message_reply_markup(chat_id, message_id, reply_markup=kb)
         if callback_id:
             _answer_callback(callback_id, f"Добавлено тегов: {len(tags)}")
         return {"ok": True, "action": "tag_added", "article_id": article_id, "pending_action": pending_action, "tag": tag, "tags": tags}
@@ -1040,23 +1333,54 @@ def _handle_callback(update: dict) -> dict:
                         _set_kv(session, _pending_tags_key(chat_id, article_id, f"{pending_action}:ready"), ",".join(tags))
         return {"ok": True, "action": "tag_done_wait_reason", "article_id": article_id, "pending_action": pending_action, "tags": tags}
 
+    if action == "addtag":
+        if len(parts) < 4:
+            return {"ok": True, "skipped": "bad_addtag_callback"}
+        pending_action = str(parts[3] or "").strip().lower()
+        prompt = _send_message(
+            chat_id,
+            "Введи новый тег строго в формате: key - label\nПример: industry_watch - Радар индустрии",
+            force_reply=True,
+        )
+        if prompt.get("ok"):
+            prompt_id = str((prompt.get("result") or {}).get("message_id") or "")
+            if prompt_id:
+                with session_scope() as session:
+                    session.add(
+                        TelegramPendingReason(
+                            chat_id=chat_id,
+                            user_id=user_id or "0",
+                            article_id=article_id,
+                            action=f"tag_add:{pending_action}",
+                            prompt_message_id=prompt_id,
+                            created_at=datetime.utcnow(),
+                        )
+                    )
+        return {"ok": True, "action": "tag_add_prompted", "article_id": article_id, "pending_action": pending_action}
+
     if action == "pubnow":
-        # This callback comes from the temporary "Когда публиковать?" chooser; remove it entirely.
-        _delete_message(chat_id, message_id)
         kb = _build_tag_picker_kb(article_id, "publish_now")
-        _send_message(chat_id, "Выбери теги причины публикации (можно несколько), потом нажми «Готово»:", reply_markup=kb)
+        out = _send_message(chat_id, "Выбери теги причины публикации (можно несколько), потом нажми «Готово»:", reply_markup=kb)
+        if out.get("ok"):
+            # This callback comes from the temporary "Когда публиковать?" chooser; remove it entirely.
+            _delete_message(chat_id, message_id)
+        else:
+            _send_message(chat_id, f"Не удалось открыть выбор тегов. Попробуй ещё раз.\n{out.get('error','')[:180]}")
         return {"ok": True, "action": "publish_now_pick_tags", "article_id": article_id}
 
     if action == "pub1h":
-        # This callback comes from the temporary "Когда публиковать?" chooser; remove it entirely.
-        _delete_message(chat_id, message_id)
         with session_scope() as session:
             article = session.get(Article, article_id)
             if article:
                 article.scheduled_publish_at = datetime.utcnow() + timedelta(hours=1)
                 article.updated_at = datetime.utcnow()
         kb = _build_tag_picker_kb(article_id, "schedule_1h")
-        _send_message(chat_id, "Поставил +1 час. Выбери теги причины, затем нажми «Готово»:", reply_markup=kb)
+        out = _send_message(chat_id, "Поставил +1 час. Выбери теги причины, затем нажми «Готово»:", reply_markup=kb)
+        if out.get("ok"):
+            # This callback comes from the temporary "Когда публиковать?" chooser; remove it entirely.
+            _delete_message(chat_id, message_id)
+        else:
+            _send_message(chat_id, f"Не удалось открыть выбор тегов. Попробуй ещё раз.\n{out.get('error','')[:180]}")
         return {"ok": True, "action": "publish_plus_1h_pick_tags", "article_id": article_id}
 
     if action == "pubpick":
@@ -1084,7 +1408,6 @@ def _handle_callback(update: dict) -> dict:
         return {"ok": True, "action": "publish_pick_time", "article_id": article_id}
 
     if action == "del":
-        _edit_message_reply_markup(chat_id, message_id)
         # Immediately cancel any delayed publication while we wait for the reason.
         with session_scope() as session:
             art = session.get(Article, article_id)
@@ -1092,11 +1415,14 @@ def _handle_callback(update: dict) -> dict:
                 art.scheduled_publish_at = None
                 art.updated_at = datetime.utcnow()
         kb = _build_tag_picker_kb(article_id, "delete")
-        _send_message(chat_id, "Выбери теги причины удаления (можно несколько), затем «Готово»:", reply_markup=kb)
+        out = _send_message(chat_id, "Выбери теги причины удаления (можно несколько), затем «Готово»:", reply_markup=kb)
+        if out.get("ok"):
+            _edit_message_reply_markup(chat_id, message_id)
+        else:
+            _send_message(chat_id, f"Не удалось открыть выбор тегов. Попробуй ещё раз.\n{out.get('error','')[:180]}")
         return {"ok": True, "action": "delete_pick_tags", "article_id": article_id}
 
     if action == "hide":
-        _edit_message_reply_markup(chat_id, message_id)
         # Immediately cancel any delayed publication while we wait for the reason.
         with session_scope() as session:
             art = session.get(Article, article_id)
@@ -1104,7 +1430,11 @@ def _handle_callback(update: dict) -> dict:
                 art.scheduled_publish_at = None
                 art.updated_at = datetime.utcnow()
         kb = _build_tag_picker_kb(article_id, "hide")
-        _send_message(chat_id, "Выбери теги причины скрытия, затем «Готово»:", reply_markup=kb)
+        out = _send_message(chat_id, "Выбери теги причины скрытия, затем «Готово»:", reply_markup=kb)
+        if out.get("ok"):
+            _edit_message_reply_markup(chat_id, message_id)
+        else:
+            _send_message(chat_id, f"Не удалось открыть выбор тегов. Попробуй ещё раз.\n{out.get('error','')[:180]}")
         return {"ok": True, "action": "hide_pick_tags", "article_id": article_id}
 
     if action == "later":
@@ -1150,6 +1480,22 @@ def _handle_message(update: dict) -> dict:
         with session_scope() as session:
             _set_kv(session, "telegram_review_runtime_chat_id", chat_id)
 
+    cmd = text.strip().split()[0].lower() if text.strip().startswith("/") else ""
+    if cmd in {"/new_article", "/review"}:
+        out = send_best_unsorted_for_review(chat_id=chat_id or None)
+        if not out.get("ok"):
+            _send_message(chat_id, "Не нашёл подходящую статью для ревью прямо сейчас.")
+        return {"ok": True, "action": "review_best_unsorted_cmd", **out}
+    if cmd in {"/help", "/start"}:
+        _send_message(
+            chat_id,
+            "Команды:\n"
+            "/new_article — прислать лучшую статью на ревью\n"
+            "/review — то же самое\n"
+            "/help — показать это сообщение",
+        )
+        return {"ok": True, "action": "help_shown"}
+
     reply_to = msg.get("reply_to_message") or {}
     prompt_id = str(reply_to.get("message_id") or "")
     if not prompt_id or not chat_id:
@@ -1172,6 +1518,35 @@ def _handle_message(update: dict) -> dict:
     if not ok_input:
         _send_message(chat_id, f"Не могу принять такой ввод: {input_error}. Напиши причину обычным текстом и ответь на то же сообщение.")
         return {"ok": True, "skipped": "invalid_reason_input"}
+
+    if str(action).startswith("tag_add:"):
+        pending_action = str(action).split(":", 1)[1].strip().lower()
+        slug, title_ru, err = _parse_custom_tag_line(text)
+        if err or not slug or not title_ru:
+            _send_message(chat_id, "Не принял тег. Формат только: key - label (с пробелами вокруг дефиса).")
+            return {"ok": True, "skipped": "invalid_custom_tag_format"}
+        _upsert_reason_tag_catalog(
+            slug,
+            title_ru,
+            created_by_user_id=_safe_user_id_int(user_id),
+            scope=pending_action,
+        )
+        tags = _append_pending_tag(chat_id, article_id, pending_action, slug)
+        with session_scope() as session:
+            pending = session.scalars(
+                select(TelegramPendingReason).where(
+                    TelegramPendingReason.prompt_message_id == prompt_id,
+                    TelegramPendingReason.chat_id == chat_id,
+                )
+            ).first()
+            if pending:
+                session.delete(pending)
+        _delete_message(chat_id, prompt_id)
+        if msg_id:
+            _delete_message(chat_id, msg_id)
+        kb = _build_tag_picker_kb(article_id, pending_action, selected_tags=tags)
+        _send_message(chat_id, f"Добавил тег: {slug}. Выбери ещё теги и нажми «Готово».", reply_markup=kb)
+        return {"ok": True, "action": "custom_tag_added", "article_id": article_id, "tag": slug, "pending_action": pending_action}
 
     if action == "publish":
         with session_scope() as session:
@@ -1321,22 +1696,21 @@ def _handle_message(update: dict) -> dict:
         _delete_message(chat_id, prompt_id)
         if msg_id:
             _delete_message(chat_id, msg_id)
-        prompt2 = _send_message(chat_id, f"Ок, поставил публикацию на {dt_msk.strftime('%Y-%m-%d %H:%M')} МСК. Почему выбрал эту новость? Ответь реплаем.", force_reply=True)
-        if prompt2.get("ok"):
-            prompt2_id = str((prompt2.get("result") or {}).get("message_id") or "")
-            if prompt2_id:
-                with session_scope() as session:
-                    session.add(
-                        TelegramPendingReason(
-                            chat_id=chat_id,
-                            user_id=user_id or "0",
-                            article_id=article_id,
-                            action="schedule_custom",
-                            prompt_message_id=prompt2_id,
-                            created_at=datetime.utcnow(),
-                        )
-                    )
-        return {"ok": True, "action": "scheduled_custom_time", "article_id": article_id, "scheduled_utc": dt_utc.isoformat(sep=" ", timespec="seconds")}
+        kb = _build_tag_picker_kb(article_id, "schedule_custom")
+        out = _send_message(
+            chat_id,
+            f"Ок, поставил публикацию на {dt_msk.strftime('%Y-%m-%d %H:%M')} МСК. "
+            "Теперь выбери теги причины (можно несколько), затем «Готово»:",
+            reply_markup=kb,
+        )
+        if not out.get("ok"):
+            _send_message(chat_id, f"Не удалось открыть выбор тегов. Попробуй ещё раз.\n{out.get('error','')[:180]}")
+        return {
+            "ok": True,
+            "action": "scheduled_custom_time_pick_tags",
+            "article_id": article_id,
+            "scheduled_utc": dt_utc.isoformat(sep=" ", timespec="seconds"),
+        }
 
     if action == "schedule_custom":
         reason_payload = _reason_with_tags(action, safe_text, ready_tags)

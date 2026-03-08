@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import re
 import base64
+import hashlib
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -12,9 +14,48 @@ from sqlalchemy import func, select
 from app.core.config import settings
 from app.db import session_scope
 from app.models import Article, ArticleStatus, ContentVersion, Score
-from app.services.llm import get_client, track_usage_from_response
+from app.services.llm import get_client, llm_budget_allows, track_usage_from_response
 from app.services.object_storage import upload_generated_image
 from app.services.runtime_settings import get_runtime_csv_list, get_runtime_int
+
+
+_LLM_CACHE: dict[str, tuple[float, dict]] = {}
+_LLM_CACHE_MAX = 400
+_LLM_CACHE_TTL_SECONDS = 6 * 60 * 60
+
+
+def _cache_key(op: str, article: Article, payload: dict | None = None) -> str:
+    base = {
+        "op": op,
+        "article_id": int(article.id),
+        "title": article.title or "",
+        "subtitle": article.subtitle or "",
+        "canonical_url": article.canonical_url or "",
+        "text_hash": hashlib.sha256(str(article.text or "").encode("utf-8", errors="ignore")).hexdigest(),
+        "payload": payload or {},
+    }
+    raw = json.dumps(base, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def _cache_get(key: str) -> dict | None:
+    row = _LLM_CACHE.get(key)
+    if not row:
+        return None
+    ts, data = row
+    if (datetime.now(timezone.utc).timestamp() - float(ts)) > _LLM_CACHE_TTL_SECONDS:
+        _LLM_CACHE.pop(key, None)
+        return None
+    return dict(data)
+
+
+def _cache_set(key: str, data: dict) -> None:
+    _LLM_CACHE[key] = (datetime.now(timezone.utc).timestamp(), dict(data))
+    if len(_LLM_CACHE) > _LLM_CACHE_MAX:
+        # keep the newest keys only
+        ordered = sorted(_LLM_CACHE.items(), key=lambda kv: kv[1][0], reverse=True)[:_LLM_CACHE_MAX]
+        _LLM_CACHE.clear()
+        _LLM_CACHE.update(dict(ordered))
 
 
 def generate_ru_summary(article_id: int) -> bool:
@@ -25,11 +66,17 @@ def generate_ru_summary(article_id: int) -> bool:
 
     extraction = _extract_facts(article)
     rewrite = _rewrite_ru(article, extraction)
+    rewrite = _enforce_temporal_consistency(article, rewrite, extraction)
+    rewrite = _ensure_key_takeaways_block(article, rewrite, extraction)
     quality = _quality_checks(rewrite)
+    factual = _factual_consistency_checks(article, extraction, rewrite)
+    quality["factual"] = factual
 
-    if not quality["is_valid"]:
+    if not quality["is_valid"] or not factual.get("is_valid", True):
         rewrite["ru_summary"] = _safe_fallback_summary(article, extraction)
         quality = _quality_checks(rewrite)
+        factual = _factual_consistency_checks(article, extraction, rewrite)
+        quality["factual"] = factual
 
     with session_scope() as session:
         article = session.get(Article, article_id)
@@ -64,14 +111,32 @@ def generate_ru_summary(article_id: int) -> bool:
 
 
 def _extract_facts(article: Article) -> dict:
+    cache_key = _cache_key("extract_facts", article)
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     if not settings.openrouter_api_key:
-        return {
+        out = {
             "key_points": [article.subtitle[:140]],
             "dates": [],
             "numbers": [],
             "entities": [],
             "claims": [article.title],
         }
+        _cache_set(cache_key, out)
+        return out
+
+    if not llm_budget_allows("content.extract_facts", feature="content"):
+        out = {
+            "key_points": [article.subtitle[:140]],
+            "dates": [],
+            "numbers": [],
+            "entities": [],
+            "claims": [article.title],
+        }
+        _cache_set(cache_key, out)
+        return out
 
     prompt = f"""
 Extract only factual information from this article.
@@ -101,12 +166,21 @@ Text: {article.text[:9000]}
         )
         track_usage_from_response(resp, operation="content.extract_facts", model=settings.llm_text_model, kind="chat")
         raw = resp.choices[0].message.content or "{}"
-        return json.loads(raw)
+        out = json.loads(raw)
+        _cache_set(cache_key, out)
+        return out
     except Exception:
-        return {"key_points": [article.subtitle[:140]], "dates": [], "numbers": [], "entities": [], "claims": [article.title]}
+        out = {"key_points": [article.subtitle[:140]], "dates": [], "numbers": [], "entities": [], "claims": [article.title]}
+        _cache_set(cache_key, out)
+        return out
 
 
 def _rewrite_ru(article: Article, extraction: dict) -> dict:
+    cache_key = _cache_key("rewrite_ru", article, {"extraction": extraction})
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     style_guide = """
 Ты — редактор технологического AI-канала.
 
@@ -129,8 +203,25 @@ def _rewrite_ru(article: Article, extraction: dict) -> dict:
 
 Структура текста:
 1. Первый абзац — что произошло (суть события).
-2. Второй абзац — что это меняет и почему это важно.
+2. Второй абзац — практическая ценность: где это применимо и чем полезно пользователю/команде/бизнесу.
 3. Если уместно — краткий контекст (рынок, конкуренция, стратегический сдвиг).
+4. Если есть важные цифры/бенчмарки/ограничения — обязательно кратко добавь их в текст.
+5. Блок `Ключевое:` добавляй только если он действительно помогает: 3–5 коротких пунктов с фактами (префикс `• `).
+
+Обязательные требования к пользе:
+— Явно ответь на вопрос «чем это полезно на практике».
+— Назови 2–4 прикладных сценария использования (без фантазий, только из фактов и разумных выводов из extraction).
+— Обязательно укажи «что стало лучше по сравнению с раньше/предыдущей версией/старым подходом».
+— Если практическая польза неочевидна, честно напиши это и объясни ограничение.
+— Избегай абстрактных формулировок вроде «улучшает эффективность» без конкретики.
+— Если в extraction есть релевантные цифры/бенчмарки, добавь их; если релевантных цифр нет, не выдумывай их.
+— Указывай доступность инструмента (где доступно: продукт/план/API) только если это прямо подтверждено фактами текста.
+— Текст должен давать читателю ключевые идеи без перехода по ссылке.
+— Для статей-мнений/эссе/размышлений не притягивай «где доступно/API», если это не тема материала.
+— Для исследований рынка труда, политики, регулирования и трендов НЕ используй шаблон «Где применять».
+— Если это не релиз инструмента/функции, вместо этого дай короткий блок «Что это значит для читателя/команды» (1–3 практичных вывода без фантазий).
+— Не используй пустые шаблонные подпункты: «Где применять», «Ключевые цифры», если они не добавляют конкретную ценность в этом материале.
+— Не добавляй цифры, которых нет в extraction; спорные/неподтвержденные цифры опускай.
 
 Важно:
 — Сохраняй факты, цифры, названия моделей и компаний.
@@ -141,25 +232,50 @@ def _rewrite_ru(article: Article, extraction: dict) -> dict:
 — Термины ИИ оставляй корректно (LLM, AGI, fine-tuning и т.п.).
 
 Длина:
-— 2 абзаца.
-— 700–1200 символов.
+— 2–3 абзаца, опционально блок `Ключевое:`.
+— 700–1400 символов.
 
 В конце не добавляй выводов «И это только начало».
 Никаких эмодзи.
 """.strip()
 
     if not settings.openrouter_api_key:
-        return {
+        out = {
             "ru_title": article.title,
             "ru_summary": (article.subtitle or article.text[:300])[: get_runtime_int("max_summary_chars", default=1400)],
             "short_hook": (article.subtitle or article.title)[:100],
         }
+        _cache_set(cache_key, out)
+        return out
 
+    if not llm_budget_allows("content.rewrite_ru", feature="content"):
+        out = {
+            "ru_title": article.title,
+            "ru_summary": (article.subtitle or article.text[:300])[: get_runtime_int("max_summary_chars", default=1400)],
+            "short_hook": (article.subtitle or article.title)[:100],
+        }
+        _cache_set(cache_key, out)
+        return out
+
+    now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    published_at = article.published_at.isoformat() if article.published_at else ""
     prompt = f"""
 {style_guide}
 Используй только факты из extraction.
+Проверка времени и фактов:
+- Сейчас: {now_utc}
+- Published_at статьи: {published_at or "unknown"}
+- Никогда не пиши будущие/планируемые события как уже свершившиеся.
+- Если по тексту это анонс/план/бета/ожидание — используй соответствующие формулировки (\"планирует\", \"ожидается\", \"может\", \"анонсировала\").
+- Если факт уже произошёл к моменту публикации — можно писать в прошедшем времени.
+- Не придумывай точные даты, если их нет в фактах.
 Верни JSON only:
 {{"ru_title":"...", "ru_summary":"...", "short_hook":"..."}}
+
+Требования к полям:
+- ru_title: конкретный, без маркетинговых эпитетов, с намеком на практическую пользу.
+- ru_summary: обязательно содержит практическую применимость и что стало лучше vs раньше.
+- short_hook: 1 короткая фраза про практическую выгоду/применение.
 
 Extraction:
 {json.dumps(extraction, ensure_ascii=False)}
@@ -183,11 +299,81 @@ Source url: {article.canonical_url}
     except Exception:
         data = {}
 
-    return {
+    out = {
         "ru_title": (data.get("ru_title") or article.title)[: get_runtime_int("max_title_chars", default=130)],
         "ru_summary": (data.get("ru_summary") or article.subtitle or article.text[:300])[: get_runtime_int("max_summary_chars", default=1400)],
         "short_hook": (data.get("short_hook") or article.title)[:100],
     }
+    _cache_set(cache_key, out)
+    return out
+
+
+def _enforce_temporal_consistency(article: Article, rewrite: dict, extraction: dict) -> dict:
+    cache_key = _cache_key("temporal_guard", article, {"rewrite": rewrite, "extraction": extraction})
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    if not settings.openrouter_api_key:
+        return rewrite
+    ru_title = str(rewrite.get("ru_title") or article.title).strip()
+    ru_summary = str(rewrite.get("ru_summary") or article.subtitle or "").strip()
+    short_hook = str(rewrite.get("short_hook") or "").strip()
+    if not ru_title or not ru_summary:
+        return rewrite
+    if not llm_budget_allows("content.temporal_guard", feature="content"):
+        return rewrite
+
+    now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    published_at = article.published_at.isoformat() if article.published_at else ""
+    prompt = f"""
+Проверь временную согласованность текста и поправь только при необходимости.
+Не меняй смысл и факты.
+
+Контекст времени:
+- Сейчас: {now_utc}
+- Published_at статьи: {published_at or "unknown"}
+
+Правила:
+1) Будущие/планируемые события нельзя описывать как уже случившиеся.
+2) Если событие уже произошло к published_at, оставляй прошедшее время.
+3) Не добавляй факты и даты, которых нет в источнике.
+4) Сохрани стиль и структуру, правь минимально.
+
+Верни JSON only:
+{{"ru_title":"...", "ru_summary":"...", "short_hook":"..."}}
+
+Extraction:
+{json.dumps(extraction, ensure_ascii=False)}
+
+Candidate:
+ru_title: {ru_title}
+ru_summary: {ru_summary}
+short_hook: {short_hook}
+""".strip()
+    client = get_client()
+    try:
+        resp = client.chat.completions.create(
+            model=settings.llm_text_model,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": "Ты редактор-проверяющий факты и время. Исправляй только temporal-ошибки."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.0,
+        )
+        track_usage_from_response(resp, operation="content.temporal_guard", model=settings.llm_text_model, kind="chat")
+        raw = resp.choices[0].message.content or "{}"
+        data = json.loads(raw)
+        out = {
+            "ru_title": (data.get("ru_title") or ru_title)[: get_runtime_int("max_title_chars", default=130)],
+            "ru_summary": (data.get("ru_summary") or ru_summary)[: get_runtime_int("max_summary_chars", default=1400)],
+            "short_hook": (data.get("short_hook") or short_hook or ru_title)[:100],
+        }
+        _cache_set(cache_key, out)
+        return out
+    except Exception:
+        return rewrite
 
 
 def translate_article_text(article_id: int) -> dict:
@@ -206,6 +392,12 @@ def translate_article_text(article_id: int) -> dict:
             "ru_title": article.title,
             "ru_translation": src[:6000],
         }
+    cache_key = _cache_key("translate_preview", article)
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return {"ok": True, **cached}
+    if not llm_budget_allows("content.translate_preview", feature="content"):
+        return {"ok": True, "ru_title": article.title, "ru_translation": src[:6000]}
 
     prompt = f"""
 Переведи текст на русский язык точно и нейтрально.
@@ -234,11 +426,13 @@ Text: {src[:12000]}
         track_usage_from_response(resp, operation="content.translate_preview", model=settings.llm_text_model, kind="chat")
         raw = resp.choices[0].message.content or "{}"
         data = json.loads(raw)
-        return {
+        out = {
             "ok": True,
             "ru_title": (data.get("ru_title") or article.title)[: get_runtime_int("max_title_chars", default=130)],
             "ru_translation": (data.get("ru_translation") or src)[:14000],
         }
+        _cache_set(cache_key, {"ru_title": out["ru_title"], "ru_translation": out["ru_translation"]})
+        return out
     except Exception:
         return {
             "ok": True,
@@ -258,6 +452,12 @@ def translate_article_full_style(article_id: int) -> dict:
         return {"ok": False, "error": "empty_article_text"}
 
     if not settings.openrouter_api_key:
+        return {"ok": True, "ru_title": article.title, "ru_translation": src}
+    cache_key = _cache_key("translate_full", article)
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return {"ok": True, **cached}
+    if not llm_budget_allows("content.translate_full", feature="content"):
         return {"ok": True, "ru_title": article.title, "ru_translation": src}
 
     style_prompt = """
@@ -312,11 +512,13 @@ Fragment:
     except Exception:
         pass
 
-    return {
+    out = {
         "ok": True,
         "ru_title": ru_title[: get_runtime_int("max_title_chars", default=130)],
         "ru_translation": "\n\n".join([p for p in translated_parts if p]),
     }
+    _cache_set(cache_key, {"ru_title": out["ru_title"], "ru_translation": out["ru_translation"]})
+    return out
 
 
 def _chunk_text(text: str, chunk_size: int = 5000) -> list[str]:
@@ -355,6 +557,46 @@ def _quality_checks(rewrite: dict) -> dict:
     }
 
 
+def _factual_consistency_checks(article: Article, extraction: dict, rewrite: dict) -> dict:
+    """
+    Lightweight anti-hallucination guard:
+    - rewrite numbers should be sourced from extraction/article text
+    - URL in rewrite must match article canonical URL if present
+    """
+    summary = str(rewrite.get("ru_summary") or "")
+    src_pool = " ".join(
+        [
+            str(article.title or ""),
+            str(article.subtitle or ""),
+            str(article.text or ""),
+            " ".join(str(x) for x in (extraction.get("numbers") or [])),
+            " ".join(str(x) for x in (extraction.get("dates") or [])),
+            " ".join(str(x) for x in (extraction.get("claims") or [])),
+        ]
+    )
+    src_numbers = set(re.findall(r"\d+(?:[.,]\d+)?%?", src_pool))
+    out_numbers = set(re.findall(r"\d+(?:[.,]\d+)?%?", summary))
+    suspicious_numbers = sorted(x for x in out_numbers if x not in src_numbers)
+
+    links = re.findall(r"https?://\S+", summary)
+    canonical = str(article.canonical_url or "").strip()
+    bad_links = [u for u in links if canonical and canonical not in u]
+
+    return {
+        "is_valid": not suspicious_numbers and not bad_links,
+        "suspicious_numbers": suspicious_numbers[:10],
+        "bad_links": bad_links[:5],
+    }
+
+
+def _ensure_key_takeaways_block(article: Article, rewrite: dict, extraction: dict) -> dict:
+    """
+    Conservative mode: do not auto-inject synthetic "Ключевое" bullets.
+    LLM output should stay factual and avoid generic API/metrics add-ons.
+    """
+    return rewrite
+
+
 def _safe_fallback_summary(article: Article, extraction: dict) -> str:
     pts = extraction.get("key_points") or []
     if isinstance(pts, list) and pts:
@@ -373,6 +615,20 @@ def generate_image_prompt(article_id: int) -> str:
         summary = article.ru_summary or article.subtitle or article.text[:700]
 
     if not settings.openrouter_api_key:
+        return _image_prompt_scaffold(
+            scene=f"Key news scene about: {title[:180]}. Story context: {summary[:280]}",
+            mood="calm, technological, cinematic, serious",
+            style="realistic editorial illustration, clean composition",
+            camera="wide shot, clear focal subject, balanced negative space",
+            lighting="soft key light, subtle rim light, moderate contrast",
+            color_palette="deep blue, steel gray, neutral highlights",
+            constraints="no logos, no watermark, no readable text, no brand names on screen",
+        )
+    cache_key = _cache_key("generate_image_prompt", article, {"title": title, "summary": summary})
+    cached = _cache_get(cache_key)
+    if cached is not None and cached.get("prompt"):
+        return str(cached.get("prompt"))
+    if not llm_budget_allows("content.generate_image_prompt", feature="image"):
         return _image_prompt_scaffold(
             scene=f"Key news scene about: {title[:180]}. Story context: {summary[:280]}",
             mood="calm, technological, cinematic, serious",
@@ -429,7 +685,7 @@ Source URL: {article.canonical_url}
         out = (resp.choices[0].message.content or "").strip()
         # Enforce stable template if model drifts.
         parsed = _parse_image_prompt_lines(out)
-        return _image_prompt_scaffold(
+        out = _image_prompt_scaffold(
             scene=parsed.get("scene") or f"Key scene about: {title[:180]}",
             mood=parsed.get("mood") or "calm, technological, cinematic, serious",
             style=parsed.get("style") or "realistic editorial illustration, clean composition",
@@ -438,6 +694,8 @@ Source URL: {article.canonical_url}
             color_palette=parsed.get("color_palette") or "deep blue, steel gray, neutral highlights",
             constraints=parsed.get("constraints") or "no logos, no watermark, no readable text, no brand names on screen",
         )[:1500]
+        _cache_set(cache_key, {"prompt": out})
+        return out
     except Exception:
         return _image_prompt_scaffold(
             scene=f"Key news scene about: {title[:180]}. Story context: {summary[:280]}",

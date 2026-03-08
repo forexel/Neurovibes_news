@@ -22,6 +22,7 @@ SOURCES = [
     ("Wired AI", "https://www.wired.com/feed/tag/ai/latest/rss", 21, 0.0),
     ("MIT Tech Review AI", "https://www.technologyreview.com/topic/artificial-intelligence/feed", 22, 0.0),
     ("Bloomberg Tech", "https://feeds.bloomberg.com/technology/news.rss", 23, 0.0),
+    ("OpenAI Index", "https://openai.com/index/", 6, 0.0, "html"),
     ("OpenAI News", "https://openai.com/news/rss.xml", 24, 0.0),
     ("Anthropic", "https://www.anthropic.com/news", 24, 0.0, "html"),
     ("Meta AI", "https://ai.meta.com/blog/", 25, 0.0, "html"),

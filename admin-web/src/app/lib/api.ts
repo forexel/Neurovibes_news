@@ -53,7 +53,9 @@ export interface ArticleListItem {
   archived_at?: string | null;
   ml_verdict_confirmed?: boolean | null;
   ml_verdict_comment?: string | null;
+  ml_verdict_tags?: string[] | null;
   ml_verdict_updated_at?: string | null;
+  english_preview?: string | null;
 }
 
 export interface ArticleListResponse {
@@ -83,6 +85,7 @@ export interface ArticleDetails extends ArticleListItem {
   article_vector_model?: string | null;
   ml_verdict_confirmed?: boolean | null;
   ml_verdict_comment?: string | null;
+  ml_verdict_tags?: string[] | null;
   ml_verdict_updated_at?: string | null;
 }
 
@@ -168,6 +171,11 @@ export interface CostSummary {
   note?: string;
 }
 
+export interface ReasonTagOption {
+  value: string;
+  label: string;
+}
+
 export class ApiError extends Error {
   status: number;
   detail: string;
@@ -179,17 +187,53 @@ export class ApiError extends Error {
   }
 }
 
+const REQUEST_TIMEOUT_MS = 45_000;
+
+async function fetchWithTimeout(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const timeoutController = new AbortController();
+  const timeoutId = window.setTimeout(() => timeoutController.abort(), REQUEST_TIMEOUT_MS);
+  const externalSignal = init?.signal;
+
+  if (externalSignal?.aborted) {
+    window.clearTimeout(timeoutId);
+    throw new DOMException("The operation was aborted.", "AbortError");
+  }
+
+  const abortForwarder = () => timeoutController.abort();
+  if (externalSignal) {
+    externalSignal.addEventListener("abort", abortForwarder, { once: true });
+  }
+
+  try {
+    return await fetch(input, { ...init, signal: timeoutController.signal });
+  } finally {
+    if (externalSignal) {
+      externalSignal.removeEventListener("abort", abortForwarder);
+    }
+    window.clearTimeout(timeoutId);
+  }
+}
+
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, init);
+  let response: Response;
+  try {
+    response = await fetchWithTimeout(url, init);
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") {
+      throw new ApiError(408, "Сервер не ответил вовремя. Повтори действие.");
+    }
+    throw err;
+  }
   const contentType = response.headers.get("content-type") || "";
   const isJson = contentType.includes("application/json");
   const payload = isJson ? await response.json() : await response.text();
 
   if (!response.ok) {
-    const detail =
+    const rawDetail =
       typeof payload === "string"
         ? payload
         : String(payload?.detail || payload?.error || `Request failed: ${response.status}`);
+    const detail = rawDetail === "delete_conflict_retry" ? "Статья сейчас занята другим процессом. Повтори удаление через пару секунд." : rawDetail;
     throw new ApiError(response.status, detail);
   }
 
@@ -203,12 +247,19 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
 
 async function postForm(url: string, params: Record<string, string>) {
   const body = new URLSearchParams(params);
-  return fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body,
-    credentials: "same-origin",
-  });
+  try {
+    return await fetchWithTimeout(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body,
+      credentials: "same-origin",
+    });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") {
+      throw new ApiError(408, "Сервер не ответил вовремя. Повтори действие.");
+    }
+    throw err;
+  }
 }
 
 export const api = {
@@ -282,8 +333,11 @@ export const api = {
     return requestJson<Record<string, unknown>>("/setup/complete", { method: "POST" });
   },
 
-  listArticles(params: Record<string, string>) {
-    const qs = new URLSearchParams(params);
+  listArticles(params: Record<string, string | number | boolean>) {
+    const qs = new URLSearchParams();
+    Object.entries(params).forEach(([key, value]) => {
+      qs.set(key, String(value));
+    });
     return requestJson<ArticleListResponse>(`/admin-data/articles?${qs.toString()}`);
   },
 
@@ -307,12 +361,16 @@ export const api = {
     });
   },
 
-  saveMlVerdict(id: number, body: { confirmed: boolean; comment?: string }) {
-    return requestJson<{ ok: boolean; confirmed: boolean; comment: string }>(`/articles/${id}/ml-verdict`, {
+  saveMlVerdict(id: number, body: { confirmed: boolean; comment?: string; tags?: string[] }) {
+    return requestJson<{ ok: boolean; confirmed: boolean; comment: string; tags: string[] }>(`/articles/${id}/ml-verdict`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
+  },
+
+  getReasonTags() {
+    return requestJson<{ ok: boolean; items: ReasonTagOption[] }>("/reason-tags");
   },
 
   getCosts() {

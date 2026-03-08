@@ -5,13 +5,13 @@ import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Textarea } from "../components/ui/textarea";
 import { Label } from "../components/ui/label";
+import { Badge } from "../components/ui/badge";
 import { Switch } from "../components/ui/switch";
 import { Calendar as DateCalendar } from "../components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "../components/ui/dialog";
 import { StatusBadge } from "../components/StatusBadge";
-import { ScoreBadge } from "../components/ScoreBadge";
 import { LogPanel } from "../components/LogPanel";
+import { ReasonActionDialog } from "../components/ReasonActionDialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
 import {
   Archive,
@@ -28,7 +28,7 @@ import {
   Upload,
   Wand2,
 } from "lucide-react";
-import { api, ApiError, ArticleDetails, formatDateTime } from "../lib/api";
+import { api, ApiError, ArticleDetails, formatDateTime, ReasonTagOption } from "../lib/api";
 import { format } from "date-fns";
 import { ru } from "date-fns/locale";
 
@@ -65,6 +65,228 @@ function updateScheduleValue(currentValue: string, nextDate?: Date, nextTime?: s
   return `${datePart}T${timePart}`;
 }
 
+function normalizeSchedulePublishAt(raw: string): string {
+  const value = String(raw || "").trim();
+  if (!value) return "";
+  if (/^\d{1,2}:\d{2}$/.test(value)) {
+    const now = new Date();
+    const yyyy = now.getFullYear();
+    const mm = String(now.getMonth() + 1).padStart(2, "0");
+    const dd = String(now.getDate()).padStart(2, "0");
+    const hhmm = value.length === 4 ? `0${value}` : value;
+    return `${yyyy}-${mm}-${dd}T${hhmm}`;
+  }
+  return value;
+}
+
+function normalizeTimeOnly(raw: string): string {
+  const value = String(raw || "").trim();
+  if (!/^\d{1,2}:\d{2}$/.test(value)) return "";
+  const [hhRaw, mmRaw] = value.split(":");
+  const hh = Number(hhRaw);
+  const mm = Number(mmRaw);
+  if (!Number.isFinite(hh) || !Number.isFinite(mm)) return "";
+  if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return "";
+  return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+}
+
+function resolvePublishAt(scheduleDate: string, scheduleTimeDraft: string): string {
+  const normalizedDateTime = normalizeSchedulePublishAt(scheduleDate);
+  if (normalizedDateTime) return normalizedDateTime;
+  const normalizedTime = normalizeTimeOnly(scheduleTimeDraft);
+  if (!normalizedTime) return "";
+  const now = new Date();
+  const yyyy = now.getFullYear();
+  const mm = String(now.getMonth() + 1).padStart(2, "0");
+  const dd = String(now.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}T${normalizedTime}`;
+}
+
+type MlReasonParsed = {
+  reason: string;
+  tags: string[];
+  mlProb: number | null;
+  publishThreshold: number | null;
+  deleteThreshold: number | null;
+  drivers: Array<{ key: string; value: number }>;
+};
+
+function parseMlReason(input?: string | null): MlReasonParsed {
+  const raw = String(input || "").trim();
+  if (!raw) {
+    return { reason: "", tags: [], mlProb: null, publishThreshold: null, deleteThreshold: null, drivers: [] };
+  }
+  const lines = raw
+    .replace(/\s+\|\s+/g, "\n")
+    .replace(/\r/g, "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const tagsLine = lines.find((line) => /^tags=/i.test(line));
+  const reasonLine = lines.find((line) => /^reason_text=/i.test(line) || /^reason=/i.test(line));
+  const tags = tagsLine
+    ? tagsLine
+        .replace(/^tags=/i, "")
+        .split(",")
+        .map((tag) => tag.trim())
+        .filter(Boolean)
+    : [];
+
+  const mlProbMatch = raw.match(/\bml_prob\s*=\s*([0-9]*\.?[0-9]+)/i);
+  const publishThresholdMatch = raw.match(/\bpublish>=\s*([0-9]*\.?[0-9]+)/i);
+  const deleteThresholdMatch = raw.match(/\bdelete<=\s*([0-9]*\.?[0-9]+)/i);
+  const mlProbRaw = mlProbMatch ? Number(mlProbMatch[1]) : null;
+  const publishThresholdRaw = publishThresholdMatch ? Number(publishThresholdMatch[1]) : null;
+  const deleteThresholdRaw = deleteThresholdMatch ? Number(deleteThresholdMatch[1]) : null;
+
+  const drivers: Array<{ key: string; value: number }> = [];
+  const driversLine = lines.find((line) => /^drivers:\s*/i.test(line));
+  if (driversLine) {
+    for (const part of driversLine.replace(/^drivers:\s*/i, "").split(",")) {
+      const [rawKey, rawValue] = part.split(":");
+      const key = String(rawKey || "").trim();
+      const value = Number(String(rawValue || "").trim());
+      if (!key || Number.isNaN(value)) continue;
+      drivers.push({ key, value });
+    }
+  }
+
+  const reason = reasonLine
+    ? reasonLine.replace(/^reason(_text)?=/i, "").trim()
+    : lines
+        .filter((line) => !/^tags=/i.test(line))
+        .filter((line) => !/^drivers:/i.test(line))
+        .filter((line) => !/^ml_prob=/i.test(line))
+        .join(" ")
+        .trim();
+  return {
+    reason,
+    tags: Array.from(new Set(tags)),
+    mlProb: Number.isFinite(mlProbRaw ?? NaN) ? mlProbRaw : null,
+    publishThreshold: Number.isFinite(publishThresholdRaw ?? NaN) ? publishThresholdRaw : null,
+    deleteThreshold: Number.isFinite(deleteThresholdRaw ?? NaN) ? deleteThresholdRaw : null,
+    drivers,
+  };
+}
+
+const ML_TAG_LABELS: Record<string, string> = {
+  insufficient_content: "Недостаточно контента",
+  practical_tool: "Практичный инструмент",
+  practical_case: "Практичный кейс",
+  industry_watch: "Радар индустрии",
+  ru_relevance: "Релевантно РФ",
+  wow_positive: "Вау-эффект",
+  future_impact: "Влияние в будущем",
+  business_impact: "Влияние на бизнес",
+  low_significance: "Низкая значимость",
+  no_business_use: "Нет практической пользы",
+  no_ru: "Не релевантно для РФ",
+  no_future_impact: "Нет влияния на будущее",
+  too_technical: "Слишком техническая",
+  politics_noise: "Политический шум",
+  investment_noise: "Инвестиционный шум",
+  hiring_roles_noise: "Найм/роли, не по теме",
+  duplicate: "Дубликат",
+  non_ai: "Не AI/ML",
+};
+const ML_DRIVER_LABELS: Record<string, string> = {
+  practical_value: "Практическая ценность",
+  audience_fit: "Соответствие аудитории",
+  freshness: "Актуальность",
+  source_quality: "Качество источника",
+  actionability: "Применимость",
+};
+const POSITIVE_REASON_TAGS = new Set([
+  "practical_tool",
+  "practical_case",
+  "industry_watch",
+  "ru_relevance",
+  "wow_positive",
+  "future_impact",
+  "business_impact",
+  "breakthrough",
+  "product_release",
+  "benchmark",
+  "regulation",
+  "market_signal",
+  "future_trend",
+  "mass_audience",
+  "global_shift",
+]);
+const NEGATIVE_REASON_TAGS = new Set([
+  "insufficient_content",
+  "low_significance",
+  "no_business_use",
+  "no_ru",
+  "no_future_impact",
+  "too_technical",
+  "politics_noise",
+  "investment_noise",
+  "hiring_roles_noise",
+  "duplicate",
+  "non_ai",
+  "too_local",
+  "not_mass_audience",
+  "short_lived",
+]);
+
+function isLikelyNegativeReasonTag(tag: string): boolean {
+  const t = String(tag || "").trim().toLowerCase();
+  if (!t) return false;
+  if (NEGATIVE_REASON_TAGS.has(t)) return true;
+  if (POSITIVE_REASON_TAGS.has(t)) return false;
+  return (
+    t.startsWith("no_") ||
+    t.startsWith("not_") ||
+    t.startsWith("non_") ||
+    t.startsWith("too_") ||
+    t.includes("noise") ||
+    t.includes("duplicate") ||
+    t.includes("low_")
+  );
+}
+
+function formatMlTag(tag: string): string {
+  const key = String(tag || "").trim();
+  if (!key) return "";
+  return ML_TAG_LABELS[key] ? `${ML_TAG_LABELS[key]} (${key})` : key;
+}
+
+function formatMlDriverLabel(key: string): string {
+  return ML_DRIVER_LABELS[key] || key;
+}
+
+function formatMl10(value: number): string {
+  return `${(value * 10).toFixed(1)}/10`;
+}
+
+function probabilityBand(prob: number): string {
+  if (prob >= 0.8) return "высокая";
+  if (prob >= 0.55) return "средняя";
+  return "низкая";
+}
+
+function parseReasonPayload(text?: string | null): { reason: string; tags: string[] } {
+  const raw = String(text || "").trim();
+  if (!raw) return { reason: "", tags: [] };
+  const lines = raw
+    .replace(/\r/g, "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const tagsLine = lines.find((line) => /^tags=/i.test(line));
+  const reasonLine = lines.find((line) => /^reason_text=/i.test(line));
+  const tags = tagsLine
+    ? tagsLine
+        .replace(/^tags=/i, "")
+        .split(",")
+        .map((x) => x.trim())
+        .filter(Boolean)
+    : [];
+  const reason = reasonLine ? reasonLine.replace(/^reason_text=/i, "").trim() : raw;
+  return { reason, tags };
+}
+
 export default function ArticleEditor() {
   const { id } = useParams();
   const location = useLocation();
@@ -92,15 +314,22 @@ export default function ArticleEditor() {
   const [feedback, setFeedback] = useState("");
   const [mlVerdictConfirmed, setMlVerdictConfirmed] = useState(false);
   const [mlVerdictComment, setMlVerdictComment] = useState("");
+  const [mlVerdictTags, setMlVerdictTags] = useState<string[]>([]);
+  const [mlVerdictCustomTag, setMlVerdictCustomTag] = useState("");
   const [scheduleDate, setScheduleDate] = useState("");
+  const [scheduleTimeDraft, setScheduleTimeDraft] = useState("");
   const [schedulePopoverOpen, setSchedulePopoverOpen] = useState(false);
   const [reasonDialogOpen, setReasonDialogOpen] = useState(false);
   const [reasonDialogAction, setReasonDialogAction] = useState<"publish" | "delete">("publish");
   const [reasonDialogText, setReasonDialogText] = useState("");
   const [reasonDialogTags, setReasonDialogTags] = useState<string[]>([]);
   const [reasonDialogCustomTag, setReasonDialogCustomTag] = useState("");
+  const [catalogReasonTagOptions, setCatalogReasonTagOptions] = useState<ReasonTagOption[]>([]);
+  const [notFound, setNotFound] = useState(false);
+  const [loadError, setLoadError] = useState("");
 
   const deleteReasonTagOptions: Array<{ value: string; label: string }> = [
+    { value: "insufficient_content", label: "Недостаточно контента" },
     { value: "low_significance", label: "Низкая значимость" },
     { value: "no_business_use", label: "Нет практической пользы" },
     { value: "no_ru", label: "Не релевантно для РФ" },
@@ -112,6 +341,15 @@ export default function ArticleEditor() {
     { value: "duplicate", label: "Дубликат" },
     { value: "non_ai", label: "Не AI/ML" },
   ];
+  const publishReasonTagOptions: Array<{ value: string; label: string }> = [
+    { value: "practical_tool", label: "Практичный инструмент" },
+    { value: "practical_case", label: "Практичный кейс" },
+    { value: "industry_watch", label: "Радар индустрии" },
+    { value: "ru_relevance", label: "Релевантно РФ" },
+    { value: "wow_positive", label: "Вау-эффект" },
+    { value: "future_impact", label: "Влияние в будущем" },
+    { value: "business_impact", label: "Влияние на бизнес" },
+  ];
 
   function addLog(type: LogEntry["type"], message: string) {
     setLogs((prev) => [...prev, { type, message, timestamp: stamp() }]);
@@ -120,6 +358,8 @@ export default function ArticleEditor() {
   async function loadArticle() {
     if (!Number.isFinite(articleId)) return;
     setPageLoading(true);
+    setNotFound(false);
+    setLoadError("");
     try {
       const data = await api.getArticle(articleId);
       setArticle(data);
@@ -130,13 +370,23 @@ export default function ArticleEditor() {
       setFeedback(data.feedback || "");
       setMlVerdictConfirmed(Boolean(data.ml_verdict_confirmed));
       setMlVerdictComment(data.ml_verdict_comment || "");
-      setScheduleDate(toInputDate(data.scheduled_publish_at));
+      setMlVerdictTags(Array.isArray(data.ml_verdict_tags) ? data.ml_verdict_tags : []);
+      setMlVerdictCustomTag("");
+      const nextScheduleDate = toInputDate(data.scheduled_publish_at);
+      setScheduleDate(nextScheduleDate);
+      setScheduleTimeDraft(nextScheduleDate ? nextScheduleDate.slice(11, 16) : "");
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         navigate("/login", { replace: true });
         return;
       }
-      addLog("error", err instanceof Error ? err.message : "Не удалось загрузить статью.");
+      if (err instanceof ApiError && err.status === 404) {
+        setNotFound(true);
+      } else {
+        const message = err instanceof Error ? err.message : "Не удалось загрузить статью.";
+        setLoadError(message);
+        addLog("error", message);
+      }
     } finally {
       setPageLoading(false);
     }
@@ -146,6 +396,13 @@ export default function ArticleEditor() {
     loadArticle();
   }, [articleId]);
 
+  useEffect(() => {
+    api
+      .getReasonTags()
+      .then((out) => setCatalogReasonTagOptions(Array.isArray(out.items) ? out.items : []))
+      .catch(() => setCatalogReasonTagOptions([]));
+  }, []);
+
   const postPreview = useMemo(() => article?.post_preview || "RU текст не готов. Сгенерируй пост и сохрани его.", [article]);
   const selectedScheduleDate = useMemo(() => getScheduleDateValue(scheduleDate), [scheduleDate]);
   const hasInsufficientContent = String(article?.content_mode || "").toLowerCase() === "summary_only";
@@ -153,11 +410,57 @@ export default function ArticleEditor() {
     const value = String(article?.ml_recommendation || "").trim().toLowerCase();
     return Boolean(value) && value !== "unknown";
   }, [article?.ml_recommendation]);
+  const parsedMlReason = useMemo(() => parseMlReason(article?.ml_recommendation_reason), [article?.ml_recommendation_reason]);
+  const mlRecommendationLabel = useMemo(() => {
+    const rec = String(article?.ml_recommendation || "").trim().toLowerCase();
+    if (rec === "publish_candidate") return "К публикации";
+    if (rec === "delete_candidate") return "К удалению";
+    if (rec === "review") return "Нужна ручная проверка";
+    return "Нет вердикта";
+  }, [article?.ml_recommendation]);
+  const mlProbability = useMemo(() => {
+    if (typeof parsedMlReason.mlProb === "number") return parsedMlReason.mlProb;
+    return typeof article?.ml_recommendation_confidence === "number" ? article.ml_recommendation_confidence : null;
+  }, [article?.ml_recommendation_confidence, parsedMlReason.mlProb]);
+  const mlReasonTags = useMemo(() => {
+    const fromReason = parsedMlReason.tags;
+    const saved = Array.isArray(article?.ml_verdict_tags) ? article.ml_verdict_tags : [];
+    return Array.from(new Set([...fromReason, ...saved].filter(Boolean)));
+  }, [article?.ml_verdict_tags, parsedMlReason.tags]);
+  const mlDrivers = useMemo(
+    () => parsedMlReason.drivers.map((item) => ({ ...item, label: formatMlDriverLabel(item.key) })),
+    [parsedMlReason.drivers],
+  );
+  const mlVerdictTagOptions = useMemo(() => {
+    const rec = String(article?.ml_recommendation || "").trim().toLowerCase();
+    const base = rec === "publish_candidate"
+      ? publishReasonTagOptions
+      : rec === "delete_candidate"
+        ? deleteReasonTagOptions
+        : [...publishReasonTagOptions, ...deleteReasonTagOptions];
+    const merged = [...base];
+    const existing = new Set(merged.map((x) => x.value));
+    for (const item of catalogReasonTagOptions) {
+      if (!item?.value || existing.has(item.value)) continue;
+      const isNegative = isLikelyNegativeReasonTag(item.value);
+      if (rec === "publish_candidate" && isNegative) continue;
+      if (rec === "delete_candidate" && !isNegative) continue;
+      merged.push(item);
+      existing.add(item.value);
+    }
+    return merged;
+  }, [article?.ml_recommendation, catalogReasonTagOptions]);
 
   function openReasonDialog(action: "publish" | "delete") {
     setReasonDialogAction(action);
-    setReasonDialogText(action === "publish" ? feedback || "" : "");
-    setReasonDialogTags([]);
+    if (action === "publish") {
+      const parsed = parseReasonPayload(feedback || "");
+      setReasonDialogText(parsed.reason || "");
+      setReasonDialogTags(parsed.tags);
+    } else {
+      setReasonDialogText("");
+      setReasonDialogTags([]);
+    }
     setReasonDialogCustomTag("");
     setReasonDialogOpen(true);
   }
@@ -182,6 +485,34 @@ export default function ArticleEditor() {
     setReasonDialogCustomTag("");
   }
 
+  function toggleMlVerdictTag(tag: string) {
+    const normalized = normalizeTag(tag);
+    if (!normalized) return;
+    setMlVerdictTags((prev) => (prev.includes(normalized) ? prev.filter((x) => x !== normalized) : [...prev, normalized]));
+  }
+
+  function addCustomMlVerdictTag() {
+    const normalized = normalizeTag(mlVerdictCustomTag);
+    if (!normalized) return;
+    setMlVerdictTags((prev) => (prev.includes(normalized) ? prev : [...prev, normalized]));
+    setMlVerdictCustomTag("");
+  }
+
+  const reasonTagOptions = useMemo(() => {
+    const base = reasonDialogAction === "publish" ? publishReasonTagOptions : deleteReasonTagOptions;
+    const merged = [...base];
+    const existing = new Set(merged.map((x) => x.value));
+    for (const item of catalogReasonTagOptions) {
+      if (!item?.value || existing.has(item.value)) continue;
+      const isNegative = isLikelyNegativeReasonTag(item.value);
+      if (reasonDialogAction === "publish" && isNegative) continue;
+      if (reasonDialogAction === "delete" && !isNegative) continue;
+      merged.push(item);
+      existing.add(item.value);
+    }
+    return merged;
+  }, [reasonDialogAction, catalogReasonTagOptions]);
+
   async function submitReasonDialog() {
     const reason = reasonDialogText.trim();
     if (reason.length < 5) {
@@ -193,12 +524,19 @@ export default function ArticleEditor() {
       const payload = tags.length
         ? ["decision=publish", `tags=${tags.join(",")}`, `reason_text=${reason}`].join("\n")
         : reason;
+      const publishAt = resolvePublishAt(scheduleDate, scheduleTimeDraft);
+      const shouldSchedule = publishAt.length > 0;
       setLoading("Publish");
       try {
         await api.postArticleAction(articleId, "feedback", { explanation_text: payload });
         setFeedback(payload);
-        await api.postArticleAction(articleId, "publish");
-        addLog("success", "Publish: ok");
+        if (shouldSchedule) {
+          await api.postArticleAction(articleId, "schedule-publish", { publish_at: publishAt });
+          addLog("success", `Schedule: ${publishAt}`);
+        } else {
+          await api.postArticleAction(articleId, "publish");
+          addLog("success", "Publish: ok");
+        }
         setReasonDialogOpen(false);
         await loadArticle();
       } catch (err) {
@@ -230,6 +568,7 @@ export default function ArticleEditor() {
       await api.saveMlVerdict(article.id, {
         confirmed: mlVerdictConfirmed,
         comment: mlVerdictComment.trim(),
+        tags: mlVerdictTags.map(normalizeTag).filter(Boolean),
       });
       addLog("success", "ML-вердикт сохранен");
       await loadArticle();
@@ -284,7 +623,7 @@ export default function ArticleEditor() {
     );
   }
 
-  if (!article) {
+  if (!article && notFound) {
     return (
       <div className="min-h-screen bg-background">
         <TopNavigation />
@@ -293,6 +632,41 @@ export default function ArticleEditor() {
           <Button asChild>
             <Link to={returnTo}>Вернуться к списку</Link>
           </Button>
+        </div>
+      </div>
+    );
+  }
+
+  if (!article && loadError) {
+    return (
+      <div className="min-h-screen bg-background">
+        <TopNavigation />
+        <div className="max-w-7xl mx-auto px-6 py-12 text-center">
+          <h1 className="text-2xl font-semibold mb-4">Ошибка загрузки статьи</h1>
+          <p className="text-muted-foreground mb-6 whitespace-pre-wrap">{loadError}</p>
+          <div className="flex items-center justify-center gap-3">
+            <Button onClick={() => void loadArticle()}>Повторить</Button>
+            <Button variant="outline" asChild>
+              <Link to={returnTo}>Вернуться к списку</Link>
+            </Button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!article) {
+    return (
+      <div className="min-h-screen bg-background">
+        <TopNavigation />
+        <div className="max-w-7xl mx-auto px-6 py-12 text-center">
+          <h1 className="text-2xl font-semibold mb-4">Статья временно недоступна</h1>
+          <div className="flex items-center justify-center gap-3">
+            <Button onClick={() => void loadArticle()}>Повторить</Button>
+            <Button variant="outline" asChild>
+              <Link to={returnTo}>Вернуться к списку</Link>
+            </Button>
+          </div>
         </div>
       </div>
     );
@@ -315,7 +689,6 @@ export default function ArticleEditor() {
             </Button>
             <div className="flex items-center gap-2">
               <StatusBadge status={article.status} />
-              {article.score_10 != null ? <ScoreBadge score={article.score_10} /> : null}
               <span className="text-sm text-muted-foreground">ID #{article.id}</span>
             </div>
           </div>
@@ -337,37 +710,118 @@ export default function ArticleEditor() {
           </div>
         ) : null}
 
-        <div className="mb-6 rounded-lg border border-border bg-card p-4">
-          <div className="mb-3 text-sm font-medium">ML-вердикт</div>
-          {!hasMlVerdict ? (
-            <div className="text-sm text-muted-foreground">Нет вердикта ML.</div>
-          ) : (
-            <>
-              <div className="mb-3 flex items-center gap-3">
-                <Switch id="ml-verdict-confirmed" checked={mlVerdictConfirmed} onCheckedChange={setMlVerdictConfirmed} />
-                <Label htmlFor="ml-verdict-confirmed" className="cursor-pointer">
-                  Согласен с рекомендацией ML
-                </Label>
+        {hasMlVerdict ? (
+          <div className="mb-6 rounded-lg border border-border bg-card p-4">
+            <div className="mb-3 text-sm font-medium">ML-рекомендация</div>
+            <div className="mb-3 rounded-md border border-border/80 bg-muted/30 p-3 text-sm">
+              <div>
+                Рекомендация: <span className="font-medium">{mlRecommendationLabel}</span>
+                {mlProbability !== null ? ` (${formatMl10(mlProbability)})` : ""}
               </div>
-              <div className="space-y-2">
-                <Label htmlFor="ml-verdict-comment">Комментарий</Label>
-                <Textarea
-                  id="ml-verdict-comment"
-                  value={mlVerdictComment}
-                  onChange={(e) => setMlVerdictComment(e.target.value)}
-                  rows={3}
-                  placeholder="Почему согласен / не согласен с выбором модели"
+              {mlProbability !== null ? (
+                <div className="mt-2 text-muted-foreground">
+                  Уверенность ML: <span className="font-medium text-foreground">{formatMl10(mlProbability)}</span>
+                  {" "}({probabilityBand(mlProbability)})
+                </div>
+              ) : null}
+              {(parsedMlReason.publishThreshold !== null || parsedMlReason.deleteThreshold !== null) ? (
+                <div className="mt-1 text-muted-foreground">
+                  Пороги:
+                  {parsedMlReason.publishThreshold !== null ? ` publish >= ${formatMl10(parsedMlReason.publishThreshold)}` : ""}
+                  {parsedMlReason.publishThreshold !== null && parsedMlReason.deleteThreshold !== null ? ";" : ""}
+                  {parsedMlReason.deleteThreshold !== null ? ` delete <= ${formatMl10(parsedMlReason.deleteThreshold)}` : ""}
+                </div>
+              ) : null}
+              {mlDrivers.length > 0 ? (
+                <div className="mt-3 space-y-1">
+                  <div className="text-xs font-medium text-muted-foreground">Факторы ML</div>
+                  <div className="flex flex-wrap gap-2">
+                    {mlDrivers.map((driver) => {
+                      const toneClass =
+                        driver.value >= 0.67
+                          ? "border-green-500/40 bg-green-500/10 text-green-300"
+                          : driver.value <= 0.45
+                            ? "border-red-500/40 bg-red-500/10 text-red-300"
+                            : "border-yellow-500/40 bg-yellow-500/10 text-yellow-300";
+                      return (
+                        <Badge key={driver.key} variant="outline" className={`text-xs ${toneClass}`}>
+                          {driver.label}: {driver.value.toFixed(2)}
+                        </Badge>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : null}
+              {mlReasonTags.length > 0 ? (
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {mlReasonTags.map((tag) => (
+                    <Badge key={tag} variant="outline" className="text-xs">
+                      {formatMlTag(tag)}
+                    </Badge>
+                  ))}
+                </div>
+              ) : null}
+              {parsedMlReason.reason ? <div className="mt-2 text-muted-foreground whitespace-pre-wrap">{parsedMlReason.reason}</div> : null}
+            </div>
+            <div className="mb-3 flex items-center gap-3">
+              <Switch id="ml-verdict-confirmed" checked={mlVerdictConfirmed} onCheckedChange={setMlVerdictConfirmed} />
+              <Label htmlFor="ml-verdict-confirmed" className="cursor-pointer">
+                Согласен с рекомендацией ML
+              </Label>
+            </div>
+            <div className="space-y-2 rounded-md border border-border p-3">
+              <div className="text-xs font-medium text-muted-foreground">Теги для дообучения ML</div>
+              <div className="flex flex-wrap gap-2">
+                {mlVerdictTagOptions.map((item) => {
+                  const active = mlVerdictTags.includes(item.value);
+                  return (
+                    <button
+                      key={item.value}
+                      type="button"
+                      onClick={() => toggleMlVerdictTag(item.value)}
+                      className={`rounded-full border px-2.5 py-1 text-xs transition-colors ${
+                        active
+                          ? "border-primary/40 bg-primary/15 text-primary"
+                          : "border-border bg-muted/20 text-muted-foreground hover:bg-muted/40"
+                      }`}
+                    >
+                      {item.label}
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="flex gap-2">
+                <Input
+                  value={mlVerdictCustomTag}
+                  onChange={(e) => setMlVerdictCustomTag(e.target.value)}
+                  placeholder="Новый тег (например: local_policy_noise)"
+                  className="h-8"
                 />
-              </div>
-              <div className="mt-3">
-                <Button size="sm" variant="secondary" onClick={saveMlVerdict} disabled={loading === "ml-verdict"}>
-                  {loading === "ml-verdict" ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Save className="w-4 h-4 mr-2" />}
-                  Сохранить ML-вердикт
+                <Button type="button" variant="outline" size="sm" onClick={addCustomMlVerdictTag}>
+                  Добавить тег
                 </Button>
               </div>
-            </>
-          )}
-        </div>
+            </div>
+            <div className="mt-3 space-y-2">
+              <Label htmlFor="ml-verdict-comment">Комментарий</Label>
+              <Textarea
+                id="ml-verdict-comment"
+                value={mlVerdictComment}
+                onChange={(e) => setMlVerdictComment(e.target.value)}
+                rows={3}
+                placeholder="Почему согласен / не согласен с выбором модели"
+              />
+            </div>
+            <div className="mt-3">
+              <Button size="sm" variant="secondary" onClick={saveMlVerdict} disabled={loading === "ml-verdict"}>
+                {loading === "ml-verdict" ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Save className="w-4 h-4 mr-2" />}
+                Сохранить ML-вердикт
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <div className="mb-6 text-sm text-muted-foreground">ML-вердикт пока отсутствует. Блок подтверждения скрыт.</div>
+        )}
 
         <Tabs defaultValue="linear" className="space-y-6">
           <TabsList>
@@ -555,14 +1009,23 @@ export default function ArticleEditor() {
                       id="schedule-linear"
                       type="datetime-local"
                       value={scheduleDate}
-                      onChange={(e) => setScheduleDate(e.target.value)}
+                      onChange={(e) => {
+                        const next = e.target.value;
+                        setScheduleDate(next);
+                        setScheduleTimeDraft(next ? next.slice(11, 16) : "");
+                      }}
                     />
                   </div>
                   <div className="flex items-end">
                     <Button
                       variant="outline"
                       className="w-full"
-                      onClick={() => run("Clear Schedule", () => api.postArticleAction(articleId, "unschedule-publish"))}
+                      onClick={() =>
+                        run("Clear Schedule", () => api.postArticleAction(articleId, "unschedule-publish")).then(() => {
+                          setScheduleDate("");
+                          setScheduleTimeDraft("");
+                        })
+                      }
                     >
                       <Calendar className="w-4 h-4 mr-2" />
                       Очистить расписание
@@ -616,7 +1079,7 @@ export default function ArticleEditor() {
                     className="flex-1 min-w-[220px]"
                   >
                     <Send className="w-4 h-4 mr-2" />
-                    Опубликовать сейчас
+                    {resolvePublishAt(scheduleDate, scheduleTimeDraft) ? "Запланировать публикацию" : "Опубликовать сейчас"}
                   </Button>
                   <Button variant="outline" onClick={() => run("Archive", () => api.postArticleAction(articleId, "status", { status: "rejected" }))}>
                     <Archive className="w-4 h-4 mr-2" />
@@ -697,6 +1160,9 @@ export default function ArticleEditor() {
                               selected={selectedScheduleDate}
                               onSelect={(date) => {
                                 setScheduleDate((current) => updateScheduleValue(current, date));
+                                if (!scheduleTimeDraft) {
+                                  setScheduleTimeDraft("10:00");
+                                }
                                 setSchedulePopoverOpen(false);
                               }}
                             />
@@ -704,8 +1170,14 @@ export default function ArticleEditor() {
                         </Popover>
                         <Input
                           type="time"
-                          value={scheduleDate ? scheduleDate.slice(11, 16) : ""}
-                          onChange={(e) => setScheduleDate((current) => updateScheduleValue(current, undefined, e.target.value || "10:00"))}
+                          value={scheduleTimeDraft}
+                          onChange={(e) => {
+                            const nextTime = normalizeTimeOnly(e.target.value || "");
+                            setScheduleTimeDraft(nextTime);
+                            if (nextTime) {
+                              setScheduleDate((current) => updateScheduleValue(current, undefined, nextTime));
+                            }
+                          }}
                           className="w-32"
                         />
                       </div>
@@ -713,14 +1185,26 @@ export default function ArticleEditor() {
                     <div className="flex flex-wrap gap-2">
                       <Button
                         onClick={() =>
-                          run("Schedule", () => api.postArticleAction(articleId, "schedule-publish", { publish_at: scheduleDate }))
+                          run("Schedule", () =>
+                            api.postArticleAction(articleId, "schedule-publish", {
+                              publish_at: resolvePublishAt(scheduleDate, scheduleTimeDraft),
+                            }),
+                          )
                         }
-                        disabled={!scheduleDate}
+                        disabled={!resolvePublishAt(scheduleDate, scheduleTimeDraft)}
                       >
                         <Calendar className="w-4 h-4 mr-2" />
                         Schedule
                       </Button>
-                      <Button variant="outline" onClick={() => run("Clear Schedule", () => api.postArticleAction(articleId, "unschedule-publish"))}>
+                      <Button
+                        variant="outline"
+                        onClick={() =>
+                          run("Clear Schedule", () => api.postArticleAction(articleId, "unschedule-publish")).then(() => {
+                            setScheduleDate("");
+                            setScheduleTimeDraft("");
+                          })
+                        }
+                      >
                         Clear
                       </Button>
                     </div>
@@ -736,7 +1220,7 @@ export default function ArticleEditor() {
                         disabled={hasInsufficientContent}
                       >
                         <Send className="w-4 h-4 mr-2" />
-                        Publish
+                        {resolvePublishAt(scheduleDate, scheduleTimeDraft) ? "Schedule" : "Publish"}
                       </Button>
                     </div>
                     <div className="flex flex-wrap gap-2">
@@ -802,73 +1286,23 @@ export default function ArticleEditor() {
           <LogPanel logs={logs} title="Лог операций" />
         </div>
       </div>
-      <Dialog open={reasonDialogOpen} onOpenChange={setReasonDialogOpen}>
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle>{reasonDialogAction === "publish" ? "Причина публикации" : "Причина удаления"}</DialogTitle>
-            <DialogDescription>Добавь комментарий к статье #{articleId}.</DialogDescription>
-          </DialogHeader>
-          <div className="space-y-2">
-            <Label htmlFor="article-editor-reason">
-              {reasonDialogAction === "publish" ? "Почему публикуем?" : "Почему удаляем?"}
-            </Label>
-            {reasonDialogAction === "delete" ? (
-              <div className="space-y-2 rounded-md border border-border p-3">
-                <div className="text-xs font-medium text-muted-foreground">Теги причины удаления</div>
-                <div className="flex flex-wrap gap-2">
-                  {deleteReasonTagOptions.map((item) => {
-                    const active = reasonDialogTags.includes(item.value);
-                    return (
-                      <button
-                        key={item.value}
-                        type="button"
-                        onClick={() => toggleReasonTag(item.value)}
-                        className={`rounded-full border px-2.5 py-1 text-xs transition-colors ${
-                          active
-                            ? "border-red-500/40 bg-red-500/15 text-red-200"
-                            : "border-border bg-muted/20 text-muted-foreground hover:bg-muted/40"
-                        }`}
-                      >
-                        {item.label}
-                      </button>
-                    );
-                  })}
-                </div>
-                <div className="flex gap-2">
-                  <Input
-                    value={reasonDialogCustomTag}
-                    onChange={(e) => setReasonDialogCustomTag(e.target.value)}
-                    placeholder="Новый тег (например: local_policy_noise)"
-                    className="h-8"
-                  />
-                  <Button type="button" variant="outline" size="sm" onClick={addCustomReasonTag}>
-                    Добавить тег
-                  </Button>
-                </div>
-              </div>
-            ) : null}
-            <Textarea
-              id="article-editor-reason"
-              value={reasonDialogText}
-              onChange={(e) => setReasonDialogText(e.target.value)}
-              rows={6}
-              placeholder="Комментарий для истории действий и обучения"
-            />
-          </div>
-          <div className="flex justify-end gap-2">
-            <Button variant="outline" onClick={() => setReasonDialogOpen(false)}>
-              Отмена
-            </Button>
-            <Button
-              onClick={submitReasonDialog}
-              disabled={reasonDialogText.trim().length < 5 || loading !== null}
-              className={reasonDialogAction === "delete" ? "bg-destructive text-destructive-foreground hover:bg-destructive/90" : ""}
-            >
-              {reasonDialogAction === "publish" ? "Опубликовать" : "Удалить"}
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
+      <ReasonActionDialog
+        open={reasonDialogOpen}
+        onOpenChange={setReasonDialogOpen}
+        action={reasonDialogAction}
+        articleId={articleId}
+        text={reasonDialogText}
+        onTextChange={setReasonDialogText}
+        tags={reasonDialogTags}
+        options={reasonTagOptions}
+        onToggleTag={toggleReasonTag}
+        customTag={reasonDialogCustomTag}
+        onCustomTagChange={setReasonDialogCustomTag}
+        onAddCustomTag={addCustomReasonTag}
+        onSubmit={submitReasonDialog}
+        loading={loading !== null}
+        loadingDelete={loading === "delete"}
+      />
     </div>
   );
 }
