@@ -5898,9 +5898,15 @@ def _serialize_article(article: Article, score: Score | None, source: Source | N
             final_score = None
     except Exception:
         final_score = None
+    raw_status = getattr(article, "status", None)
+    if hasattr(raw_status, "value"):
+        status_value = str(getattr(raw_status, "value") or "").strip().lower()
+    else:
+        status_value = str(raw_status or "").strip().lower()
+
     return {
         "id": article.id,
-        "status": article.status,
+        "status": status_value,
         "content_mode": article.content_mode,
         "double_of_article_id": article.double_of_article_id,
         "title": article.title,
