@@ -25,6 +25,8 @@ RUN python -m playwright install --with-deps chromium
 
 COPY app ./app
 COPY scripts ./scripts
+COPY alembic ./alembic
+COPY alembic.ini ./alembic.ini
 COPY --from=web-build /web/dist ./admin-web/dist
 RUN chown -R app:app /app
 
