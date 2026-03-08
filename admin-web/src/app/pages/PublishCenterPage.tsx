@@ -64,6 +64,27 @@ function statusKey(item: ArticleListItem): string {
   return String(item.status || "").toLowerCase().replace("articlestatus.", "");
 }
 
+function normalizePreviewText(input?: string | null): string {
+  const raw = String(input || "").trim();
+  if (!raw) return "";
+  let text = raw
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>\s*<p>/gi, "\n\n")
+    .replace(/<\/li>\s*<li>/gi, "\n")
+    .replace(/<li>/gi, "• ")
+    .replace(/<\/?[^>]+>/g, "");
+  if (typeof document !== "undefined" && text.includes("&")) {
+    const el = document.createElement("textarea");
+    el.innerHTML = text;
+    text = el.value;
+  }
+  return text
+    .replace(/\u00a0/g, " ")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 function isLikelyNegativeReasonTag(tag: string): boolean {
   const t = String(tag || "").trim().toLowerCase();
   if (!t) return false;
@@ -100,6 +121,24 @@ export default function PublishCenterPage() {
   const [catalogReasonTagOptions, setCatalogReasonTagOptions] = useState<ReasonTagOption[]>([]);
   const [previewArticle, setPreviewArticle] = useState<(ArticleListItem & Partial<ArticleDetails>) | null>(null);
   const [previewLoadingId, setPreviewLoadingId] = useState<number | null>(null);
+
+  const previewPostText = useMemo(
+    () =>
+      normalizePreviewText(
+        previewArticle?.post_preview || previewArticle?.ru_summary || previewArticle?.subtitle || "RU текст не готов.",
+      ),
+    [previewArticle?.post_preview, previewArticle?.ru_summary, previewArticle?.subtitle],
+  );
+  const previewEnglishText = useMemo(
+    () => normalizePreviewText(previewArticle?.english_preview || ""),
+    [previewArticle?.english_preview],
+  );
+  const showEnglishBlock = useMemo(() => {
+    if (!previewEnglishText) return false;
+    const left = previewEnglishText.replace(/\s+/g, " ").trim().toLowerCase();
+    const right = previewPostText.replace(/\s+/g, " ").trim().toLowerCase();
+    return left !== right;
+  }, [previewEnglishText, previewPostText]);
 
   const deleteReasonTagOptions: Array<{ value: string; label: string }> = [
     { value: "insufficient_content", label: "Недостаточно контента" },
@@ -488,66 +527,81 @@ export default function PublishCenterPage() {
 
         <Dialog open={Boolean(previewArticle)} onOpenChange={(open) => !open && setPreviewArticle(null)}>
           <DialogContent className="max-w-4xl h-[92vh] overflow-hidden p-0 [&>button]:right-4 [&>button]:top-4 [&>button]:h-9 [&>button]:w-9 [&>button]:p-0 [&>button]:inline-flex [&>button]:items-center [&>button]:justify-center [&>button]:rounded-md [&>button]:border [&>button]:border-border [&>button_svg]:h-4 [&>button_svg]:w-4">
-            <DialogHeader>
-              <DialogTitle>{previewArticle?.ru_title || previewArticle?.title || "Превью статьи"}</DialogTitle>
-              <DialogDescription>
-                {previewArticle?.source_name ? `${previewArticle.source_name} · ` : ""}
-                {formatDateTime(previewArticle?.published_at || previewArticle?.created_at)}
-              </DialogDescription>
-            </DialogHeader>
-            <div className="space-y-3 overflow-y-auto px-6 pb-2">
-              <div className="rounded-lg border border-border bg-muted/20 p-4 text-sm whitespace-pre-wrap">
-                {previewArticle?.post_preview || previewArticle?.ru_summary || previewArticle?.subtitle || "RU текст не готов."}
-              </div>
-              {previewArticle?.english_preview ? (
-                <div className="rounded-lg border border-border bg-muted/20 p-4 text-sm whitespace-pre-wrap text-muted-foreground">
-                  {previewArticle.english_preview}
+            <div className="flex h-full max-h-[92vh] flex-col overflow-hidden">
+              <DialogHeader className="shrink-0 border-b border-border px-6 pt-6 pb-4">
+                <DialogTitle className="pr-16 leading-tight">{previewArticle?.ru_title || previewArticle?.title || "Превью статьи"}</DialogTitle>
+                <DialogDescription className="mt-1 flex flex-wrap items-center gap-2">
+                  {previewArticle ? <StatusBadge status={previewArticle.status} /> : null}
+                  <span>{previewArticle?.source_name || "Источник не указан"}</span>
+                  <span>•</span>
+                  <span>{formatDateTime(previewArticle?.published_at || previewArticle?.created_at)}</span>
+                </DialogDescription>
+              </DialogHeader>
+
+              <div className="flex-1 overflow-y-auto px-6 py-4">
+                <div className="space-y-3">
+                  <div className="rounded-lg border border-border bg-muted/20 p-4 text-sm">
+                    <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">Пост для Telegram</div>
+                    <div className="whitespace-pre-wrap leading-7 break-words">{previewPostText || "RU текст не готов."}</div>
+                  </div>
+                  {showEnglishBlock ? (
+                    <div className="rounded-lg border border-border bg-muted/20 p-4 text-sm text-muted-foreground">
+                      <div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">English Preview</div>
+                      <div className="whitespace-pre-wrap leading-7 break-words">{previewEnglishText}</div>
+                    </div>
+                  ) : null}
                 </div>
-              ) : null}
-              {previewArticle?.generated_image_path ? (
-                <Badge variant="outline" className="text-xs gap-1">
-                  <CheckCircle2 className="w-3 h-3 text-green-400" />
-                  Изображение готово
-                </Badge>
-              ) : null}
-            </div>
-            <div className="flex flex-wrap justify-end gap-2 px-6 pb-6">
-              <Button
-                variant="outline"
-                onClick={() => {
-                  if (!previewArticle) return;
-                  navigate(`/article/${previewArticle.id}`, {
-                    state: { from: `${location.pathname}${location.search || ""}` },
-                  });
-                }}
-              >
-                Открыть в редакторе
-              </Button>
-              {previewArticle && activeList.showDelete ? (
-                <Button
-                  variant="destructive"
-                  onClick={() => {
-                    const id = previewArticle.id;
-                    setPreviewArticle(null);
-                    openReasonDialog("delete", id);
-                  }}
-                >
-                  <Trash2 className="w-4 h-4 mr-1" />
-                  Удалить
-                </Button>
-              ) : null}
-              {previewArticle && activeList.showPublishNow ? (
-                <Button
-                  onClick={() => {
-                    const id = previewArticle.id;
-                    setPreviewArticle(null);
-                    openReasonDialog("publish", id);
-                  }}
-                >
-                  <Send className="w-4 h-4 mr-1" />
-                  Опубликовать
-                </Button>
-              ) : null}
+
+                {previewArticle?.generated_image_path ? (
+                  <div className="mt-3">
+                    <Badge variant="outline" className="text-xs gap-1">
+                      <CheckCircle2 className="w-3 h-3 text-green-400" />
+                      Изображение готово
+                    </Badge>
+                  </div>
+                ) : null}
+              </div>
+
+              <div className="shrink-0 border-t border-border px-6 py-4">
+                <div className="flex flex-wrap justify-end gap-2">
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      if (!previewArticle) return;
+                      navigate(`/article/${previewArticle.id}`, {
+                        state: { from: `${location.pathname}${location.search || ""}` },
+                      });
+                    }}
+                  >
+                    Открыть в редакторе
+                  </Button>
+                  {previewArticle && activeList.showDelete ? (
+                    <Button
+                      variant="destructive"
+                      onClick={() => {
+                        const id = previewArticle.id;
+                        setPreviewArticle(null);
+                        openReasonDialog("delete", id);
+                      }}
+                    >
+                      <Trash2 className="w-4 h-4 mr-1" />
+                      Удалить
+                    </Button>
+                  ) : null}
+                  {previewArticle && activeList.showPublishNow ? (
+                    <Button
+                      onClick={() => {
+                        const id = previewArticle.id;
+                        setPreviewArticle(null);
+                        openReasonDialog("publish", id);
+                      }}
+                    >
+                      <Send className="w-4 h-4 mr-1" />
+                      Опубликовать
+                    </Button>
+                  ) : null}
+                </div>
+              </div>
             </div>
           </DialogContent>
         </Dialog>
