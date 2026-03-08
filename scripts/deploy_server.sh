@@ -17,7 +17,7 @@ scp docker-compose.yml "${REMOTE_HOST}:${REMOTE_DIR}/docker-compose.yml"
 
 ssh "${REMOTE_HOST}" "cd '${REMOTE_DIR}' && \
   APP_BUILD_SHA='${APP_BUILD_SHA}' docker compose up -d --build api admin && \
-  docker compose exec -T api alembic upgrade head && \
+  docker compose exec -T -e PYTHONPATH=/app api sh -lc 'cd /app && alembic -c alembic.ini upgrade head' && \
   docker compose exec -T api python - <<'PY'
 import os
 import app.main as m
