@@ -71,7 +71,7 @@ function ChartContainer({
 
 const ChartStyle = ({ id, config }: { id: string; config: ChartConfig }) => {
   const colorConfig = Object.entries(config).filter(
-    ([, config]) => config.theme || config.color,
+    ([, entry]) => Boolean(entry && (entry.theme || entry.color)),
   );
 
   if (!colorConfig.length) {
@@ -338,9 +338,11 @@ function getPayloadConfigFromPayload(
     ] as string;
   }
 
-  return configLabelKey in config
-    ? config[configLabelKey]
-    : config[key as keyof typeof config];
+  const byLabel = config[configLabelKey];
+  if (byLabel && typeof byLabel === "object") return byLabel;
+  const byKey = config[key as keyof typeof config];
+  if (byKey && typeof byKey === "object") return byKey;
+  return undefined;
 }
 
 export {
