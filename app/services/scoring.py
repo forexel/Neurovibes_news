@@ -50,6 +50,11 @@ CONTENT_TYPE_BONUS = {
     "other": 0.00,
 }
 
+_HN_METADATA_ONLY_RE = re.compile(
+    r"^\s*author:\s*.+?\|\s*points:\s*\d+\s*\|\s*tags:\s*.+$",
+    re.IGNORECASE | re.DOTALL,
+)
+
 
 def _get_feature_weights(session) -> dict[str, float]:
     rows = session.scalars(
@@ -627,11 +632,25 @@ def _is_insufficient_content(article: Article) -> bool:
     text = str(article.text or "").strip()
     subtitle = str(article.subtitle or "").strip()
     ru_summary = str(article.ru_summary or "").strip()
+    source_name = ""
+    try:
+        source_name = str(article.source.name or "").strip().lower()
+    except Exception:
+        source_name = ""
 
     if not text and not subtitle:
         return True
 
     low = text.lower()
+    # Hacker News Algolia often brings cards where both subtitle and text are only
+    # "author | points | tags" metadata with no article body. These should never
+    # reach manual review or Telegram.
+    if "hacker news" in source_name:
+        text_meta_only = bool(_HN_METADATA_ONLY_RE.match(text))
+        subtitle_meta_only = bool(_HN_METADATA_ONLY_RE.match(subtitle))
+        if (text_meta_only or not text) and (subtitle_meta_only or not subtitle) and len(ru_summary) < 80:
+            return True
+
     if low.startswith("article url:") and ("comments url:" in low) and len(text) < 500:
         return True
 
