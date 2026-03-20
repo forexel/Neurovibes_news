@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from typing import IO, Any
 
@@ -45,6 +46,10 @@ def _parse_response_json(raw: str) -> dict[str, Any]:
     return {"ok": False, "error": str(data)[:1000]}
 
 
+def _telegram_proxy_url() -> str | None:
+    return (os.getenv("TELEGRAM_PROXY") or "").strip() or None
+
+
 def _httpx_post(
     url: str,
     *,
@@ -61,7 +66,7 @@ def _httpx_post(
 def _curl_post(
     url: str,
     *,
-    family: str,
+    family: str | None,
     json_payload: dict | None = None,
     data: dict | None = None,
     files: dict | None = None,
@@ -72,7 +77,13 @@ def _curl_post(
         "curl",
         "-sS",
         "--http1.1",
-        f"-{family}",
+    ]
+    if family:
+        args.append(f"-{family}")
+    proxy_url = _telegram_proxy_url()
+    if proxy_url:
+        args.extend(["--proxy", proxy_url])
+    args.extend([
         "--connect-timeout",
         str(max(5, int(timeout // 2) or 5)),
         "--max-time",
@@ -80,7 +91,7 @@ def _curl_post(
         "-X",
         "POST",
         url,
-    ]
+    ])
 
     stdin_data: str | None = None
     if json_payload is not None:
@@ -118,6 +129,24 @@ def telegram_api_post(
     timeout: float = 30.0,
     token: str | None = None,
 ) -> dict[str, Any]:
+    proxy_url = _telegram_proxy_url()
+    if proxy_url:
+        try:
+            payload = _curl_post(
+                url,
+                family=None,
+                json_payload=json_payload,
+                data=data,
+                files=files,
+                timeout=timeout,
+                token=token,
+            )
+        except Exception as exc:
+            payload = {"ok": False, "error": mask_telegram_error(str(exc), token=token)}
+        error_text = mask_telegram_error(str(payload.get("error") or payload), token=token)
+        if payload.get("ok") or not _should_fallback(error_text):
+            return payload if payload.get("ok") else {"ok": False, "error": error_text[:1200]}
+
     try:
         payload = _httpx_post(url, json_payload=json_payload, data=data, files=files, timeout=timeout)
     except Exception as exc:
