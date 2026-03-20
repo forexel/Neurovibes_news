@@ -765,6 +765,9 @@ def _pick_best_unsorted_article_id() -> int | None:
                 Article.status != ArticleStatus.PUBLISHED,
                 Article.status != ArticleStatus.SELECTED_HOURLY,
                 Article.status != ArticleStatus.REJECTED,
+                Article.archived_reason.is_distinct_from("insufficient_content"),
+                Article.content_mode != "summary_only",
+                Score.article_id.is_not(None),
                 Article.created_at >= cutoff,
             )
             .order_by(Score.final_score.desc().nullslast(), Article.created_at.desc())
@@ -790,6 +793,9 @@ def _pick_best_recent_ml_article_id() -> int | None:
                 Article.status != ArticleStatus.ARCHIVED,
                 Article.status != ArticleStatus.REJECTED,
                 Article.status != ArticleStatus.DOUBLE,
+                Article.archived_reason.is_distinct_from("insufficient_content"),
+                Article.content_mode != "summary_only",
+                Score.article_id.is_not(None),
                 Article.ml_recommendation_confidence.is_not(None),
             )
             .order_by(

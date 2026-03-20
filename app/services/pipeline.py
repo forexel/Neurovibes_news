@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -232,11 +233,25 @@ def _is_incomplete_candidate(article: Article) -> bool:
         return True
     text = str(article.text or "").strip()
     subtitle = str(article.subtitle or "").strip()
+    source_name = ""
+    try:
+        source_name = str(article.source.name or "").strip().lower()
+    except Exception:
+        source_name = ""
     if not text and not subtitle:
         return True
     low = text.lower()
     if low.startswith("article url:") and ("comments url:" in low) and len(text) < 500:
         return True
+    if "hacker news" in source_name:
+        meta_only_re = re.compile(
+            r"^\s*author:\s*.+?\|\s*points:\s*\d+\s*\|\s*tags:\s*.+$",
+            re.IGNORECASE | re.DOTALL,
+        )
+        text_meta_only = bool(meta_only_re.match(text))
+        subtitle_meta_only = bool(meta_only_re.match(subtitle))
+        if (text_meta_only or not text) and (subtitle_meta_only or not subtitle):
+            return True
     if len(text) < 220 and len(subtitle) < 60:
         return True
     return False
