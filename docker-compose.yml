@@ -10,15 +10,17 @@ services:
       DB_AUTO_PATCH_SCHEMA: "0"
       DB_AUTO_CREATE: "0"
       ALLOW_ONLINE_LLM_GENERATION: "0"
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2", "--timeout-keep-alive", "20"]
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--timeout-keep-alive", "20"]
     ports:
       - "18100:8000"
     volumes:
       - model_artifacts:/app/app/static/models
     networks:
       - apps-net
-    mem_limit: 768m
-    mem_reservation: 512m
+    mem_limit: 384m
+    mem_reservation: 256m
+    cpus: "0.60"
+    pids_limit: 200
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health/ready || exit 1"]
@@ -45,8 +47,10 @@ services:
       - model_artifacts:/app/app/static/models
     networks:
       - apps-net
-    mem_limit: 768m
-    mem_reservation: 512m
+    mem_limit: 384m
+    mem_reservation: 256m
+    cpus: "0.60"
+    pids_limit: 200
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health/ready || exit 1"]
@@ -70,8 +74,10 @@ services:
       - model_artifacts:/app/app/static/models
     networks:
       - apps-net
-    mem_limit: 1280m
-    mem_reservation: 896m
+    mem_limit: 768m
+    mem_reservation: 256m
+    cpus: "1.20"
+    pids_limit: 260
     restart: unless-stopped
 
   neuro-db:
@@ -84,8 +90,10 @@ services:
       - neurovibes_pg:/var/lib/postgresql/data
     networks:
       - apps-net
-    mem_limit: 512m
-    mem_reservation: 384m
+    mem_limit: 384m
+    mem_reservation: 256m
+    cpus: "0.80"
+    pids_limit: 180
     restart: unless-stopped
 
   # local-only helpers (do not start unless profile is enabled)

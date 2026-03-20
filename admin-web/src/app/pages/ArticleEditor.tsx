@@ -92,14 +92,22 @@ function normalizeTimeOnly(raw: string): string {
 
 function resolvePublishAt(scheduleDate: string, scheduleTimeDraft: string): string {
   const normalizedDateTime = normalizeSchedulePublishAt(scheduleDate);
-  if (normalizedDateTime) return normalizedDateTime;
   const normalizedTime = normalizeTimeOnly(scheduleTimeDraft);
-  if (!normalizedTime) return "";
-  const now = new Date();
-  const yyyy = now.getFullYear();
-  const mm = String(now.getMonth() + 1).padStart(2, "0");
-  const dd = String(now.getDate()).padStart(2, "0");
-  return `${yyyy}-${mm}-${dd}T${normalizedTime}`;
+  if (!normalizedDateTime) return normalizedTime || "";
+  if (!normalizedTime) return normalizedDateTime;
+
+  // If we only have "time intent" and it resolves to a past time for today,
+  // pass HH:mm so backend schedules the nearest future slot (today/tomorrow).
+  const parsed = new Date(`${normalizedDateTime}:00`);
+  if (!Number.isNaN(parsed.getTime())) {
+    const now = new Date();
+    const isToday =
+      parsed.getFullYear() === now.getFullYear() &&
+      parsed.getMonth() === now.getMonth() &&
+      parsed.getDate() === now.getDate();
+    if (isToday && parsed <= now) return normalizedTime;
+  }
+  return normalizedDateTime;
 }
 
 type MlReasonParsed = {
@@ -452,6 +460,12 @@ export default function ArticleEditor() {
   }, [article?.ml_recommendation, catalogReasonTagOptions]);
 
   function openReasonDialog(action: "publish" | "delete") {
+    if (action === "publish" && !scheduleDate) {
+      const nextTime = normalizeTimeOnly(scheduleTimeDraft);
+      if (nextTime) {
+        setScheduleDate(updateScheduleValue("", new Date(), nextTime));
+      }
+    }
     setReasonDialogAction(action);
     if (action === "publish") {
       const parsed = parseReasonPayload(feedback || "");
@@ -531,11 +545,15 @@ export default function ArticleEditor() {
         await api.postArticleAction(articleId, "feedback", { explanation_text: payload });
         setFeedback(payload);
         if (shouldSchedule) {
-          await api.postArticleAction(articleId, "schedule-publish", { publish_at: publishAt });
-          addLog("success", `Schedule: ${publishAt}`);
+          const out = await api.postArticleAction(articleId, "schedule-publish", { publish_at: publishAt });
+          const scheduledAtRaw =
+            typeof out?.scheduled_publish_at === "string" && out.scheduled_publish_at.trim()
+              ? out.scheduled_publish_at
+              : publishAt;
+          addLog("success", `Запланировано на: ${formatDateTime(scheduledAtRaw)}`);
         } else {
           await api.postArticleAction(articleId, "publish");
-          addLog("success", "Publish: ok");
+          addLog("success", "Опубликовано сейчас");
         }
         setReasonDialogOpen(false);
         await loadArticle();

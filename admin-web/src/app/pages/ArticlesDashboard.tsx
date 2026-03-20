@@ -1033,7 +1033,7 @@ export default function ArticlesDashboard() {
 
       {previewArticle ? (
         <Dialog open={Boolean(previewArticle)} onOpenChange={(open) => !open && setPreviewArticle(null)}>
-          <DialogContent className="max-w-4xl h-[92vh] overflow-hidden p-0 [&>button]:right-4 [&>button]:top-4 [&>button]:h-9 [&>button]:w-9 [&>button]:p-0 [&>button]:inline-flex [&>button]:items-center [&>button]:justify-center [&>button]:rounded-md [&>button]:border [&>button]:border-border [&>button_svg]:h-4 [&>button_svg]:w-4">
+          <DialogContent className="max-w-4xl h-[92vh] overflow-hidden p-0 [&>button]:right-4 [&>button]:top-4 [&>button]:h-9 [&>button]:w-9 [&>button]:p-0 [&>button]:inline-flex [&>button]:items-center [&>button]:justify-center [&>button]:rounded-none [&>button]:border-0 [&>button]:bg-transparent [&>button]:shadow-none [&>button_svg]:h-4 [&>button_svg]:w-4">
           <div className="h-full overflow-y-auto px-6 py-6">
           <DialogHeader>
             <DialogTitle className="pr-20 leading-tight">{previewArticle?.ru_title || previewArticle?.title}</DialogTitle>

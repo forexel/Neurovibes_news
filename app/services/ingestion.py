@@ -45,6 +45,18 @@ HTML_HEADERS = {
 }
 
 
+def _sanitize_html_snapshot(html: str | None, limit: int = 1_000_000) -> str:
+    """
+    PostgreSQL text columns reject NUL bytes.
+    Some scraped pages include embedded binary/null chars in inline scripts or blobs.
+    Strip them centrally so background enrichment can't fail the whole cycle.
+    """
+    if not html:
+        return ""
+    cleaned = str(html).replace("\x00", "")
+    return cleaned[:limit]
+
+
 def _run_with_timeout(seconds: float, fn, *args, **kwargs):
     """
     Run callable with a hard wall timeout.
@@ -879,7 +891,7 @@ def fetch_source_articles(
                         source_id=source.id,
                         url=link,
                         final_url=final_url,
-                        html_text=html,
+                        html_text=_sanitize_html_snapshot(html),
                         status_code=status_code,
                         latency_ms=latency_ms,
                         parse_quality=quality,
@@ -1061,7 +1073,7 @@ def fetch_source_articles_api(
                         source_id=source.id,
                         url=link,
                         final_url=final_url,
-                        html_text=html,
+                        html_text=_sanitize_html_snapshot(html),
                         status_code=status_code,
                         latency_ms=latency_ms,
                         parse_quality=quality,
@@ -1181,6 +1193,46 @@ def _extract_section_links(section_url: str, html: str) -> list[str]:
                 tail = stripped.split("/index/", 1)[-1]
                 if not tail or "/" in tail:
                     # Skip nested hubs like /index/<topic>/<slug>.
+                    continue
+            elif "blog.google" in host:
+                # Keep only deep article pages and skip section/category hubs.
+                parts = [p for p in u.path.rstrip("/").split("/") if p]
+                blocked_google_hubs = {
+                    "innovation-and-ai",
+                    "products-and-platforms",
+                    "products",
+                    "platforms",
+                    "devices",
+                    "technology",
+                    "models-and-research",
+                    "infrastructure-and-cloud",
+                    "developers-tools",
+                    "gemini-app",
+                    "google-cloud",
+                    "global-network",
+                }
+                if len(parts) < 4:
+                    continue
+                if parts[-1] in blocked_google_hubs or parts[-2] in blocked_google_hubs:
+                    continue
+            elif "runwayml.com" in host:
+                # Keep only news posts under /news/<slug>; skip product/changelog/research hubs.
+                parts = [p for p in u.path.rstrip("/").split("/") if p]
+                if len(parts) != 2 or parts[0] != "news":
+                    continue
+            elif "notion.com" in host:
+                # Keep release pages; skip help center, pricing, and misc marketing pages.
+                path = u.path.rstrip("/")
+                if not path.startswith("/releases"):
+                    continue
+                if any(x in low for x in ["/help/", "/pricing", "/templates", "/product"]):
+                    continue
+            elif "lumalabs.ai" in host:
+                # Keep only actual news pages, not learning hub or legal/terms content.
+                path = u.path.rstrip("/")
+                if not path.startswith("/news"):
+                    continue
+                if any(x in low for x in ["/learning-hub/", "/terms", "/privacy", "/legal"]):
                     continue
             elif "therundown.ai" in host or "superhuman.ai" in host or "mindstream.news" in host:
                 # Beehiiv-style posts usually live under /p/<slug>.
@@ -1328,7 +1380,7 @@ def fetch_source_articles_html(
                     source_id=source.id,
                     url=canonical_url,
                     final_url=page_final,
-                    html_text=(page_html or "")[:1_000_000],
+                    html_text=_sanitize_html_snapshot(page_html),
                     status_code=page_status,
                     latency_ms=page_latency,
                     parse_quality=quality,
@@ -1622,7 +1674,7 @@ def enrich_summary_only_articles(limit: int = 200, days_back: int = 30, progress
                         source_id=article.source_id,
                         url=article.canonical_url,
                         final_url=final_url,
-                        html_text=(html or "")[:1_000_000],
+                        html_text=_sanitize_html_snapshot(html),
                         status_code=status_code,
                         latency_ms=latency_ms,
                         parse_quality=quality,
@@ -1718,7 +1770,7 @@ def enrich_openai_summary_only_articles(limit: int = 25, days_back: int = 7, pro
                         source_id=article.source_id,
                         url=article.canonical_url,
                         final_url=final_url,
-                        html_text=(html or "")[:1_000_000],
+                        html_text=_sanitize_html_snapshot(html),
                         status_code=status_code or None,
                         latency_ms=latency_ms,
                         parse_quality=quality,
@@ -1775,7 +1827,7 @@ def enrich_article_from_source(article_id: int) -> dict:
                 source_id=source_id,
                 url=url,
                 final_url=final_url,
-                html_text=(snap_html or "")[:1_000_000],
+                html_text=_sanitize_html_snapshot(snap_html),
                 status_code=status_code,
                 latency_ms=float(latency_ms or 0.0),
                 parse_quality=quality,

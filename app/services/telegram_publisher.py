@@ -5,13 +5,13 @@ import time
 from datetime import datetime
 from html import escape
 
-import httpx
 from sqlalchemy import select
 
 from app.core.config import settings
 from app.db import session_scope
 from app.models import Article, ArticleStatus, PublishJob, PublishStatus, TelegramReviewJob
 from app.services.content_generation import generate_ru_summary
+from app.services.telegram_http import mask_telegram_error, telegram_api_post
 from app.services.telegram_context import telegram_bot_token, telegram_channel_id, telegram_signature
 
 _MIN_FULL_TEXT_LEN = 500
@@ -25,11 +25,7 @@ _LAST_GLOBAL_SEND_TS: float = 0.0
 
 
 def _mask_sensitive(text: str, token: str | None = None) -> str:
-    out = str(text or "")
-    if token:
-        out = out.replace(token, "***")
-    out = out.replace("api.telegram.org/bot", "api.telegram.org/bot***")
-    return out[:1200]
+    return mask_telegram_error(text, token=token, limit=1200)
 
 
 def _tg_wait_send_slot(chat_id: str) -> None:
@@ -58,8 +54,7 @@ def _tg_request(
     for attempt in range(1, _TG_MAX_RETRIES + 1):
         _tg_wait_send_slot(chat_id)
         try:
-            resp = httpx.post(url, data=data, files=files, timeout=timeout)
-            payload = resp.json()
+            payload = telegram_api_post(url, data=data, files=files, timeout=timeout, token=token)
             if payload.get("ok"):
                 return payload
 
@@ -142,7 +137,7 @@ def publish_article(article_id: int, *, manual: bool = True) -> dict:
             .order_by(PublishJob.id.desc())
             .limit(1)
         ).first()
-        if last_success and (last_success.telegram_message_id or "").strip():
+        if (not manual) and last_success and (last_success.telegram_message_id or "").strip():
             return {"ok": True, "message_id": str(last_success.telegram_message_id), "idempotent": True}
         has_ru = bool((article.ru_title or "").strip()) and bool((article.ru_summary or "").strip())
     if not has_ru:
@@ -171,7 +166,7 @@ def publish_article(article_id: int, *, manual: bool = True) -> dict:
             .order_by(PublishJob.id.desc())
             .limit(1)
         ).first()
-        if last_success and (last_success.telegram_message_id or "").strip():
+        if (not manual) and last_success and (last_success.telegram_message_id or "").strip():
             article.status = ArticleStatus.PUBLISHED
             article.scheduled_publish_at = None
             return {"ok": True, "message_id": str(last_success.telegram_message_id), "idempotent": True}

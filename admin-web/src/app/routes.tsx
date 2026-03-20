@@ -31,6 +31,7 @@ export const router = createBrowserRouter(
         { path: "sources", lazy: lazyPage(() => import("./pages/SourcesPage")) },
         { path: "score", lazy: lazyPage(() => import("./pages/ScoreSettingsPage")) },
         { path: "score-settings", lazy: lazyPage(() => import("./pages/ScoreSettingsPage")) },
+        { path: "evaluation", lazy: lazyPage(() => import("./pages/EvaluationPage")) },
         { path: "bot", lazy: lazyPage(() => import("./pages/BotControlPage")) },
         { path: "bot-control", lazy: lazyPage(() => import("./pages/BotControlPage")) },
         { path: "publish", lazy: lazyPage(() => import("./pages/PublishCenterPage")) },

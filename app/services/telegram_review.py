@@ -7,7 +7,6 @@ from datetime import datetime, timedelta
 from html import escape
 from zoneinfo import ZoneInfo
 
-import httpx
 from sqlalchemy import select
 
 from app.core.config import settings
@@ -26,6 +25,7 @@ from app.models import (
     TelegramReviewJob,
 )
 from app.services.content_generation import generate_ru_summary
+from app.services.telegram_http import telegram_api_post
 from app.services.telegram_publisher import publish_article
 from app.services.telegram_context import (
     telegram_bot_token,
@@ -83,8 +83,12 @@ def _tg_request(method: str, payload: dict, *, timeout: float = 30.0) -> dict:
     last_error = "telegram_request_failed"
     for attempt in range(1, _TG_REVIEW_MAX_RETRIES + 1):
         try:
-            resp = httpx.post(url, json=payload, timeout=timeout)
-            data = resp.json()
+            data = telegram_api_post(
+                url,
+                json_payload=payload,
+                timeout=timeout,
+                token=(telegram_bot_token() or settings.telegram_bot_token or "").strip() or None,
+            )
             if data.get("ok"):
                 return {"ok": True, "result": data.get("result") or {}}
             error_code = int(data.get("error_code") or 0)
@@ -374,11 +378,13 @@ def send_review_status_once_per_hour(kind: str, text: str) -> dict:
         prev = _get_kv(session, kv_key, "")
         if prev == slot:
             return {"ok": True, "skipped": "already_sent_this_hour", "slot": slot, "kind": kind}
-        # Prefix with previous completed hour window so operator always sees the exact hour context.
+        # Prefix with previous completed N-hour window so operator sees the same window
+        # that hourly ML selection uses (e.g. 2h when ml_review_every_n_hours=2).
         if (text or "").strip().startswith("Новость "):
             payload_text = text
         else:
-            w = _current_window_local()
+            interval_hours = int(max(1, round(get_runtime_float("ml_review_every_n_hours", default=2.0))))
+            w = _previous_completed_window_local(hours=interval_hours)
             payload_text = f"{_hour_window_label_ru(*w)}\n{text}"
         sent = _send_message(chat_id=chat_id, text=payload_text)
         if sent.get("ok"):
@@ -1226,7 +1232,12 @@ def _disable_webhook_once() -> None:
         if done == "1":
             return
         try:
-            httpx.post(f"{base}/deleteWebhook", json={"drop_pending_updates": False}, timeout=20)
+            telegram_api_post(
+                f"{base}/deleteWebhook",
+                json_payload={"drop_pending_updates": False},
+                timeout=20,
+                token=(telegram_bot_token() or settings.telegram_bot_token or "").strip() or None,
+            )
         except Exception:
             return
         _set_kv(session, "telegram_review_webhook_disabled", "1")
@@ -1885,21 +1896,22 @@ def poll_review_updates(limit: int = 50) -> dict:
             offset = 0
 
     try:
-        resp = httpx.post(
+        data = telegram_api_post(
             f"{base}/getUpdates",
-            json={"offset": offset, "timeout": 0, "limit": limit, "allowed_updates": ["callback_query", "message"]},
+            json_payload={"offset": offset, "timeout": 0, "limit": limit, "allowed_updates": ["callback_query", "message"]},
             timeout=30,
+            token=(telegram_bot_token() or settings.telegram_bot_token or "").strip() or None,
         )
-        # If webhook was set, Telegram can respond with 409 Conflict in plain text.
+        # If webhook was set, Telegram can respond with 409 Conflict.
         # Try disabling webhook and retry once.
-        if resp.status_code == 409:
+        if str(data.get("error") or "").find("409") >= 0:
             _disable_webhook_once()
-            resp = httpx.post(
+            data = telegram_api_post(
                 f"{base}/getUpdates",
-                json={"offset": offset, "timeout": 0, "limit": limit, "allowed_updates": ["callback_query", "message"]},
+                json_payload={"offset": offset, "timeout": 0, "limit": limit, "allowed_updates": ["callback_query", "message"]},
                 timeout=30,
+                token=(telegram_bot_token() or settings.telegram_bot_token or "").strip() or None,
             )
-        data = resp.json()
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 

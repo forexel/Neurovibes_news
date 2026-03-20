@@ -52,6 +52,33 @@ def _editorial_score_multiplier(article: Article, score: Score) -> tuple[float, 
     domain = str(features.get("domain") or "").strip().lower()
     event_type = str(features.get("event_type") or "").strip().lower()
     business_it = float(features.get("business_it") or 0.0)
+    practical_product_signal = any(
+        token in normalized_text
+        for token in (
+            "stitch",
+            "browser",
+            "ios",
+            "android",
+            "app store",
+            "video",
+            "image",
+            "voice",
+            "podcast",
+            "creator",
+            "content",
+            "design",
+            "prototype",
+            "workflow",
+            "assistant",
+            "copilot",
+            "workspace",
+            "docs",
+            "sheets",
+            "slides",
+            "real-time",
+            "realtime",
+        )
+    )
 
     def has_any(key: str) -> bool:
         return any(token in normalized_text for token in get_runtime_csv_list(key))
@@ -75,9 +102,9 @@ def _editorial_score_multiplier(article: Article, score: Score) -> tuple[float, 
     too_technical = has_any("editorial_penalty_too_technical_keywords_csv")
     if features.get("technical_gate") == "failed" or features.get("deep_technical_gate") == "failed":
         too_technical = True
-    if domain == "research" and business_it < 0.82:
+    if domain == "research" and business_it < 0.82 and not practical_product_signal:
         too_technical = True
-    if event_type == "incremental_update" and business_it < 0.80:
+    if event_type == "incremental_update" and business_it < 0.80 and not practical_product_signal:
         too_technical = True
     if too_technical:
         multiplier -= get_runtime_float("editorial_penalty_too_technical_weight", default=0.20)

@@ -346,6 +346,13 @@ def _source_priority(rank: int, max_rank: int) -> float:
     return _clip01(1.0 - ((rank - 1) / max_rank))
 
 
+def _apply_source_penalties(source_name: str, source_priority: float) -> float:
+    name = (source_name or "").strip().lower()
+    if name.startswith("hacker news"):
+        return source_priority * 0.35
+    return source_priority
+
+
 def _tier(rank: int) -> int:
     if rank <= 10:
         return 1
@@ -536,6 +543,8 @@ def _is_bloomberg_low_hype(article: Article, semantic: dict, source_name: str | 
 
 
 def _is_too_geek_for_mass(article: Article, semantic: dict, source_name: str | None) -> bool:
+    if _has_practical_product_override(article, semantic, source_name):
+        return False
     text = f"{article.title or ''} {article.subtitle or ''} {(article.text or '')[:3000]}".lower()
     source_low = (source_name or "").strip().lower()
     domain = str(semantic.get("domain") or "").strip().lower()
@@ -663,8 +672,10 @@ def _geek_penalty_factor(article: Article, semantic: dict, source_name: str | No
     return 1.0
 
 
-def _is_too_technical(semantic: dict, source_name: str | None) -> bool:
+def _is_too_technical(article: Article, semantic: dict, source_name: str | None) -> bool:
     if not get_runtime_bool("technical_filter_enabled", default=True):
+        return False
+    if _has_practical_product_override(article, semantic, source_name):
         return False
     domain = str(semantic.get("domain") or "").strip().lower()
     business_it = float(semantic.get("business_it") or 0.0)
@@ -704,6 +715,8 @@ def _is_too_investing(semantic: dict) -> bool:
 def _is_too_deep_technical(article: Article, semantic: dict, source_name: str | None) -> bool:
     if not get_runtime_bool("deep_technical_filter_enabled", default=True):
         return False
+    if _has_practical_product_override(article, semantic, source_name):
+        return False
     text = f"{article.title or ''} {article.subtitle or ''} {(article.text or '')[:1800]}".lower()
     domain = str(semantic.get("domain") or "").strip().lower()
     business_it = float(semantic.get("business_it") or 0.0)
@@ -725,7 +738,86 @@ def _is_too_deep_technical(article: Article, semantic: dict, source_name: str | 
     )
 
 
-def _has_mass_audience_override(article: Article) -> bool:
+def _has_practical_product_override(article: Article, semantic: dict | None = None, source_name: str | None = None) -> bool:
+    text = f"{article.title or ''} {article.subtitle or ''} {(article.text or '')[:2500]}".lower()
+    source_low = (source_name or "").strip().lower()
+    domain = str((semantic or {}).get("domain") or "").strip().lower()
+    business_it = float((semantic or {}).get("business_it") or 0.0)
+    significance = float((semantic or {}).get("significance") or 0.0)
+
+    product_keywords = {
+        "stitch",
+        "browser",
+        "ios",
+        "android",
+        "app store",
+        "workspace",
+        "docs",
+        "sheets",
+        "slides",
+        "video",
+        "image",
+        "voice",
+        "podcast",
+        "creator",
+        "content",
+        "design",
+        "prototype",
+        "ui",
+        "workflow",
+        "assistant",
+        "copilot",
+        "real-time",
+        "realtime",
+        "public beta",
+        "research preview",
+        "download",
+        "available now",
+        "available in russia",
+    }
+    source_hint = any(
+        marker in source_low
+        for marker in (
+            "openai",
+            "anthropic",
+            "google",
+            "runway",
+            "nvidia",
+            "adobe",
+            "spotify",
+            "moonshot",
+            "krea",
+            "the verge",
+            "techcrunch",
+            "windows central",
+            "business insider",
+        )
+    )
+    product_signal = any(keyword in text for keyword in product_keywords)
+    launch_signal = any(
+        token in text
+        for token in (
+            "launch",
+            "launched",
+            "release",
+            "released",
+            "rollout",
+            "available",
+            "beta",
+            "preview",
+            "now in",
+            "can now",
+            "free in",
+        )
+    )
+    if product_signal and (launch_signal or source_hint):
+        return True
+    return bool(product_signal and (business_it >= 7.5 or significance >= 8.0) and domain != "finance_investing")
+
+
+def _has_mass_audience_override(article: Article, semantic: dict | None = None, source_name: str | None = None) -> bool:
+    if _has_practical_product_override(article, semantic, source_name):
+        return True
     text = f"{article.title or ''} {article.subtitle or ''} {(article.text or '')[:2500]}".lower()
     keywords = [k.strip().lower() for k in get_runtime_csv_list("mass_audience_wow_keywords_csv")]
     return any(k in text for k in keywords)
@@ -734,7 +826,7 @@ def _has_mass_audience_override(article: Article) -> bool:
 def _is_low_mass_audience(semantic: dict, source_name: str | None, article: Article) -> bool:
     if not get_runtime_bool("mass_audience_filter_enabled", default=True):
         return False
-    if _has_mass_audience_override(article):
+    if _has_mass_audience_override(article, semantic, source_name):
         return False
 
     domain = str(semantic.get("domain") or "").strip().lower()
@@ -962,6 +1054,7 @@ def score_article_in_session(session, article: Article, max_rank: int, editor_st
 
     freshness = _freshness(article.published_at)
     source_priority = _source_priority(rank, max_rank)
+    source_priority = _apply_source_penalties(source.name if source else "", source_priority)
     entity_count = _entity_count_feature(article)
     number_count = _number_count_feature(article)
     trend_velocity, coverage, cluster_age_hours, has_high_tier_peer = _cluster_stats(session, article)
@@ -1103,7 +1196,7 @@ def score_article_in_session(session, article: Article, max_rank: int, editor_st
         article.archived_at = datetime.utcnow()
         score.reasoning = f"{score.reasoning} | bloomberg_hype_gate=failed"
         score.features = {**(score.features or {}), "bloomberg_hype_gate": "failed"}
-    elif _is_too_technical(semantic, source.name if source else None):
+    elif _is_too_technical(article, semantic, source.name if source else None):
         article.status = ArticleStatus.ARCHIVED
         article.archived_kind = "filter"
         article.archived_reason = "technical_gate"
@@ -1360,6 +1453,9 @@ def prune_bad_articles(limit: int = 50000, archive_summary_only: bool = True, ar
             # Do not auto-hide already published or hourly-selected content.
             if article.status in {ArticleStatus.PUBLISHED, ArticleStatus.SELECTED_HOURLY}:
                 continue
+            # Never auto-hide explicitly scheduled items.
+            if article.scheduled_publish_at is not None:
+                continue
 
             if archive_summary_only and _is_insufficient_content(article):
                 article.status = ArticleStatus.ARCHIVED
@@ -1431,7 +1527,7 @@ def prune_bad_articles(limit: int = 50000, archive_summary_only: bool = True, ar
                     counts["bloomberg_low_hype"] += 1
                     continue
 
-                if _is_too_technical(semantic, source.name if source else None):
+                if _is_too_technical(article, semantic, source.name if source else None):
                     article.status = ArticleStatus.ARCHIVED
                     article.updated_at = datetime.utcnow()
                     counts["archived"] += 1
@@ -1627,7 +1723,7 @@ def reclassify_all_articles(
                 or _is_low_local_practical_value(article, semantic)
                 or _is_summary_and_boring(article, semantic)
                 or _is_bloomberg_low_hype(article, semantic, source.name if source else None)
-                or _is_too_technical(semantic, source.name if source else None)
+                or _is_too_technical(article, semantic, source.name if source else None)
                 or _is_too_deep_technical(article, semantic, source.name if source else None)
                 or _is_too_geek_for_mass(article, semantic, source.name if source else None)
                 or _is_too_investing(semantic)

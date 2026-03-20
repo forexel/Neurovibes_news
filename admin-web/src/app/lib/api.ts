@@ -171,6 +171,83 @@ export interface CostSummary {
   note?: string;
 }
 
+export interface EvaluationOverview {
+  ok: boolean;
+  days: number;
+  k: number;
+  retrieval: {
+    eval_items: number;
+    hit_at_k: number | null;
+    precision_at_k: number | null;
+    mrr: number | null;
+    ndcg_at_k: number | null;
+  };
+  answer_relevance: number | null;
+  source_faithfulness: number | null;
+  latency: {
+    avg_ms: number | null;
+    p95_ms: number | null;
+    sample_size: number;
+  };
+  cost: {
+    total_usd: number;
+    calls: number;
+    cost_per_request_usd: number | null;
+  };
+  confusion: {
+    publish_threshold: number;
+    tp: number;
+    fp: number;
+    tn: number;
+    fn: number;
+    fp_examples: Array<{ event_id: number; article_id: number; title: string; decision: string; ml_score: number }>;
+    fn_examples: Array<{ event_id: number; article_id: number; title: string; decision: string; ml_score: number }>;
+  };
+  miss_examples: Array<{ decision_id: number; article_id: number; chosen_rank: number | null; top_article_id: number | null }>;
+}
+
+export interface EvaluationVersions {
+  ok: boolean;
+  days: number;
+  publish_threshold: number;
+  versions: Array<{
+    model_version: string;
+    events: number;
+    positive_events: number;
+    positive_rate: number | null;
+    tp: number;
+    fp: number;
+    tn: number;
+    fn: number;
+    precision: number | null;
+    recall: number | null;
+    avg_ml_score: number | null;
+  }>;
+  artifacts: Array<{
+    name: string;
+    version: string;
+    active: boolean;
+    created_at: string;
+    metrics: Record<string, unknown>;
+  }>;
+}
+
+export interface EvalSetResponse {
+  ok: boolean;
+  days: number;
+  count: number;
+  items: Array<{
+    decision_id: number;
+    created_at: string;
+    chosen_article_id: number;
+    rejected_article_ids: number[];
+    decision_mode: string | null;
+    selector_kind: string | null;
+    confidence: number | null;
+    candidates: Array<Record<string, unknown>>;
+  }>;
+}
+
 export interface ReasonTagOption {
   value: string;
   label: string;
@@ -375,6 +452,20 @@ export const api = {
 
   getCosts() {
     return requestJson<CostSummary>("/admin-data/costs");
+  },
+
+  getEvaluationOverview(days = 14, k = 5) {
+    return requestJson<EvaluationOverview>(`/admin-data/evaluation?days=${encodeURIComponent(String(days))}&k=${encodeURIComponent(String(k))}`);
+  },
+
+  getEvaluationVersions(days = 30) {
+    return requestJson<EvaluationVersions>(`/admin-data/evaluation/versions?days=${encodeURIComponent(String(days))}`);
+  },
+
+  getEvaluationEvalSet(days = 30, limit = 500) {
+    return requestJson<EvalSetResponse>(
+      `/admin-data/evaluation/eval-set?days=${encodeURIComponent(String(days))}&limit=${encodeURIComponent(String(limit))}`,
+    );
   },
 
   getWorkerStatus() {

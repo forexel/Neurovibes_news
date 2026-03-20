@@ -78,19 +78,26 @@ def _load_default_user_context() -> None:
         set_user_api_key(get_workspace_api_key(_DEFAULT_USER_ID))
         return
 
+    explicit_user_id = 0
+    try:
+        explicit_user_id = int(os.getenv("WORKER_USER_ID", "0") or 0)
+    except Exception:
+        explicit_user_id = 0
+    runtime_user_id = int(max(0, get_runtime_int("worker_user_id", default=0)))
+    target_user_id = explicit_user_id or runtime_user_id
     user_id = None
     with session_scope() as session:
-        ws = session.scalars(
-            select(UserWorkspace)
-            .where(
-                UserWorkspace.telegram_bot_token_enc.is_not(None),
-                UserWorkspace.telegram_bot_token_enc != "",
-                UserWorkspace.telegram_review_chat_id.is_not(None),
-                UserWorkspace.telegram_review_chat_id != "",
-            )
-            .order_by(UserWorkspace.updated_at.desc())
-            .limit(1)
-        ).first()
+        q = select(UserWorkspace).where(
+            UserWorkspace.telegram_bot_token_enc.is_not(None),
+            UserWorkspace.telegram_bot_token_enc != "",
+            UserWorkspace.telegram_review_chat_id.is_not(None),
+            UserWorkspace.telegram_review_chat_id != "",
+        )
+        if target_user_id > 0:
+            q = q.where(UserWorkspace.user_id == target_user_id)
+        else:
+            q = q.order_by(UserWorkspace.updated_at.desc()).limit(1)
+        ws = session.scalars(q).first()
         if ws is not None:
             user_id = int(ws.user_id)
 

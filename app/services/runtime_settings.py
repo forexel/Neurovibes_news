@@ -46,15 +46,20 @@ RUNTIME_DEFAULTS: dict[str, str] = {
     "investing_filter_significance_max": "8.9",
     "investing_filter_relevance_max": "9.0",
     "mass_audience_filter_enabled": "true",
-    "mass_audience_significance_max": "9.1",
-    "mass_audience_relevance_max": "9.2",
-    "mass_audience_business_it_max": "8.6",
+    "mass_audience_significance_max": "9.4",
+    "mass_audience_relevance_max": "9.4",
+    "mass_audience_business_it_max": "8.9",
     "mass_audience_wow_keywords_csv": (
         "new version,release,launched,rollout,available now,security,privacy,data breach,safety,"
-        "major update,first in world,breakthrough,wow"
+        "major update,first in world,breakthrough,wow,browser,ios,android,app store,creator,content,"
+        "video,image,voice,design,prototype,ui,workflow,assistant,real-time,realtime,workspace,docs,"
+        "sheets,slides,public beta,research preview"
     ),
     "browser_fetch_enabled": "true",
-    "browser_fetch_domains_csv": "forbes.com,wired.com,bloomberg.com,ft.com,businessinsider.com,openai.com",
+    "browser_fetch_domains_csv": (
+        "forbes.com,wired.com,bloomberg.com,ft.com,businessinsider.com,openai.com,perplexity.ai,"
+        "x.ai,linkedin.com"
+    ),
     "browser_cookies_json": "",
     "openai_hourly_enrich_enabled": "true",
     "openai_hourly_enrich_limit": "25",
@@ -68,7 +73,7 @@ RUNTIME_DEFAULTS: dict[str, str] = {
     "ml_editor_choice_weight": "0.10",
     "ml_review_every_n_hours": "2",
     "ml_review_min_confidence": "0.72",
-    "ml_recommend_publish_threshold": "0.72",
+    "ml_recommend_publish_threshold": "0.66",
     "ml_recommend_delete_threshold": "0.28",
     # User-vector retrieval ranking (pos - alpha * neg)
     "user_vector_alpha": "0.60",
@@ -110,24 +115,26 @@ RUNTIME_DEFAULTS: dict[str, str] = {
     "editorial_penalty_too_technical_keywords_csv": (
         "benchmark,latency,throughput,token context,context window,lora,hypernetwork,embedding,quantization,"
         "kernel,weights,inference stack,training stack,attention,architecture,ablation,ranker,eval,leaderboard,"
-        "parameters,parameter count,distillation,zero-shot,fine-tuning,app store ranking,retrieval"
+        "parameters,parameter count,distillation,zero-shot,fine-tuning,retrieval"
     ),
     "editorial_bonus_new_tool_keywords_csv": (
         "launches,launched,releases,released,introduces,introduced,rolls out,new tool,new tools,new app,new agent,"
         "assistant,copilot,plugin,plugins,api,sdk,feature available,now available,ships,shipping today,"
-        "available to users,available in app"
+        "available to users,available in app,browser,ios,android,app store,prototype,design,ui,video,"
+        "image,voice,podcast,workflow,workspace,slides,sheets,docs,ad blocker,real-time,realtime"
     ),
     "editorial_bonus_new_usage_keywords_csv": (
         "use case,workflow,for teams,for business,for users,lets users,lets developers,used to,helps teams,"
         "can now,integrates with,automation,automate,practical,real-world,real world,adoption,using ai in work,"
-        "productivity,save time"
+        "productivity,save time,create videos,edit videos,build interfaces,interactive prototype,search tabs,"
+        "summarize pages,summarize videos,work on mobile,download now,available in russia"
     ),
     "editorial_penalty_investment_weight": "0.24",
     "editorial_penalty_chip_weight": "0.22",
     "editorial_penalty_layoff_weight": "0.18",
-    "editorial_penalty_too_technical_weight": "0.28",
-    "editorial_bonus_new_tool_weight": "0.16",
-    "editorial_bonus_new_usage_weight": "0.14",
+    "editorial_penalty_too_technical_weight": "0.16",
+    "editorial_bonus_new_tool_weight": "0.24",
+    "editorial_bonus_new_usage_weight": "0.22",
     "editorial_min_multiplier": "0.45",
     "editorial_max_multiplier": "1.25",
 }

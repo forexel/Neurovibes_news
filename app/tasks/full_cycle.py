@@ -4,7 +4,6 @@ import argparse
 import time
 from datetime import datetime, timedelta, timezone
 
-import httpx
 from sqlalchemy import select
 
 from app.db import init_db, session_scope
@@ -28,6 +27,7 @@ from app.services.preference import (
     train_ranking_model,
 )
 from app.services.scoring import run_scoring
+from app.services.telegram_http import telegram_api_post
 from app.services.telegram_context import load_workspace_telegram_context, telegram_bot_token, telegram_review_chat_id
 from app.services.telegram_publisher import publish_article, send_test_message
 
@@ -163,12 +163,13 @@ def _send_watchdog_alert(text: str) -> dict:
     if not token or not chat_id:
         return {"ok": False, "error": "telegram_not_configured"}
     try:
-        with httpx.Client(timeout=15) as client:
-            r = client.post(
-                f"https://api.telegram.org/bot{token}/sendMessage",
-                json={"chat_id": chat_id, "text": text[:3500]},
-            )
-        return {"ok": bool(r.status_code == 200), "status_code": r.status_code, "text": (r.text or "")[:400]}
+        data = telegram_api_post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json_payload={"chat_id": chat_id, "text": text[:3500]},
+            timeout=15,
+            token=token,
+        )
+        return {"ok": bool(data.get("ok")), "text": str(data)[:400]}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 

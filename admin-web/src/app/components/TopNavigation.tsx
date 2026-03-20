@@ -173,6 +173,10 @@ export function TopNavigation() {
                     <Settings className="w-4 h-4 mr-2" />
                     Оценка
                   </Link>
+                  <Link to="/evaluation" className="top-nav-menu-item">
+                    <Database className="w-4 h-4 mr-2" />
+                    Evaluation
+                  </Link>
                 </div>
             </div>
 

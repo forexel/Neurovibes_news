@@ -15,7 +15,6 @@ from html import escape
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
-import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
@@ -37,15 +36,18 @@ from app.models import (
     ContentVersion,
     DailySelection,
     EditorFeedback,
+    ModelArtifact,
     PublishJob,
     ReasonTagCatalog,
     RawPageSnapshot,
     Score,
     ScoreParameter,
+    SelectionDecision,
     Source,
     LLMUsageLog,
     TelegramBotKV,
     TelegramReviewJob,
+    TrainingEvent,
     User,
     UserWorkspace,
 )
@@ -79,6 +81,7 @@ from app.services.scoring import (
 from app.services.topic_filter import passes_ai_topic_filter
 from app.services.preference import rebuild_preference_profile
 from app.services.telegram_publisher import publish_article, publish_scheduled_due, send_test_message
+from app.services.telegram_http import telegram_api_post
 from app.services.telegram_review import (
     poll_review_updates,
     send_hourly_backfill_for_review,
@@ -228,10 +231,11 @@ def _ops_send_telegram_alert_async(text_msg: str) -> None:
             chat_id = (get_runtime_str("telegram_review_chat_id") or settings.telegram_review_chat_id or "").strip()
             if not token or not chat_id:
                 return
-            httpx.post(
+            telegram_api_post(
                 f"https://api.telegram.org/bot{token}/sendMessage",
-                json={"chat_id": chat_id, "text": text_msg[:3500]},
+                json_payload={"chat_id": chat_id, "text": text_msg[:3500]},
                 timeout=10,
+                token=token,
             )
         except Exception:
             return
@@ -2407,6 +2411,297 @@ def admin_data_costs(request: Request) -> dict:
         "estimated_cost_usd_30d": round(month_cost, 6),
         # Hide token counters in UI by default; keep only $ estimates.
         "note": "Estimated by token counters and configured per-million rates.",
+    }
+
+
+@app.get("/admin-data/evaluation")
+def admin_data_evaluation(request: Request, days: int = 14, k: int = 5) -> dict:
+    _require_session_user(request)
+    lookback_days = max(1, min(int(days or 14), 180))
+    top_k = max(1, min(int(k or 5), 20))
+    since = datetime.utcnow() - timedelta(days=lookback_days)
+    publish_threshold = float(max(0.0, min(1.0, get_runtime_float("ml_recommend_publish_threshold", default=0.72))))
+
+    with session_scope() as session:
+        decisions = session.scalars(
+            select(SelectionDecision)
+            .where(SelectionDecision.created_at >= since)
+            .order_by(SelectionDecision.id.desc())
+            .limit(5000)
+        ).all()
+
+        llm_cost = float(
+            session.scalar(
+                select(func.coalesce(func.sum(LLMUsageLog.estimated_cost_usd), 0.0)).where(LLMUsageLog.created_at >= since)
+            )
+            or 0.0
+        )
+        llm_calls = int(session.scalar(select(func.count(LLMUsageLog.id)).where(LLMUsageLog.created_at >= since)) or 0)
+
+        snapshots = session.scalars(
+            select(RawPageSnapshot).where(RawPageSnapshot.fetched_at >= since).order_by(RawPageSnapshot.id.desc()).limit(20000)
+        ).all()
+
+        events = session.scalars(
+            select(TrainingEvent)
+            .where(TrainingEvent.created_at >= since)
+            .order_by(TrainingEvent.id.desc())
+            .limit(20000)
+        ).all()
+
+        recent_articles = {
+            int(a.id): a
+            for a in session.scalars(
+                select(Article).where(Article.created_at >= since).order_by(Article.id.desc()).limit(10000)
+            ).all()
+        }
+
+    considered = 0
+    hit_count = 0
+    precision_sum = 0.0
+    mrr_sum = 0.0
+    ndcg_sum = 0.0
+    misses: list[dict] = []
+    chosen_ids: set[int] = set()
+
+    for d in decisions:
+        candidates = list(d.candidates or [])
+        chosen_id = int(d.chosen_article_id or 0)
+        if not candidates or chosen_id <= 0:
+            continue
+        ranked = sorted(candidates, key=lambda x: float(x.get("score", x.get("prob", 0.0)) or 0.0), reverse=True)
+        rank_pos = next((idx + 1 for idx, row in enumerate(ranked) if int(row.get("article_id") or 0) == chosen_id), None)
+        considered += 1
+        chosen_ids.add(chosen_id)
+        if rank_pos and rank_pos <= top_k:
+            hit_count += 1
+            precision_sum += 1.0 / float(top_k)
+            ndcg_sum += 1.0 / math.log2(rank_pos + 1)
+        if rank_pos:
+            mrr_sum += 1.0 / float(rank_pos)
+        if not rank_pos or rank_pos > top_k:
+            misses.append(
+                {
+                    "decision_id": int(d.id),
+                    "article_id": chosen_id,
+                    "chosen_rank": int(rank_pos) if rank_pos else None,
+                    "top_article_id": int(ranked[0].get("article_id") or 0) if ranked else None,
+                }
+            )
+
+    # Relevance proxy from scored features for chosen articles.
+    answer_relevance_vals: list[float] = []
+    if chosen_ids:
+        with session_scope() as session:
+            chosen_scores = session.scalars(select(Score).where(Score.article_id.in_(list(chosen_ids)))).all()
+        for s in chosen_scores:
+            f = s.features if isinstance(s.features, dict) else {}
+            pv = f.get("practical_value")
+            af = f.get("audience_fit")
+            ac = f.get("actionability")
+            vals = [float(x) for x in [pv, af, ac] if isinstance(x, (int, float))]
+            if vals:
+                answer_relevance_vals.append(sum(vals) / float(len(vals)))
+
+    # Source faithfulness proxy from parse quality of fetched pages.
+    faithfulness_vals = [float(s.parse_quality) for s in snapshots if isinstance(s.parse_quality, (int, float))]
+    latency_vals = [float(s.latency_ms) for s in snapshots if isinstance(s.latency_ms, (int, float)) and float(s.latency_ms) >= 0.0]
+
+    # FP/FN against editor decisions in training events.
+    fp = 0
+    fn = 0
+    tp = 0
+    tn = 0
+    fp_examples: list[dict] = []
+    fn_examples: list[dict] = []
+    for e in events:
+        actual_positive = str(e.decision or "").lower() in {"publish", "top_pick"}
+        ml_score = e.ml_score_at_decision
+        if ml_score is None:
+            continue
+        pred_positive = float(ml_score) >= publish_threshold
+        if pred_positive and actual_positive:
+            tp += 1
+        elif pred_positive and (not actual_positive):
+            fp += 1
+            if len(fp_examples) < 15:
+                a = recent_articles.get(int(e.article_id))
+                fp_examples.append(
+                    {
+                        "event_id": int(e.id),
+                        "article_id": int(e.article_id),
+                        "title": (a.title if a else ""),
+                        "decision": str(e.decision or ""),
+                        "ml_score": float(ml_score),
+                    }
+                )
+        elif (not pred_positive) and actual_positive:
+            fn += 1
+            if len(fn_examples) < 15:
+                a = recent_articles.get(int(e.article_id))
+                fn_examples.append(
+                    {
+                        "event_id": int(e.id),
+                        "article_id": int(e.article_id),
+                        "title": (a.title if a else ""),
+                        "decision": str(e.decision or ""),
+                        "ml_score": float(ml_score),
+                    }
+                )
+        else:
+            tn += 1
+
+    latency_avg = (sum(latency_vals) / len(latency_vals)) if latency_vals else None
+    latency_p95 = None
+    if latency_vals:
+        ordered = sorted(latency_vals)
+        idx = int(max(0, min(len(ordered) - 1, math.ceil(len(ordered) * 0.95) - 1)))
+        latency_p95 = ordered[idx]
+
+    return {
+        "ok": True,
+        "days": lookback_days,
+        "k": top_k,
+        "retrieval": {
+            "eval_items": considered,
+            "hit_at_k": (hit_count / considered) if considered else None,
+            "precision_at_k": (precision_sum / considered) if considered else None,
+            "mrr": (mrr_sum / considered) if considered else None,
+            "ndcg_at_k": (ndcg_sum / considered) if considered else None,
+        },
+        "answer_relevance": (sum(answer_relevance_vals) / len(answer_relevance_vals)) if answer_relevance_vals else None,
+        "source_faithfulness": (sum(faithfulness_vals) / len(faithfulness_vals)) if faithfulness_vals else None,
+        "latency": {
+            "avg_ms": latency_avg,
+            "p95_ms": latency_p95,
+            "sample_size": len(latency_vals),
+        },
+        "cost": {
+            "total_usd": llm_cost,
+            "calls": llm_calls,
+            "cost_per_request_usd": (llm_cost / llm_calls) if llm_calls else None,
+        },
+        "confusion": {
+            "publish_threshold": publish_threshold,
+            "tp": tp,
+            "fp": fp,
+            "tn": tn,
+            "fn": fn,
+            "fp_examples": fp_examples,
+            "fn_examples": fn_examples,
+        },
+        "miss_examples": misses[:20],
+    }
+
+
+@app.get("/admin-data/evaluation/versions")
+def admin_data_evaluation_versions(request: Request, days: int = 30) -> dict:
+    _require_session_user(request)
+    lookback_days = max(1, min(int(days or 30), 365))
+    since = datetime.utcnow() - timedelta(days=lookback_days)
+    publish_threshold = float(max(0.0, min(1.0, get_runtime_float("ml_recommend_publish_threshold", default=0.72))))
+
+    with session_scope() as session:
+        artifacts = session.scalars(
+            select(ModelArtifact).where(ModelArtifact.name.in_(["ranking", "editor_choice"])).order_by(ModelArtifact.created_at.desc())
+        ).all()
+        events = session.scalars(
+            select(TrainingEvent).where(TrainingEvent.created_at >= since, TrainingEvent.model_version.is_not(None)).order_by(TrainingEvent.id.desc())
+        ).all()
+
+    by_version: dict[str, dict] = {}
+    for e in events:
+        version = str(e.model_version or "").strip() or "unknown"
+        row = by_version.setdefault(
+            version,
+            {
+                "model_version": version,
+                "events": 0,
+                "positive_events": 0,
+                "tp": 0,
+                "fp": 0,
+                "tn": 0,
+                "fn": 0,
+                "avg_ml_score": 0.0,
+                "_score_n": 0,
+            },
+        )
+        row["events"] += 1
+        actual_positive = str(e.decision or "").lower() in {"publish", "top_pick"}
+        if actual_positive:
+            row["positive_events"] += 1
+        if isinstance(e.ml_score_at_decision, (int, float)):
+            score = float(e.ml_score_at_decision)
+            row["avg_ml_score"] += score
+            row["_score_n"] += 1
+            pred_positive = score >= publish_threshold
+            if pred_positive and actual_positive:
+                row["tp"] += 1
+            elif pred_positive and (not actual_positive):
+                row["fp"] += 1
+            elif (not pred_positive) and actual_positive:
+                row["fn"] += 1
+            else:
+                row["tn"] += 1
+
+    rows = []
+    for row in by_version.values():
+        score_n = int(row.pop("_score_n", 0))
+        row["avg_ml_score"] = (row["avg_ml_score"] / score_n) if score_n else None
+        events_n = int(row.get("events") or 0)
+        row["positive_rate"] = (float(row.get("positive_events") or 0) / events_n) if events_n else None
+        denom_precision = float((row.get("tp") or 0) + (row.get("fp") or 0))
+        denom_recall = float((row.get("tp") or 0) + (row.get("fn") or 0))
+        row["precision"] = (float(row.get("tp") or 0) / denom_precision) if denom_precision > 0 else None
+        row["recall"] = (float(row.get("tp") or 0) / denom_recall) if denom_recall > 0 else None
+        rows.append(row)
+    rows.sort(key=lambda x: int(x.get("events") or 0), reverse=True)
+
+    return {
+        "ok": True,
+        "days": lookback_days,
+        "publish_threshold": publish_threshold,
+        "versions": rows,
+        "artifacts": [
+            {
+                "name": str(a.name),
+                "version": str(a.version),
+                "active": bool(a.active),
+                "created_at": a.created_at,
+                "metrics": a.metrics or {},
+            }
+            for a in artifacts[:50]
+        ],
+    }
+
+
+@app.get("/admin-data/evaluation/eval-set")
+def admin_data_evaluation_eval_set(request: Request, days: int = 30, limit: int = 500) -> dict:
+    _require_session_user(request)
+    lookback_days = max(1, min(int(days or 30), 365))
+    limit_n = max(1, min(int(limit or 500), 5000))
+    since = datetime.utcnow() - timedelta(days=lookback_days)
+    with session_scope() as session:
+        rows = session.scalars(
+            select(SelectionDecision).where(SelectionDecision.created_at >= since).order_by(SelectionDecision.id.desc()).limit(limit_n)
+        ).all()
+    return {
+        "ok": True,
+        "days": lookback_days,
+        "count": len(rows),
+        "items": [
+            {
+                "decision_id": int(d.id),
+                "created_at": d.created_at,
+                "chosen_article_id": int(d.chosen_article_id),
+                "rejected_article_ids": [int(x) for x in (d.rejected_article_ids or [])],
+                "decision_mode": str(d.decision_mode.value) if getattr(d, "decision_mode", None) else None,
+                "selector_kind": d.selector_kind,
+                "confidence": d.confidence,
+                "candidates": d.candidates or [],
+            }
+            for d in rows
+        ],
     }
 
 
