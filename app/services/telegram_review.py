@@ -41,6 +41,10 @@ from app.services.scoring import score_article_by_id
 
 logger = logging.getLogger(__name__)
 
+
+def _looks_like_russian(text: str) -> bool:
+    return bool(re.search(r"[А-Яа-яЁё]", str(text or "")))
+
 _SQLI_PATTERNS = [
     re.compile(r"(?i)(?:'|\"|`)\s*or\s+1\s*=\s*1"),
     re.compile(r"(?i)\bunion\s+select\b"),
@@ -405,18 +409,25 @@ def _build_review_text(
 ) -> str:
     title = (article.ru_title or "").strip()
     summary = (article.ru_summary or "").strip()
-    if not title or not summary:
-        if settings.allow_online_llm_generation:
+    has_real_ru = bool(title and summary and _looks_like_russian(title) and _looks_like_russian(summary))
+    if not has_real_ru and settings.openrouter_api_key:
+        try:
             generate_ru_summary(article.id)
-            with session_scope() as session:
-                fresh = session.get(Article, article.id)
-                if fresh:
-                    title = (fresh.ru_title or "").strip()
-                    summary = (fresh.ru_summary or "").strip()
+        except Exception:
+            pass
+        with session_scope() as session:
+            fresh = session.get(Article, article.id)
+            if fresh:
+                title = (fresh.ru_title or "").strip()
+                summary = (fresh.ru_summary or "").strip()
     if not title:
-        title = (article.title or "").strip()
+        title = "RU заголовок не готов."
     if not summary:
-        summary = ((article.subtitle or "")[:900]).strip() or "Короткий текст пока не готов."
+        summary = "RU текст не готов. Нажми Generate Post, затем Save RU Text."
+    if not _looks_like_russian(title):
+        title = "RU заголовок не готов."
+    if not _looks_like_russian(summary):
+        summary = "RU текст не готов. Нажми Generate Post, затем Save RU Text."
     badge_map = {
         "tool": "🧰 Инструмент",
         "case": "🧪 Кейс",
