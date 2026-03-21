@@ -115,13 +115,29 @@ def _has_sufficient_publish_content(article: Article) -> bool:
     return text_len >= _MIN_FULL_TEXT_LEN
 
 
+def _restore_for_explicit_publish(article: Article, *, manual: bool) -> bool:
+    """
+    Manual publish and scheduled publish are stronger than background ARCHIVED state.
+    Restore such articles into an active state before validation.
+    """
+    if article.status == ArticleStatus.DOUBLE:
+        return False
+    if article.status in {ArticleStatus.ARCHIVED, ArticleStatus.REJECTED} and (manual or article.scheduled_publish_at is not None):
+        article.status = ArticleStatus.READY
+        article.archived_kind = None
+        article.archived_reason = None
+        article.archived_at = None
+        article.updated_at = datetime.utcnow()
+    return True
+
+
 def publish_article(article_id: int, *, manual: bool = True) -> dict:
     # Hard rule: publish only RU posts. If RU content is missing, try to prepare it automatically.
     with session_scope() as session:
         article = session.get(Article, article_id)
         if not article:
             return {"ok": False, "error": "article_not_found"}
-        if article.status in {ArticleStatus.ARCHIVED, ArticleStatus.REJECTED, ArticleStatus.DOUBLE}:
+        if not _restore_for_explicit_publish(article, manual=manual):
             return {"ok": False, "error": f"publish_blocked_status:{str(article.status)}"}
         if (not manual) and _has_pending_review(session, article_id):
             return {"ok": False, "error": "publish_blocked_pending_review"}
@@ -150,7 +166,7 @@ def publish_article(article_id: int, *, manual: bool = True) -> dict:
         article = session.get(Article, article_id)
         if not article:
             return {"ok": False, "error": "article_not_found"}
-        if article.status in {ArticleStatus.ARCHIVED, ArticleStatus.REJECTED, ArticleStatus.DOUBLE}:
+        if not _restore_for_explicit_publish(article, manual=manual):
             return {"ok": False, "error": f"publish_blocked_status:{str(article.status)}"}
         if (not manual) and _has_pending_review(session, article_id):
             return {"ok": False, "error": "publish_blocked_pending_review"}
