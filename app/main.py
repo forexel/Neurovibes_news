@@ -3618,6 +3618,11 @@ def schedule_publish(article_id: int, body: SchedulePublishIn, request: Request)
         if not article:
             raise HTTPException(status_code=404, detail="Article not found")
         article.scheduled_publish_at = dt_utc
+        if article.status in {ArticleStatus.ARCHIVED, ArticleStatus.REJECTED, ArticleStatus.INBOX, ArticleStatus.SCORED, ArticleStatus.REVIEW, ArticleStatus.NEW}:
+            article.status = ArticleStatus.READY
+            article.archived_kind = None
+            article.archived_reason = None
+            article.archived_at = None
         article.updated_at = datetime.utcnow()
     return {
         "ok": True,

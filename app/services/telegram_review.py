@@ -1719,6 +1719,11 @@ def _handle_message(update: dict) -> dict:
                 _send_message(chat_id, "Не нашел статью для планирования публикации.")
                 return {"ok": True, "action": "pick_time_missing_article", "article_id": article_id}
             article.scheduled_publish_at = dt_utc
+            if article.status in {ArticleStatus.ARCHIVED, ArticleStatus.REJECTED, ArticleStatus.INBOX, ArticleStatus.SCORED, ArticleStatus.REVIEW, ArticleStatus.NEW}:
+                article.status = ArticleStatus.READY
+                article.archived_kind = None
+                article.archived_reason = None
+                article.archived_at = None
             article.updated_at = datetime.utcnow()
         # Cleanup intermediate time-entry prompt and the user's reply with time.
         _delete_message(chat_id, prompt_id)
@@ -1868,6 +1873,11 @@ def _handle_message(update: dict) -> dict:
                 _send_message(chat_id, "Не нашел статью для отложенной отправки.")
                 return {"ok": True, "action": "later_missing_article", "article_id": article_id}
             article.scheduled_publish_at = datetime.utcnow() + timedelta(hours=3)
+            if article.status in {ArticleStatus.ARCHIVED, ArticleStatus.REJECTED, ArticleStatus.INBOX, ArticleStatus.SCORED, ArticleStatus.REVIEW, ArticleStatus.NEW}:
+                article.status = ArticleStatus.READY
+                article.archived_kind = None
+                article.archived_reason = None
+                article.archived_at = None
             article.updated_at = datetime.utcnow()
             session.add(
                 EditorFeedback(

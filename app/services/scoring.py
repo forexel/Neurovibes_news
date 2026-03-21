@@ -1700,6 +1700,25 @@ def reclassify_all_articles(
                 continue
             scanned += 1
 
+            # Explicitly scheduled posts must never be re-archived by background
+            # reclassification. If an older bug already archived such a post,
+            # restore it into the active queue so publish_scheduled_due() can pick it up.
+            if article.scheduled_publish_at is not None:
+                if (
+                    article.status == ArticleStatus.ARCHIVED
+                    and include_archived
+                    and article.id not in deleted_by_editor_ids
+                ):
+                    article.status = ArticleStatus.READY
+                    article.archived_kind = None
+                    article.archived_reason = None
+                    article.archived_at = None
+                    article.updated_at = datetime.utcnow()
+                    restored += 1
+                else:
+                    unchanged += 1
+                continue
+
             # Topical gate always applies.
             if not passes_ai_topic_filter(
                 title=article.title or "",
