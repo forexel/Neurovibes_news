@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from datetime import datetime
 from html import escape
@@ -22,6 +23,10 @@ _TG_PER_CHAT_MIN_DELAY_SECONDS = 1.05
 _TG_GLOBAL_MIN_DELAY_SECONDS = 0.05
 _LAST_CHAT_SEND_TS: dict[str, float] = {}
 _LAST_GLOBAL_SEND_TS: float = 0.0
+
+
+def _looks_like_russian(text: str) -> bool:
+    return bool(re.search(r"[А-Яа-яЁё]", str(text or "")))
 
 
 def _mask_sensitive(text: str, token: str | None = None) -> str:
@@ -155,7 +160,12 @@ def publish_article(article_id: int, *, manual: bool = True) -> dict:
         ).first()
         if (not manual) and last_success and (last_success.telegram_message_id or "").strip():
             return {"ok": True, "message_id": str(last_success.telegram_message_id), "idempotent": True}
-        has_ru = bool((article.ru_title or "").strip()) and bool((article.ru_summary or "").strip())
+        has_ru = (
+            bool((article.ru_title or "").strip())
+            and bool((article.ru_summary or "").strip())
+            and _looks_like_russian(article.ru_title or "")
+            and _looks_like_russian(article.ru_summary or "")
+        )
     if not has_ru:
         try:
             generate_ru_summary(article_id)
@@ -186,7 +196,12 @@ def publish_article(article_id: int, *, manual: bool = True) -> dict:
             article.status = ArticleStatus.PUBLISHED
             article.scheduled_publish_at = None
             return {"ok": True, "message_id": str(last_success.telegram_message_id), "idempotent": True}
-        if not (article.ru_title or "").strip() or not (article.ru_summary or "").strip():
+        if (
+            not (article.ru_title or "").strip()
+            or not (article.ru_summary or "").strip()
+            or not _looks_like_russian(article.ru_title or "")
+            or not _looks_like_russian(article.ru_summary or "")
+        ):
             return {"ok": False, "error": "ru_content_required", "hint": "Нажми Generate Post и/или Translate Full, затем сохрани RU текст"}
 
         title = escape(article.ru_title or "")

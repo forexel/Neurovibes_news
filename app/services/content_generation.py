@@ -77,6 +77,8 @@ def generate_ru_summary(article_id: int) -> bool:
         quality = _quality_checks(rewrite)
         factual = _factual_consistency_checks(article, extraction, rewrite)
         quality["factual"] = factual
+    if not quality["is_valid"] or not factual.get("is_valid", True):
+        return False
 
     with session_scope() as session:
         article = session.get(Article, article_id)
@@ -539,6 +541,10 @@ def _chunk_text(text: str, chunk_size: int = 5000) -> list[str]:
     return [c for c in chunks if c]
 
 
+def _looks_like_russian(text: str) -> bool:
+    return bool(re.search(r"[А-Яа-яЁё]", str(text or "")))
+
+
 def _quality_checks(rewrite: dict) -> dict:
     banned = [x.strip().lower() for x in get_runtime_csv_list("banned_phrases_csv")]
     text = f"{rewrite.get('ru_title', '')}\n{rewrite.get('ru_summary', '')}".lower()
@@ -547,13 +553,17 @@ def _quality_checks(rewrite: dict) -> dict:
     date_or_number_count = len(re.findall(r"\d", rewrite.get("ru_summary", "")))
     too_long = len(rewrite.get("ru_summary", "")) > get_runtime_int("max_summary_chars", default=1400)
     empty = not rewrite.get("ru_summary") or not rewrite.get("ru_title")
+    title_is_ru = _looks_like_russian(rewrite.get("ru_title", ""))
+    summary_is_ru = _looks_like_russian(rewrite.get("ru_summary", ""))
 
     return {
-        "is_valid": (not empty) and (not too_long) and (not banned_hits),
+        "is_valid": (not empty) and (not too_long) and (not banned_hits) and title_is_ru and summary_is_ru,
         "banned_hits": banned_hits,
         "numeric_signal": date_or_number_count,
         "summary_len": len(rewrite.get("ru_summary", "")),
         "title_len": len(rewrite.get("ru_title", "")),
+        "title_is_ru": title_is_ru,
+        "summary_is_ru": summary_is_ru,
     }
 
 
@@ -602,8 +612,10 @@ def _safe_fallback_summary(article: Article, extraction: dict) -> str:
     if isinstance(pts, list) and pts:
         first = " ".join(str(x) for x in pts[:2])
         second = "Подробнее: " + article.canonical_url
-        return f"{first}\n\n{second}"[: get_runtime_int("max_summary_chars", default=1400)]
-    return (article.subtitle or article.text[:400])[: get_runtime_int("max_summary_chars", default=1400)]
+        candidate = f"{first}\n\n{second}"[: get_runtime_int("max_summary_chars", default=1400)]
+        return candidate if _looks_like_russian(candidate) else ""
+    candidate = (article.subtitle or article.text[:400])[: get_runtime_int("max_summary_chars", default=1400)]
+    return candidate if _looks_like_russian(candidate) else ""
 
 
 def generate_image_prompt(article_id: int) -> str:
