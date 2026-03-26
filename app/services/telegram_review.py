@@ -36,8 +36,7 @@ from app.services.telegram_context import (
 from app.services.runtime_settings import get_runtime_float, get_runtime_int, get_runtime_str
 from app.services.pipeline import pick_hourly_backfill, pick_hourly_top
 from app.services.preference import log_training_event
-from app.services.scoring import reclassify_all_articles
-from app.services.scoring import score_article_by_id
+from app.services.scoring import article_is_selection_eligible, reclassify_all_articles, score_article_by_id
 
 logger = logging.getLogger(__name__)
 
@@ -755,28 +754,30 @@ def _pick_best_unsorted_article_id() -> int | None:
             int(x)
             for x in session.scalars(select(DailySelection.article_id).where(DailySelection.active.is_(True))).all()
         )
-        recent_days = int(max(1, get_runtime_int("unsorted_recent_days", default=3)))
-        cutoff = datetime.utcnow() - timedelta(days=recent_days)
-        q = (
-            select(Article.id)
-            .join(Score, Score.article_id == Article.id, isouter=True)
-            .where(
-                Article.status != ArticleStatus.ARCHIVED,
-                Article.status != ArticleStatus.PUBLISHED,
-                Article.status != ArticleStatus.SELECTED_HOURLY,
-                Article.status != ArticleStatus.REJECTED,
-                Article.archived_reason.is_distinct_from("insufficient_content"),
-                Article.content_mode != "summary_only",
-                Score.article_id.is_not(None),
-                Article.created_at >= cutoff,
-            )
-            .order_by(Score.final_score.desc().nullslast(), Article.created_at.desc())
-            .limit(1)
-        )
-        if selected_any_day_ids:
-            q = q.where(Article.id.not_in(list(set(int(x) for x in selected_any_day_ids))))
-        row = session.execute(q).first()
-        return int(row[0]) if row else None
+        selected_set = set(int(x) for x in selected_any_day_ids)
+        windows = [2, 24, 48]
+        for hours in windows:
+            cutoff = datetime.utcnow() - timedelta(hours=hours)
+            rows = session.execute(
+                select(Article, Score)
+                .join(Score, Score.article_id == Article.id, isouter=False)
+                .where(
+                    Article.created_at >= cutoff,
+                    Article.status != ArticleStatus.PUBLISHED,
+                    Article.status != ArticleStatus.SELECTED_HOURLY,
+                    Article.status != ArticleStatus.REJECTED,
+                    Article.status != ArticleStatus.DOUBLE,
+                )
+                .order_by(Score.final_score.desc().nullslast(), Article.created_at.desc())
+                .limit(200)
+            ).all()
+            for article, score in rows:
+                if int(article.id) in selected_set:
+                    continue
+                eligible, _ = article_is_selection_eligible(article, score, mode="review")
+                if eligible:
+                    return int(article.id)
+        return None
 
 
 def _pick_best_recent_ml_article_id() -> int | None:
@@ -785,28 +786,28 @@ def _pick_best_recent_ml_article_id() -> int | None:
     Picks the strongest recent article by ML confidence, then score, then recency.
     """
     with session_scope() as session:
-        q = (
-            select(Article.id)
-            .join(Score, Score.article_id == Article.id, isouter=True)
+        rows = session.execute(
+            select(Article, Score)
+            .join(Score, Score.article_id == Article.id, isouter=False)
             .where(
                 Article.status != ArticleStatus.PUBLISHED,
-                Article.status != ArticleStatus.ARCHIVED,
                 Article.status != ArticleStatus.REJECTED,
                 Article.status != ArticleStatus.DOUBLE,
-                Article.archived_reason.is_distinct_from("insufficient_content"),
-                Article.content_mode != "summary_only",
-                Score.article_id.is_not(None),
                 Article.ml_recommendation_confidence.is_not(None),
+                Article.created_at >= (datetime.utcnow() - timedelta(hours=48)),
             )
             .order_by(
                 Article.ml_recommendation_confidence.desc().nullslast(),
                 Score.final_score.desc().nullslast(),
                 Article.created_at.desc(),
             )
-            .limit(1)
-        )
-        row = session.execute(q).first()
-        return int(row[0]) if row else None
+            .limit(200)
+        ).all()
+        for article, score in rows:
+            eligible, _ = article_is_selection_eligible(article, score, mode="review")
+            if eligible:
+                return int(article.id)
+        return None
 
 
 def send_best_unsorted_for_review(chat_id: str | None = None) -> dict:

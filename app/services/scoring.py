@@ -100,6 +100,21 @@ RESEARCH_HEAVY_SOURCES = {
     "arxiv cs.ai",
 }
 
+STRONG_EDITORIAL_SOURCES = {
+    "habr ai/ml news",
+    "habr ai/ml articles",
+    "venturebeat ai",
+    "the verge ai",
+    "business insider",
+    "openai index",
+    "openai news",
+    "anthropic news",
+    "google ai blog",
+    "google deepmind blog",
+    "google workspace updates",
+    "nvidia blog",
+}
+
 BLOOMBERG_HYPE_TITLE_KEYWORDS = {
     "launch",
     "release",
@@ -152,6 +167,91 @@ GEEK_HEAVY_KEYWORDS = {
     "tokenization",
     "loss function",
     "hyperparameter",
+}
+
+PLATFORM_SHUTDOWN_KEYWORDS = {
+    "shut down",
+    "shuts down",
+    "shutdown",
+    "sunset",
+    "sunsetting",
+    "scrap",
+    "scrapping",
+    "kill",
+    "killing",
+    "discontinue",
+    "deprecated",
+    "closing",
+    "close app",
+    "ending support",
+    "remove sora",
+}
+
+MAJOR_RELEASE_KEYWORDS = {
+    "launch",
+    "launched",
+    "release",
+    "released",
+    "rollout",
+    "rolling out",
+    "available now",
+    "public beta",
+    "preview",
+    "research preview",
+    "new model",
+    "new version",
+    "can now",
+    "now available",
+}
+
+STRATEGIC_PIVOT_KEYWORDS = {
+    "pivot",
+    "strategy",
+    "strategic shift",
+    "compute",
+    "reallocate",
+    "focus on",
+    "chase bigger goals",
+    "moves away from",
+}
+
+CREATOR_TOOL_KEYWORDS = {
+    "video",
+    "image",
+    "music",
+    "audio",
+    "design",
+    "prototype",
+    "avatar",
+    "creator",
+    "content",
+    "editing",
+    "workflow",
+}
+
+CONSUMER_FEATURE_KEYWORDS = {
+    "ios",
+    "android",
+    "browser",
+    "app store",
+    "weather",
+    "voice",
+    "desktop",
+    "mac",
+    "mobile",
+}
+
+BUSINESS_WORKFLOW_KEYWORDS = {
+    "workspace",
+    "docs",
+    "sheets",
+    "slides",
+    "automation",
+    "assistant",
+    "business",
+    "teams",
+    "office",
+    "workflow",
 }
 
 PERSONNEL_MOVE_KEYWORDS = {
@@ -428,6 +528,12 @@ def _llm_semantic_features(article: Article, source_name: str) -> dict:
     technical_hits = sum(1 for k in GEEK_HEAVY_KEYWORDS if k in text)
     hot_hits = sum(1 for k in ["today", "now", "launches", "released", "announced", "unveils", "new"] if k in text)
     company_hits = sum(1 for k in ["openai", "anthropic", "google", "meta", "microsoft", "nvidia", "shopify", "amazon"] if k in text)
+    shutdown_hits = sum(1 for k in PLATFORM_SHUTDOWN_KEYWORDS if k in text)
+    major_release_hits = sum(1 for k in MAJOR_RELEASE_KEYWORDS if k in text)
+    strategic_pivot_hits = sum(1 for k in STRATEGIC_PIVOT_KEYWORDS if k in text)
+    creator_tool_hits = sum(1 for k in CREATOR_TOOL_KEYWORDS if k in text)
+    consumer_feature_hits = sum(1 for k in CONSUMER_FEATURE_KEYWORDS if k in text)
+    business_workflow_hits = sum(1 for k in BUSINESS_WORKFLOW_KEYWORDS if k in text)
 
     domain = "business_it"
     if funding_hits > max(tool_hits, practical_hits) and funding_hits >= 1:
@@ -439,7 +545,13 @@ def _llm_semantic_features(article: Article, source_name: str) -> dict:
     elif scandal_hits >= 1:
         domain = "policy"
 
-    if funding_hits >= 1:
+    if shutdown_hits >= 1:
+        event_type = "platform_shutdown"
+    elif strategic_pivot_hits >= 1 and company_hits >= 1:
+        event_type = "strategic_pivot"
+    elif major_release_hits >= 1 and company_hits >= 1:
+        event_type = "major_release"
+    elif funding_hits >= 1:
         event_type = "funding_round"
     elif tool_hits >= 1 and hot_hits >= 1:
         event_type = "product_iteration"
@@ -457,13 +569,24 @@ def _llm_semantic_features(article: Article, source_name: str) -> dict:
     scale = 4.0 + min(2.0, 0.3 * company_hits) + min(1.0, 0.35 * infra_hits)
     business_it = 5.0 + min(2.5, 0.8 * tool_hits) + min(2.0, 0.7 * practical_hits) - min(2.0, 0.8 * funding_hits) - min(2.0, 0.8 * infra_hits) - min(2.0, 0.8 * technical_hits) - min(1.5, 0.7 * layoff_hits) - min(1.0, 0.5 * scandal_hits)
 
+    significance += min(2.4, 0.9 * shutdown_hits) + min(1.8, 0.7 * strategic_pivot_hits) + min(1.8, 0.6 * major_release_hits)
+    virality += min(2.0, 0.8 * shutdown_hits) + min(1.4, 0.5 * strategic_pivot_hits) + min(1.4, 0.5 * major_release_hits)
+    longevity += min(1.8, 0.5 * strategic_pivot_hits) + min(1.2, 0.4 * shutdown_hits)
+    business_it += min(1.2, 0.3 * creator_tool_hits) + min(1.2, 0.3 * consumer_feature_hits) + min(1.5, 0.35 * business_workflow_hits)
+
     novelty_base = 0.38 + min(0.18, 0.04 * hot_hits) + (0.10 if tool_hits else 0.0) + (0.08 if practical_hits else 0.0)
     novelty_base -= min(0.10, 0.04 * funding_hits)
     novelty_base -= min(0.10, 0.04 * infra_hits)
     band = EVENT_NOVELTY_BANDS.get(event_type, (0.2, 0.6))
     novelty_score = _clip01(max(band[0], min(band[1], novelty_base)))
 
-    if tool_hits and practical_hits:
+    if shutdown_hits:
+        novelty_reason = "Крупный shutdown или sunset продукта: сильный сигнал для рынка и бизнеса."
+    elif strategic_pivot_hits:
+        novelty_reason = "Стратегический поворот крупной AI-компании: это влияет на рынок и roadmap отрасли."
+    elif major_release_hits and (creator_tool_hits or consumer_feature_hits or business_workflow_hits):
+        novelty_reason = "Крупный релиз с понятным сценарием использования для широкой аудитории или бизнеса."
+    elif tool_hits and practical_hits:
         novelty_reason = "New practical AI tool or workflow with clear business use."
     elif funding_hits:
         novelty_reason = "Mostly funding/investment news with limited practical value."
@@ -476,6 +599,22 @@ def _llm_semantic_features(article: Article, source_name: str) -> dict:
     else:
         novelty_reason = "Heuristic semantic estimate from article text."
 
+    importance_classes: list[str] = []
+    if major_release_hits:
+        importance_classes.append("major_release")
+    if shutdown_hits:
+        importance_classes.append("platform_shutdown")
+    if strategic_pivot_hits:
+        importance_classes.append("strategic_pivot")
+    if company_hits or source_low in STRONG_EDITORIAL_SOURCES:
+        importance_classes.append("industry_radar")
+    if creator_tool_hits:
+        importance_classes.append("creator_tool")
+    if consumer_feature_hits:
+        importance_classes.append("consumer_feature")
+    if business_workflow_hits:
+        importance_classes.append("business_workflow")
+
     return {
         "significance": _clip10(significance),
         "relevance": _clip10(relevance),
@@ -487,6 +626,7 @@ def _llm_semantic_features(article: Article, source_name: str) -> dict:
         "event_type": event_type,
         "novelty_score": novelty_score,
         "novelty_reason": novelty_reason,
+        "importance_classes": importance_classes,
     }
 
 
@@ -506,6 +646,12 @@ def _human_reason_from_features(content_type: str, risk_flags: list[str], practi
         return "Это в основном новость про инвестиции и оценку компании, а не про практическую пользу."
     if "infra_noise" in flags:
         return "Это история про чипы, дата-центры или инфраструктуру, а не про понятный прикладной инструмент."
+    if "platform_shutdown" in flags:
+        return "Закрытие крупного AI-продукта: это сильный сигнал для индустрии, бизнеса и массового рынка."
+    if "strategic_pivot" in flags:
+        return "Стратегический поворот крупной AI-компании: это влияет на рынок, продукты и дальнейший roadmap."
+    if "major_release" in flags:
+        return "Крупный релиз или новая возможность платформы: важно и для рынка, и для практического использования."
     if content_type == "tool":
         return "Новый инструмент с понятным сценарием применения и быстрой пользой."
     if content_type == "playbook":
@@ -517,6 +663,145 @@ def _human_reason_from_features(content_type: str, risk_flags: list[str], practi
     if practical_value >= 0.7 and audience_fit >= 0.7 and actionability >= 0.6:
         return "Практичная новость с понятной пользой для бизнеса и массовой аудитории."
     return "Слабая практическая ценность: неочевидно, зачем это массовой аудитории или малому бизнесу."
+
+
+def _source_name(article: Article) -> str:
+    try:
+        return str(article.source.name or "").strip().lower()
+    except Exception:
+        return ""
+
+
+def _is_strong_editorial_source(source_name: str | None) -> bool:
+    name = str(source_name or "").strip().lower()
+    if not name:
+        return False
+    return name in STRONG_EDITORIAL_SOURCES or any(
+        marker in name
+        for marker in (
+            "openai",
+            "anthropic",
+            "google",
+            "deepmind",
+            "business insider",
+            "the verge",
+            "venturebeat",
+            "nvidia",
+        )
+    )
+
+
+def _importance_classes(article: Article, semantic: dict | None = None, source_name: str | None = None) -> set[str]:
+    classes = set()
+    if isinstance(semantic, dict):
+        classes.update(str(x).strip().lower() for x in (semantic.get("importance_classes") or []) if str(x).strip())
+        event_type = str(semantic.get("event_type") or "").strip().lower()
+        if event_type:
+            classes.add(event_type)
+    text = f"{article.title or ''} {article.subtitle or ''} {(article.text or '')[:2500]}".lower()
+    if any(k in text for k in PLATFORM_SHUTDOWN_KEYWORDS):
+        classes.add("platform_shutdown")
+    if any(k in text for k in MAJOR_RELEASE_KEYWORDS):
+        classes.add("major_release")
+    if any(k in text for k in STRATEGIC_PIVOT_KEYWORDS):
+        classes.add("strategic_pivot")
+    if any(k in text for k in CREATOR_TOOL_KEYWORDS):
+        classes.add("creator_tool")
+    if any(k in text for k in CONSUMER_FEATURE_KEYWORDS):
+        classes.add("consumer_feature")
+    if any(k in text for k in BUSINESS_WORKFLOW_KEYWORDS):
+        classes.add("business_workflow")
+    if _is_strong_editorial_source(source_name or _source_name(article)):
+        classes.add("industry_radar")
+    return classes
+
+
+def _should_review_fallback_for_content(article: Article, source_name: str | None = None) -> bool:
+    source_low = str(source_name or _source_name(article) or "").strip().lower()
+    classes = _importance_classes(article, None, source_low)
+    if str(article.content_mode or "").strip().lower() == "full" and _is_strong_editorial_source(source_low):
+        return True
+    return bool(classes & {"platform_shutdown", "major_release", "strategic_pivot", "industry_radar"})
+
+
+def _normalize_article_invariants(article: Article) -> bool:
+    changed = False
+    active_statuses = {
+        ArticleStatus.NEW,
+        ArticleStatus.INBOX,
+        ArticleStatus.REVIEW,
+        ArticleStatus.SCORED,
+        ArticleStatus.SELECTED_HOURLY,
+        ArticleStatus.READY,
+    }
+    if article.status in active_statuses:
+        if article.archived_kind is not None:
+            article.archived_kind = None
+            changed = True
+        if article.archived_reason is not None:
+            article.archived_reason = None
+            changed = True
+        if article.archived_at is not None:
+            article.archived_at = None
+            changed = True
+    if article.status == ArticleStatus.PUBLISHED:
+        if article.scheduled_publish_at is not None:
+            article.scheduled_publish_at = None
+            changed = True
+        if article.archived_kind is not None:
+            article.archived_kind = None
+            changed = True
+        if article.archived_reason is not None:
+            article.archived_reason = None
+            changed = True
+        if article.archived_at is not None:
+            article.archived_at = None
+            changed = True
+    return changed
+
+
+def _mark_article_archived(article: Article, reason: str) -> None:
+    article.status = ArticleStatus.ARCHIVED
+    article.archived_kind = "filter"
+    article.archived_reason = reason
+    article.archived_at = datetime.utcnow()
+    article.updated_at = datetime.utcnow()
+
+
+def _mark_article_review_fallback(article: Article, reason: str = "review_fallback_content") -> None:
+    article.status = ArticleStatus.REVIEW
+    article.archived_kind = None
+    article.archived_reason = None
+    article.archived_at = None
+    article.updated_at = datetime.utcnow()
+    if not (article.short_hook or "").strip():
+        article.short_hook = reason[:260]
+
+
+def article_is_selection_eligible(article: Article, score: Score | None, *, mode: str = "auto", source_name: str | None = None) -> tuple[bool, str]:
+    source_low = str(source_name or _source_name(article) or "").strip().lower()
+    mode_l = str(mode or "auto").strip().lower()
+    if article.status in {ArticleStatus.ARCHIVED, ArticleStatus.PUBLISHED, ArticleStatus.REJECTED, ArticleStatus.DOUBLE}:
+        return False, f"status:{article.status}"
+    if article.scheduled_publish_at is not None and mode_l == "auto":
+        return False, "scheduled"
+    if article.archived_reason == "insufficient_content":
+        return False, "insufficient_content"
+    if _is_insufficient_content(article):
+        return False, "insufficient_content"
+    if score is None:
+        return False, "missing_score"
+    if source_low.startswith("hacker news") and mode_l == "auto":
+        return False, "low_priority_source"
+    return True, "ok"
+
+
+def article_quality_gate(article: Article, source_name: str | None = None) -> tuple[str, str]:
+    if not _is_insufficient_content(article):
+        return "ok", "ok"
+    if _should_review_fallback_for_content(article, source_name):
+        return "review_fallback", "insufficient_content_strong_source"
+    return "archive", "insufficient_content"
 
 
 def _title_hype_score(title: str) -> float:
@@ -945,6 +1230,8 @@ def refresh_ml_recommendation_in_session(session, article: Article, score: Score
     actionability = float((features or {}).get("actionability") or 0.0)
     ai_ml_relevance = float((features or {}).get("ai_ml_relevance") or 0.0)
     novelty = float((features or {}).get("novelty_signal") or 0.0)
+    importance_classes = [str(x).strip() for x in list((features or {}).get("importance_classes") or []) if str(x).strip()]
+    tags.extend(importance_classes)
 
     if recommendation == "publish_candidate":
         if practical_value >= 0.70:
@@ -1023,14 +1310,17 @@ def score_article_in_session(session, article: Article, max_rank: int, editor_st
     if article.status in {ArticleStatus.ARCHIVED, ArticleStatus.DOUBLE}:
         return {"ok": False, "error": f"article_not_scorable: status={article.status}"}
 
-    # Hard content gate: too little content for reliable scoring/review.
-    if _is_insufficient_content(article):
-        article.status = ArticleStatus.ARCHIVED
-        article.archived_kind = "filter"
-        article.archived_reason = "insufficient_content"
-        article.archived_at = datetime.utcnow()
-        article.updated_at = datetime.utcnow()
-        return {"ok": True, "article_id": article.id, "archived": True, "reason": "insufficient_content"}
+    _normalize_article_invariants(article)
+    source = session.get(Source, article.source_id)
+    source_name = source.name if source else ""
+
+    quality_action, quality_reason = article_quality_gate(article, source_name)
+    if quality_action == "review_fallback":
+        _mark_article_review_fallback(article, quality_reason)
+        return {"ok": True, "article_id": article.id, "review_fallback": True, "reason": quality_reason}
+    if quality_action == "archive":
+        _mark_article_archived(article, quality_reason)
+        return {"ok": True, "article_id": article.id, "archived": True, "reason": quality_reason}
 
     # Hard topical gate: if article is not about AI, archive it immediately.
     if not passes_ai_topic_filter(
@@ -1061,14 +1351,9 @@ def score_article_in_session(session, article: Article, max_rank: int, editor_st
         article.ml_model_version = None
         article.ml_recommendation_reason = "topical_gate_failed: non_ai"
         article.ml_recommendation_at = datetime.utcnow()
-        article.status = ArticleStatus.ARCHIVED
-        article.archived_kind = "filter"
-        article.archived_reason = "non_ai"
-        article.archived_at = datetime.utcnow()
-        article.updated_at = datetime.utcnow()
+        _mark_article_archived(article, "non_ai")
         return {"ok": True, "article_id": article.id, "archived": True, "reason": "non_ai"}
 
-    source = session.get(Source, article.source_id)
     rank = int(source.priority_rank if source else max_rank)
 
     freshness = _freshness(article.published_at)
@@ -1166,6 +1451,7 @@ def score_article_in_session(session, article: Article, max_rank: int, editor_st
         "geek_penalty": geek_penalty,
         "domain": semantic.get("domain"),
         "event_type": semantic["event_type"],
+        "importance_classes": list(semantic.get("importance_classes") or []),
         "novelty_reason": semantic["novelty_reason"],
         "content_type": content_type,
         "risk_flags": risk_flags,
@@ -1183,83 +1469,51 @@ def score_article_in_session(session, article: Article, max_rank: int, editor_st
     score.uncertainty = round(uncertainty, 6)
 
     if float(semantic["relevance"]) < get_runtime_float("min_relevance_for_content", default=7.0):
-        article.status = ArticleStatus.ARCHIVED
-        article.archived_kind = "filter"
-        article.archived_reason = "low_relevance"
-        article.archived_at = datetime.utcnow()
+        _mark_article_archived(article, "low_relevance")
     elif _is_personnel_move_low_value(article, semantic):
-        article.status = ArticleStatus.ARCHIVED
-        article.archived_kind = "filter"
-        article.archived_reason = "personnel_move_gate"
-        article.archived_at = datetime.utcnow()
+        _mark_article_archived(article, "personnel_move_gate")
         score.reasoning = f"{score.reasoning} | personnel_move_gate=failed"
         score.features = {**(score.features or {}), "personnel_move_gate": "failed"}
     elif _is_low_local_practical_value(article, semantic):
-        article.status = ArticleStatus.ARCHIVED
-        article.archived_kind = "filter"
-        article.archived_reason = "local_practical_gate"
-        article.archived_at = datetime.utcnow()
+        _mark_article_archived(article, "local_practical_gate")
         score.reasoning = f"{score.reasoning} | local_practical_gate=failed"
         score.features = {**(score.features or {}), "local_practical_gate": "failed"}
     elif _is_summary_and_boring(article, semantic):
-        article.status = ArticleStatus.ARCHIVED
-        article.archived_kind = "filter"
-        article.archived_reason = "summary_boring_gate"
-        article.archived_at = datetime.utcnow()
+        _mark_article_archived(article, "summary_boring_gate")
         score.reasoning = f"{score.reasoning} | summary_boring_gate=failed"
         score.features = {**(score.features or {}), "summary_boring_gate": "failed"}
     elif _is_bloomberg_low_hype(article, semantic, source.name if source else None):
-        article.status = ArticleStatus.ARCHIVED
-        article.archived_kind = "filter"
-        article.archived_reason = "bloomberg_hype_gate"
-        article.archived_at = datetime.utcnow()
+        _mark_article_archived(article, "bloomberg_hype_gate")
         score.reasoning = f"{score.reasoning} | bloomberg_hype_gate=failed"
         score.features = {**(score.features or {}), "bloomberg_hype_gate": "failed"}
     elif _is_too_technical(article, semantic, source.name if source else None):
-        article.status = ArticleStatus.ARCHIVED
-        article.archived_kind = "filter"
-        article.archived_reason = "technical_gate"
-        article.archived_at = datetime.utcnow()
+        _mark_article_archived(article, "technical_gate")
         score.reasoning = f"{score.reasoning} | technical_gate=failed"
         score.features = {**(score.features or {}), "technical_gate": "failed"}
     elif _is_too_deep_technical(article, semantic, source.name if source else None):
-        article.status = ArticleStatus.ARCHIVED
-        article.archived_kind = "filter"
-        article.archived_reason = "deep_technical_gate"
-        article.archived_at = datetime.utcnow()
+        _mark_article_archived(article, "deep_technical_gate")
         score.reasoning = f"{score.reasoning} | deep_technical_gate=failed"
         score.features = {**(score.features or {}), "deep_technical_gate": "failed"}
     elif _is_too_geek_for_mass(article, semantic, source.name if source else None):
-        article.status = ArticleStatus.ARCHIVED
-        article.archived_kind = "filter"
-        article.archived_reason = "geek_gate"
-        article.archived_at = datetime.utcnow()
+        _mark_article_archived(article, "geek_gate")
         score.reasoning = f"{score.reasoning} | geek_gate=failed"
         score.features = {**(score.features or {}), "geek_gate": "failed"}
     elif _is_too_investing(semantic):
-        article.status = ArticleStatus.ARCHIVED
-        article.archived_kind = "filter"
-        article.archived_reason = "investing_gate"
-        article.archived_at = datetime.utcnow()
+        _mark_article_archived(article, "investing_gate")
         score.reasoning = f"{score.reasoning} | investing_gate=failed"
         score.features = {**(score.features or {}), "investing_gate": "failed"}
     elif _is_low_mass_audience(semantic, source.name if source else None, article):
-        article.status = ArticleStatus.ARCHIVED
-        article.archived_kind = "filter"
-        article.archived_reason = "mass_audience_gate"
-        article.archived_at = datetime.utcnow()
+        _mark_article_archived(article, "mass_audience_gate")
         score.reasoning = f"{score.reasoning} | mass_audience_gate=failed"
         score.features = {**(score.features or {}), "mass_audience_gate": "failed"}
     elif _fails_editor_style_gate(style_score, style_hits, semantic):
-        article.status = ArticleStatus.ARCHIVED
-        article.archived_kind = "filter"
-        article.archived_reason = "editor_style_gate"
-        article.archived_at = datetime.utcnow()
+        _mark_article_archived(article, "editor_style_gate")
         score.reasoning = f"{score.reasoning} | editor_style_gate=failed"
         score.features = {**(score.features or {}), "editor_style_gate": "failed"}
     else:
         article.status = ArticleStatus.REVIEW if (0.45 < p < 0.60) else ArticleStatus.SCORED
     article.updated_at = datetime.utcnow()
+    _normalize_article_invariants(article)
 
     # Fast RU preview (title + one-line overview) for the article list.
     # This is intentionally cheaper than Generate Post and helps browsing.
@@ -1357,6 +1611,7 @@ def run_scoring(limit: int = 300, progress_cb=None, ru_progress_cb=None) -> int:
                 if progress_cb:
                     progress_cb(processed, total)
                 continue
+            _normalize_article_invariants(article)
             score_article_in_session(session, article, max_rank=max_rank, editor_style_profile=editor_style_profile)
             processed += 1
             if progress_cb:
@@ -1476,12 +1731,12 @@ def prune_bad_articles(limit: int = 50000, archive_summary_only: bool = True, ar
             if article.scheduled_publish_at is not None:
                 continue
 
-            if archive_summary_only and _is_insufficient_content(article):
-                article.status = ArticleStatus.ARCHIVED
-                article.archived_kind = "filter"
-                article.archived_reason = "insufficient_content"
-                article.archived_at = datetime.utcnow()
-                article.updated_at = datetime.utcnow()
+            quality_action, quality_reason = article_quality_gate(article)
+            if archive_summary_only and quality_action == "review_fallback":
+                _mark_article_review_fallback(article, quality_reason)
+                continue
+            if archive_summary_only and quality_action == "archive":
+                _mark_article_archived(article, quality_reason)
                 counts["archived"] += 1
                 counts["summary_only"] += 1
                 continue
@@ -1699,6 +1954,7 @@ def reclassify_all_articles(
             if not article:
                 continue
             scanned += 1
+            _normalize_article_invariants(article)
 
             # Explicitly scheduled posts must never be re-archived by background
             # reclassification. If an older bug already archived such a post,
@@ -1710,9 +1966,7 @@ def reclassify_all_articles(
                     and article.id not in deleted_by_editor_ids
                 ):
                     article.status = ArticleStatus.READY
-                    article.archived_kind = None
-                    article.archived_reason = None
-                    article.archived_at = None
+                    _normalize_article_invariants(article)
                     article.updated_at = datetime.utcnow()
                     restored += 1
                 else:
@@ -1736,13 +1990,27 @@ def reclassify_all_articles(
 
             score = session.get(Score, article.id)
             if score is None:
-                # No score -> keep active for later explicit scoring.
-                if article.status == ArticleStatus.ARCHIVED and include_archived:
-                    article.status = ArticleStatus.INBOX
-                    article.updated_at = datetime.utcnow()
-                    restored += 1
+                quality_action, quality_reason = article_quality_gate(article)
+                if quality_action == "archive":
+                    if article.status != ArticleStatus.ARCHIVED:
+                        _mark_article_archived(article, quality_reason)
+                        archived += 1
+                    else:
+                        unchanged += 1
                 else:
-                    unchanged += 1
+                    target_status = ArticleStatus.REVIEW if quality_action == "review_fallback" else ArticleStatus.INBOX
+                    if article.status == ArticleStatus.ARCHIVED and include_archived:
+                        article.status = target_status
+                        _normalize_article_invariants(article)
+                        article.updated_at = datetime.utcnow()
+                        restored += 1
+                    elif article.status != target_status and article.status != ArticleStatus.SELECTED_HOURLY:
+                        article.status = target_status
+                        _normalize_article_invariants(article)
+                        article.updated_at = datetime.utcnow()
+                        restored += 1
+                    else:
+                        unchanged += 1
                 scored_missing += 1
                 continue
 
@@ -1771,14 +2039,14 @@ def reclassify_all_articles(
 
             if should_archive:
                 if article.status != ArticleStatus.ARCHIVED:
-                    article.status = ArticleStatus.ARCHIVED
-                    article.updated_at = datetime.utcnow()
+                    _mark_article_archived(article, str(article.archived_reason or "policy_gate"))
                     archived += 1
                 else:
                     unchanged += 1
             else:
                 if article.status == ArticleStatus.ARCHIVED and include_archived and article.id not in deleted_by_editor_ids:
                     article.status = ArticleStatus.SCORED
+                    _normalize_article_invariants(article)
                     article.updated_at = datetime.utcnow()
                     restored += 1
                 else:

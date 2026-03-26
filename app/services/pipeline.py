@@ -21,7 +21,7 @@ from app.services.preference import (
     predict_editor_choice_prob,
     save_selection_decision,
 )
-from app.services.scoring import run_scoring
+from app.services.scoring import article_is_selection_eligible, run_scoring
 from app.services.telegram_context import telegram_timezone_name
 from app.services.runtime_settings import get_runtime_str
 from app.services.runtime_settings import get_runtime_csv_list, get_runtime_float
@@ -227,9 +227,9 @@ def _title_fallback_key(article: Article) -> str:
     return f"{src}|{' '.join(tokens)}"
 
 
-def _is_incomplete_candidate(article: Article) -> bool:
-    mode = str(article.content_mode or "").strip().lower()
-    if mode == "summary_only":
+def _is_incomplete_candidate(article: Article, score: Score | None = None, *, mode: str = "auto") -> bool:
+    content_mode = str(article.content_mode or "").strip().lower()
+    if content_mode == "summary_only":
         return True
     text = str(article.text or "").strip()
     subtitle = str(article.subtitle or "").strip()
@@ -254,6 +254,10 @@ def _is_incomplete_candidate(article: Article) -> bool:
             return True
     if len(text) < 220 and len(subtitle) < 60:
         return True
+    if score is not None:
+        eligible, _ = article_is_selection_eligible(article, score, mode=mode, source_name=source_name)
+        if not eligible:
+            return True
     return False
 
 
@@ -265,7 +269,7 @@ def _hourly_candidates(limit: int = 50, hours_window: int = 1) -> list[tuple[Art
     window_hours = max(1, int(hours_window or 1))
     primary_start = bucket_end - timedelta(hours=window_hours)
     day_ago = now - timedelta(hours=24)
-    three_days_ago = now - timedelta(days=3)
+    two_days_ago = now - timedelta(hours=48)
 
     with session_scope() as session:
         selected_clusters = set(
@@ -313,18 +317,15 @@ def _hourly_candidates(limit: int = 50, hours_window: int = 1) -> list[tuple[Art
             rows = session.execute(
                 base.where((Article.created_at >= day_ago) | (Article.published_at >= day_ago))
             ).all()
-        # Fallback 2: low-news mode, search last 3 days.
+        # Fallback 2: low-news mode, search last 48h.
         if not rows:
             rows = session.execute(
-                base.where((Article.created_at >= three_days_ago) | (Article.published_at >= three_days_ago))
+                base.where((Article.created_at >= two_days_ago) | (Article.published_at >= two_days_ago))
             ).all()
-        # Fallback 3: if still empty, use best available scored/review/ready items.
-        if not rows:
-            rows = session.execute(base).all()
 
     filtered = []
     for a, s in rows:
-        if _is_incomplete_candidate(a):
+        if _is_incomplete_candidate(a, s, mode="auto"):
             continue
         if a.cluster_key and a.cluster_key in selected_clusters:
             continue
@@ -580,7 +581,11 @@ def pick_hourly_backfill(hours_back: int = 24, per_hour: int = 1) -> dict:
                 continue
 
         # Filter by cluster_key dedup against existing selections/publishes.
-        filtered = [(a, s) for a, s in rows if (a.cluster_key not in selected_clusters)]
+        filtered = [
+            (a, s)
+            for a, s in rows
+            if (a.cluster_key not in selected_clusters) and not _is_incomplete_candidate(a, s, mode="auto")
+        ]
         if not filtered:
             missing_buckets.append(bucket_start)
             continue
@@ -633,7 +638,11 @@ def pick_hourly_backfill(hours_back: int = 24, per_hour: int = 1) -> dict:
                 .order_by(Score.final_score.desc())
                 .limit(500)
             ).all()
-        pool = [(a, s) for a, s in rows2 if (a.cluster_key not in selected_clusters)]
+        pool = [
+            (a, s)
+            for a, s in rows2
+            if (a.cluster_key not in selected_clusters) and not _is_incomplete_candidate(a, s, mode="auto")
+        ]
         pool.sort(key=lambda x: _audience_adjusted_score(x[0], x[1]), reverse=True)
 
         # Fill oldest missing buckets first.
