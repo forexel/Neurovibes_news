@@ -517,7 +517,10 @@ def _cluster_stats(session, article: Article) -> tuple[float, float, float, bool
 
 def _llm_semantic_features(article: Article, source_name: str) -> dict:
     text = f"{article.title or ''} {article.subtitle or ''} {(article.text or '')[:5000]}".lower()
+    title_low = str(article.title or "").strip().lower()
     source_low = (source_name or "").strip().lower()
+    is_hn_source = "hacker news" in source_low
+    is_hn_self_post = is_hn_source and (title_low.startswith("show hn:") or title_low.startswith("ask hn:"))
 
     tool_hits = sum(1 for k in ["tool", "assistant", "copilot", "plugin", "api", "sdk", "agent", "integration"] if k in text)
     practical_hits = sum(1 for k in ["workflow", "automation", "use case", "how to", "guide", "template", "small business"] if k in text)
@@ -545,7 +548,9 @@ def _llm_semantic_features(article: Article, source_name: str) -> dict:
     elif scandal_hits >= 1:
         domain = "policy"
 
-    if shutdown_hits >= 1:
+    if is_hn_self_post:
+        event_type = "product_iteration" if (tool_hits >= 1 and hot_hits >= 1) else "incremental_update"
+    elif shutdown_hits >= 1:
         event_type = "platform_shutdown"
     elif strategic_pivot_hits >= 1 and company_hits >= 1:
         event_type = "strategic_pivot"
@@ -600,13 +605,13 @@ def _llm_semantic_features(article: Article, source_name: str) -> dict:
         novelty_reason = "Heuristic semantic estimate from article text."
 
     importance_classes: list[str] = []
-    if major_release_hits:
+    if major_release_hits and not is_hn_self_post:
         importance_classes.append("major_release")
-    if shutdown_hits:
+    if shutdown_hits and not is_hn_self_post:
         importance_classes.append("platform_shutdown")
-    if strategic_pivot_hits:
+    if strategic_pivot_hits and not is_hn_self_post:
         importance_classes.append("strategic_pivot")
-    if company_hits or source_low in STRONG_EDITORIAL_SOURCES:
+    if source_low in STRONG_EDITORIAL_SOURCES or (company_hits and not is_hn_self_post):
         importance_classes.append("industry_radar")
     if creator_tool_hits:
         importance_classes.append("creator_tool")
@@ -1395,6 +1400,24 @@ def score_article_in_session(session, article: Article, max_rank: int, editor_st
     content_type = str(getattr(enrichment, "content_type", None) or "other").strip().lower()
     content_type_bonus = float(CONTENT_TYPE_BONUS.get(content_type, 0.0))
 
+    importance_classes = set(str(x).strip().lower() for x in (semantic.get("importance_classes") or []) if str(x).strip())
+    importance_bonus = 0.0
+    if "platform_shutdown" in importance_classes:
+        importance_bonus += 0.12
+    if "major_release" in importance_classes:
+        importance_bonus += 0.09
+    if "strategic_pivot" in importance_classes:
+        importance_bonus += 0.08
+    if "industry_radar" in importance_classes:
+        importance_bonus += 0.07
+    if "creator_tool" in importance_classes:
+        importance_bonus += 0.07
+    if "consumer_feature" in importance_classes:
+        importance_bonus += 0.06
+    if "business_workflow" in importance_classes:
+        importance_bonus += 0.05
+    importance_bonus = min(0.22, importance_bonus)
+
     features = {
         "freshness": freshness,
         "source_priority": source_priority,
@@ -1415,6 +1438,7 @@ def score_article_in_session(session, article: Article, max_rank: int, editor_st
         "actionability": actionability,
         "risk_penalty": risk_penalty,
         "content_type_bonus": content_type_bonus,
+        "importance_bonus": importance_bonus,
     }
 
     contributions = {
@@ -1426,6 +1450,7 @@ def score_article_in_session(session, article: Article, max_rank: int, editor_st
         "source_priority": round(source_priority * 0.10, 6),
         "risk_penalty": round(risk_penalty * -0.15, 6),
         "content_type_bonus": round(content_type_bonus, 6),
+        "importance_bonus": round(importance_bonus, 6),
     }
     final_linear = float(sum(contributions.values()))
     geek_penalty = _geek_penalty_factor(article, semantic, source.name if source else None)
