@@ -877,6 +877,11 @@ def _is_personnel_move_low_value(article: Article, semantic: dict) -> bool:
 
 
 def _is_low_local_practical_value(article: Article, semantic: dict) -> bool:
+    if _has_practical_product_override(article, semantic, None):
+        return False
+    classes = _importance_classes(article, semantic, None)
+    if classes & {"industry_radar", "major_release", "platform_shutdown", "strategic_pivot", "consumer_feature", "creator_tool", "business_workflow"}:
+        return False
     text = f"{article.title or ''} {article.subtitle or ''} {(article.text or '')[:1500]}".lower()
     if not any(k in text for k in LOW_LOCAL_SIGNAL_KEYWORDS):
         return False
@@ -894,6 +899,9 @@ def _is_low_local_practical_value(article: Article, semantic: dict) -> bool:
 
 
 def _is_summary_and_boring(article: Article, semantic: dict) -> bool:
+    classes = _importance_classes(article, semantic, None)
+    if classes & {"industry_radar", "major_release", "platform_shutdown", "strategic_pivot"}:
+        return False
     if (article.content_mode or "summary_only") == "full":
         return False
     title_hype = _title_hype_score(article.title or "")
