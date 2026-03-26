@@ -13,7 +13,7 @@ from app.db import session_scope
 from app.models import Article, ArticleStatus, PublishJob, PublishStatus, TelegramReviewJob
 from app.services.content_generation import generate_ru_summary
 from app.services.telegram_http import mask_telegram_error, telegram_api_post
-from app.services.telegram_context import telegram_bot_token, telegram_channel_id, telegram_signature
+from app.services.telegram_context import telegram_bot_token, telegram_channel_id, telegram_signature_html
 
 _MIN_FULL_TEXT_LEN = 500
 _TG_TIMEOUT_SECONDS = 30
@@ -207,7 +207,7 @@ def publish_article(article_id: int, *, manual: bool = True) -> dict:
         title = escape(article.ru_title or "")
         summary = escape(article.ru_summary or "")
         url = escape(article.canonical_url or "")
-        signature = escape(telegram_signature() or settings.telegram_signature or "@neuro_vibes_future")
+        signature = telegram_signature_html()
         caption = (
             f"<b>{title}</b>\n\n"
             f"{summary}\n"

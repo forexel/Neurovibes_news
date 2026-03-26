@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextvars import ContextVar
+from html import escape
 
 from app.core.config import settings
 from sqlalchemy import select
@@ -16,6 +17,15 @@ _review_chat_var: ContextVar[str] = ContextVar("tg_review_chat_id", default="")
 _channel_id_var: ContextVar[str] = ContextVar("tg_channel_id", default="")
 _signature_var: ContextVar[str] = ContextVar("tg_signature", default="")
 _tz_var: ContextVar[str] = ContextVar("tg_timezone_name", default="")
+
+_NEUROVIBES_SIGNATURE_HTML = '👾 <a href="https://t.me/neurovibes">NeuroVibes</a>'
+_NEUROVIBES_SIGNATURE_ALIASES = {
+    "",
+    "@neuro_vibes_future",
+    "@neurovibes",
+    "neurovibes",
+    "👾 neurovibes",
+}
 
 
 def set_telegram_context(*, bot_token: str = "", review_chat_id: str = "", channel_id: str = "", signature: str = "", timezone_name: str = "") -> None:
@@ -78,6 +88,14 @@ def telegram_channel_id() -> str:
 
 def telegram_signature() -> str:
     return (_signature_var.get() or "").strip() or "@neuro_vibes_future"
+
+
+def telegram_signature_html() -> str:
+    raw = (telegram_signature() or "").strip()
+    normalized = raw.lower()
+    if normalized in _NEUROVIBES_SIGNATURE_ALIASES:
+        return _NEUROVIBES_SIGNATURE_HTML
+    return escape(raw)
 
 
 def telegram_timezone_name() -> str:

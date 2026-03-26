@@ -30,7 +30,7 @@ from app.services.telegram_publisher import publish_article
 from app.services.telegram_context import (
     telegram_bot_token,
     telegram_review_chat_id,
-    telegram_signature,
+    telegram_signature_html,
     telegram_timezone_name,
 )
 from app.services.runtime_settings import get_runtime_float, get_runtime_int, get_runtime_str
@@ -437,7 +437,7 @@ def _build_review_text(
     }
     badge = badge_map.get((article.content_type or "").strip().lower(), "")
     url = escape((article.canonical_url or "").strip())
-    signature = escape(telegram_signature() or get_runtime_str("telegram_signature") or settings.telegram_signature or "@neuro_vibes_future")
+    signature = telegram_signature_html()
     source_name = ""
     try:
         source_name = (article.source.name or "").strip()
