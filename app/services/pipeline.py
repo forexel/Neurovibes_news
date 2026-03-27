@@ -429,17 +429,32 @@ def pick_hourly_top(strategy: str | None = None) -> int | None:
             for article, score, ml_score, ml_explain in scored_candidates
             if float(ml_explain.get("confidence") or 0.0) >= min_confidence
         ]
-        top3 = [(article, score) for article, score, _, _ in gated_candidates[:3]]
-        if not top3:
-            return None
-        selected_id = int(top3[0][0].id)
-        top_ml_meta = gated_candidates[0][3]
-        explain = {
-            "mode": "ml",
-            "confidence": top_ml_meta.get("confidence"),
-            "selector_kind": "ml",
-            "model_version": ((top_ml_meta.get("ml_meta") or {}).get("version")),
-        }
+        if gated_candidates:
+            top3 = [(article, score) for article, score, _, _ in gated_candidates[:3]]
+            selected_id = int(top3[0][0].id)
+            top_ml_meta = gated_candidates[0][3]
+            explain = {
+                "mode": "ml",
+                "confidence": top_ml_meta.get("confidence"),
+                "selector_kind": "ml",
+                "model_version": ((top_ml_meta.get("ml_meta") or {}).get("version")),
+            }
+        else:
+            if not scored_candidates:
+                return None
+            # Do not leave the slot empty when we already found the best candidate
+            # across 2h -> 24h -> 48h windows. In low-news periods we accept the top
+            # ML-ranked article even below the strict threshold and annotate the choice.
+            top3 = [(article, score) for article, score, _, _ in scored_candidates[:3]]
+            selected_id = int(top3[0][0].id)
+            fallback_ml_meta = scored_candidates[0][3]
+            explain = {
+                "mode": "ml_fallback_low_confidence",
+                "confidence": fallback_ml_meta.get("confidence"),
+                "selector_kind": "ml",
+                "model_version": ((fallback_ml_meta.get("ml_meta") or {}).get("version")),
+                "min_confidence": min_confidence,
+            }
     else:
         top3 = candidates[:3]
         selected_id, explain = _choose_with_profile(top3, top_n=3)
