@@ -258,7 +258,14 @@ def _run_daily_ml_maintenance_thread(local_day_key: str) -> None:
     _set_worker_kv("worker_daily_ml_started_at_utc", datetime.now(timezone.utc).isoformat())
     try:
         reasons_out = reretag_today_training_event_reasons(limit=50, overwrite=False)
-        editor_out = train_editor_choice_model(days_back=1, min_samples=8)
+        editor_out = train_editor_choice_model(
+            days_back=max(1, get_runtime_int("editor_choice_train_days_back", default=365)),
+            min_samples=max(8, get_runtime_int("editor_choice_train_min_samples", default=20)),
+            clean_only=get_runtime_bool("editor_choice_train_clean_only", default=True),
+            min_reason_len=max(0, get_runtime_int("editor_choice_train_min_reason_len", default=40)),
+            balance_classes=get_runtime_bool("editor_choice_train_balance_classes", default=True),
+            max_rows=max(0, get_runtime_int("editor_choice_train_max_rows", default=300)),
+        )
         cleanup_out = {"ok": True, "enabled": False}
         if get_runtime_bool("daily_cleanup_enabled", default=True):
             cleanup_out = {

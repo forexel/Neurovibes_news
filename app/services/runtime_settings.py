@@ -75,6 +75,12 @@ RUNTIME_DEFAULTS: dict[str, str] = {
     "ml_review_min_confidence": "0.72",
     "ml_recommend_publish_threshold": "0.66",
     "ml_recommend_delete_threshold": "0.28",
+    "editor_choice_train_days_back": "365",
+    "editor_choice_train_min_samples": "20",
+    "editor_choice_train_clean_only": "true",
+    "editor_choice_train_min_reason_len": "40",
+    "editor_choice_train_balance_classes": "true",
+    "editor_choice_train_max_rows": "300",
     # User-vector retrieval ranking (pos - alpha * neg)
     "user_vector_alpha": "0.60",
     "user_vector_window_days": "30",

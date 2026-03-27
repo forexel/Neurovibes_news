@@ -105,8 +105,15 @@ def cmd_trainer(days: int) -> None:
 
 
 def cmd_editor_choice_trainer(days: int) -> None:
-    print(build_editor_choice_dataset(days_back=days))
-    print(train_editor_choice_model(days_back=days))
+    params = {
+        "days_back": max(1, int(days)),
+        "clean_only": True,
+        "min_reason_len": 40,
+        "balance_classes": True,
+        "max_rows": 300,
+    }
+    print(build_editor_choice_dataset(**params))
+    print(train_editor_choice_model(min_samples=20, **params))
 
 
 def cmd_recover_manual_week() -> None:
