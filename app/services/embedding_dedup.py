@@ -126,7 +126,6 @@ def process_embeddings_and_dedup(limit: int = 200) -> int:
                                 ArticleStatus.NEW,
                                 ArticleStatus.INBOX,
                                 ArticleStatus.SCORED,
-                                ArticleStatus.SELECTED_HOURLY,
                                 ArticleStatus.READY,
                             ]
                         ),

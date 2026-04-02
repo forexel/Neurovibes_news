@@ -557,6 +557,39 @@ def _build_review_text(
     return body
 
 
+def _ru_post_is_ready(article: Article | None) -> bool:
+    if not article:
+        return False
+    title = (article.ru_title or "").strip()
+    summary = (article.ru_summary or "").strip()
+    return bool(title and summary and _looks_like_russian(title) and _looks_like_russian(summary))
+
+
+def _ensure_ru_post_ready(article_id: int) -> tuple[bool, str | None]:
+    with session_scope() as session:
+        article = session.get(Article, int(article_id))
+        if _ru_post_is_ready(article):
+            return True, None
+
+    if not settings.allow_online_llm_generation:
+        return False, "ru_generation_disabled"
+
+    try:
+        generated = bool(generate_ru_summary(int(article_id)))
+    except Exception as exc:
+        logger.warning("tg ensure_ru_post_ready_failed article_id=%s error=%s", article_id, str(exc))
+        return False, "generate_ru_summary_failed"
+
+    if not generated:
+        return False, "generate_ru_summary_failed"
+
+    with session_scope() as session:
+        article = session.get(Article, int(article_id))
+        if _ru_post_is_ready(article):
+            return True, None
+    return False, "ru_post_not_ready"
+
+
 def _send_message(chat_id: str, text: str, reply_markup: dict | None = None, force_reply: bool = False) -> dict:
     payload: dict = {"chat_id": chat_id, "text": text[:4096], "parse_mode": "HTML"}
     if reply_markup is not None:
@@ -764,9 +797,9 @@ def _pick_best_unsorted_article_id() -> int | None:
                 .where(
                     Article.created_at >= cutoff,
                     Article.status != ArticleStatus.PUBLISHED,
-                    Article.status != ArticleStatus.SELECTED_HOURLY,
                     Article.status != ArticleStatus.REJECTED,
                     Article.status != ArticleStatus.DOUBLE,
+                    Article.selected_hour_bucket_utc.is_(None),
                 )
                 .order_by(Score.final_score.desc().nullslast(), Article.created_at.desc())
                 .limit(200)
@@ -832,11 +865,9 @@ def send_best_unsorted_for_review(chat_id: str | None = None) -> dict:
         score_article_by_id(int(target_article_id))
     except Exception:
         pass
-    if settings.allow_online_llm_generation:
-        try:
-            generate_ru_summary(int(target_article_id))
-        except Exception:
-            pass
+    ready, ready_error = _ensure_ru_post_ready(int(target_article_id))
+    if not ready:
+        return {"ok": False, "error": ready_error or "ru_post_not_ready", "article_id": int(target_article_id)}
 
     with session_scope() as session:
         article = session.get(Article, int(target_article_id))
@@ -962,8 +993,14 @@ def send_hourly_top_for_review(article_id: int | None = None, force: bool = Fals
         if article_id is None:
             article = session.scalars(
                 select(Article)
-                .where(Article.status == ArticleStatus.SELECTED_HOURLY)
-                .order_by(Article.updated_at.desc())
+                .where(
+                    Article.selected_hour_bucket_utc.is_not(None),
+                    Article.status != ArticleStatus.PUBLISHED,
+                    Article.status != ArticleStatus.ARCHIVED,
+                    Article.status != ArticleStatus.DOUBLE,
+                    Article.status != ArticleStatus.REJECTED,
+                )
+                .order_by(Article.selected_hour_bucket_utc.desc(), Article.updated_at.desc())
                 .limit(1)
             ).first()
         else:
@@ -989,6 +1026,10 @@ def send_hourly_top_for_review(article_id: int | None = None, force: bool = Fals
             }
 
         target_article_id = article.id
+
+    ready, ready_error = _ensure_ru_post_ready(int(target_article_id))
+    if not ready:
+        return {"ok": False, "error": ready_error or "ru_post_not_ready", "article_id": int(target_article_id)}
 
     with session_scope() as session:
         article = session.get(Article, target_article_id)
@@ -1042,7 +1083,7 @@ def send_selected_backlog_for_review(limit: int = 20) -> dict:
 
     # Priority backlog:
     # 1) Selected Day (DailySelection.active)
-    # 2) Selected Hour (ArticleStatus.SELECTED_HOURLY)
+    # 2) Selected Hour (selected_hour_bucket_utc is not null)
     # This matches the expectation: "send me many messages for previous hours/days".
     with session_scope() as session:
         day_rows = session.scalars(
@@ -1061,13 +1102,13 @@ def send_selected_backlog_for_review(limit: int = 20) -> dict:
         hour_rows = session.scalars(
             select(Article)
             .where(
-                Article.status == ArticleStatus.SELECTED_HOURLY,
+                Article.selected_hour_bucket_utc.is_not(None),
                 Article.status != ArticleStatus.PUBLISHED,
                 Article.status != ArticleStatus.ARCHIVED,
                 Article.status != ArticleStatus.DOUBLE,
                 Article.status != ArticleStatus.REJECTED,
             )
-            .order_by(Article.updated_at.asc())
+            .order_by(Article.selected_hour_bucket_utc.asc(), Article.updated_at.asc())
             .limit(2000)
         ).all()
 
@@ -1090,6 +1131,15 @@ def send_selected_backlog_for_review(limit: int = 20) -> dict:
             if exists is not None:
                 skipped_exists += 1
                 continue
+        ready, ready_error = _ensure_ru_post_ready(target_article_id)
+        if not ready:
+            logger.info(
+                "tg skip_backlog_without_ru article_id=%s error=%s",
+                target_article_id,
+                ready_error or "ru_post_not_ready",
+            )
+            continue
+        with session_scope() as session:
             article = session.get(Article, target_article_id)
             if not article:
                 continue
@@ -1155,7 +1205,6 @@ def send_hourly_backfill_for_review(hours_back: int = 24, limit: int = 24, force
         rows = session.scalars(
             select(Article)
             .where(
-                Article.status == ArticleStatus.SELECTED_HOURLY,
                 Article.selected_hour_bucket_utc.is_not(None),
                 Article.selected_hour_bucket_utc >= cutoff,
                 Article.status != ArticleStatus.PUBLISHED,
@@ -1185,6 +1234,15 @@ def send_hourly_backfill_for_review(hours_back: int = 24, limit: int = 24, force
             if existing_job is not None and not force:
                 skipped_exists += 1
                 continue
+        ready, ready_error = _ensure_ru_post_ready(target_article_id)
+        if not ready:
+            logger.info(
+                "tg skip_hourly_backfill_without_ru article_id=%s error=%s",
+                target_article_id,
+                ready_error or "ru_post_not_ready",
+            )
+            continue
+        with session_scope() as session:
             article = session.get(Article, target_article_id)
             if not article:
                 continue

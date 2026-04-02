@@ -61,7 +61,7 @@ def cmd_pick() -> None:
 
 
 def cmd_prepare(article_id: int | None) -> None:
-    target = article_id or latest_article_by_status(ArticleStatus.SELECTED_HOURLY)
+    target = article_id or latest_article_by_status(ArticleStatus.READY) or latest_article_by_status(ArticleStatus.SCORED)
     if not target:
         print({"ok": False, "error": "no_selected_article"})
         return
@@ -71,7 +71,7 @@ def cmd_prepare(article_id: int | None) -> None:
 
 
 def cmd_publish(article_id: int | None) -> None:
-    target = article_id or latest_article_by_status(ArticleStatus.READY) or latest_article_by_status(ArticleStatus.SELECTED_HOURLY)
+    target = article_id or latest_article_by_status(ArticleStatus.READY) or latest_article_by_status(ArticleStatus.SCORED)
     if not target:
         print({"ok": False, "error": "no_article_to_publish"})
         return

@@ -5,7 +5,7 @@ import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import joinedload
 
 from app.core.config import settings
@@ -276,8 +276,10 @@ def _hourly_candidates(limit: int = 50, hours_window: int = 1) -> list[tuple[Art
             row[0]
             for row in session.execute(
                 select(Article.cluster_key).where(
-                    Article.status.in_([ArticleStatus.SELECTED_HOURLY, ArticleStatus.PUBLISHED]),
-                    Article.updated_at >= day_ago,
+                    or_(
+                        Article.status == ArticleStatus.PUBLISHED,
+                        Article.selected_hour_bucket_utc >= day_ago,
+                    ),
                     Article.cluster_key.is_not(None),
                 )
             ).all()
@@ -285,8 +287,10 @@ def _hourly_candidates(limit: int = 50, hours_window: int = 1) -> list[tuple[Art
         recent_selected_or_published = session.scalars(
             select(Article)
             .where(
-                Article.status.in_([ArticleStatus.SELECTED_HOURLY, ArticleStatus.PUBLISHED]),
-                Article.updated_at >= day_ago,
+                or_(
+                    Article.status == ArticleStatus.PUBLISHED,
+                    Article.selected_hour_bucket_utc >= day_ago,
+                ),
             )
             .options(joinedload(Article.source))
             .limit(1000)
@@ -304,36 +308,35 @@ def _hourly_candidates(limit: int = 50, hours_window: int = 1) -> list[tuple[Art
             .order_by(Score.final_score.desc())
             .limit(limit)
         )
-        rows = session.execute(
+        def _filter_rows(rows: list[tuple[Article, Score]]) -> list[tuple[Article, Score]]:
+            filtered: list[tuple[Article, Score]] = []
+            for a, s in rows:
+                if _is_incomplete_candidate(a, s, mode="auto"):
+                    continue
+                if a.cluster_key and a.cluster_key in selected_clusters:
+                    continue
+                if (not a.cluster_key) and (_title_fallback_key(a) in selected_title_keys):
+                    continue
+                filtered.append((a, s))
+            filtered.sort(key=lambda x: _audience_adjusted_score(x[0], x[1]), reverse=True)
+            return filtered
+
+        window_filters = [
             base.where(
                 ((Article.created_at >= primary_start) & (Article.created_at < bucket_end))
                 | ((Article.published_at >= primary_start) & (Article.published_at < bucket_end))
-            )
-        ).all()
+            ),
+            base.where((Article.created_at >= day_ago) | (Article.published_at >= day_ago)),
+            base.where((Article.created_at >= two_days_ago) | (Article.published_at >= two_days_ago)),
+        ]
 
-        # Fallback: if last-hour window is empty, use last 24h so Selected Hour
-        # still gets a reasonable candidate in low-news periods.
-        if not rows:
-            rows = session.execute(
-                base.where((Article.created_at >= day_ago) | (Article.published_at >= day_ago))
-            ).all()
-        # Fallback 2: low-news mode, search last 48h.
-        if not rows:
-            rows = session.execute(
-                base.where((Article.created_at >= two_days_ago) | (Article.published_at >= two_days_ago))
-            ).all()
+        for query in window_filters:
+            rows = session.execute(query).all()
+            filtered = _filter_rows(rows)
+            if filtered:
+                return filtered
 
-    filtered = []
-    for a, s in rows:
-        if _is_incomplete_candidate(a, s, mode="auto"):
-            continue
-        if a.cluster_key and a.cluster_key in selected_clusters:
-            continue
-        if (not a.cluster_key) and (_title_fallback_key(a) in selected_title_keys):
-            continue
-        filtered.append((a, s))
-    filtered.sort(key=lambda x: _audience_adjusted_score(x[0], x[1]), reverse=True)
-    return filtered
+    return []
 
 
 def _choose_with_profile(candidates: list[tuple[Article, Score]], top_n: int = 3) -> tuple[int, dict]:
@@ -464,7 +467,8 @@ def pick_hourly_top(strategy: str | None = None) -> int | None:
         article = session.get(Article, selected_id)
         if not article:
             return None
-        article.status = ArticleStatus.SELECTED_HOURLY
+        if article.status not in {ArticleStatus.REVIEW, ArticleStatus.SCORED, ArticleStatus.READY}:
+            article.status = ArticleStatus.READY
         # Save the hour-bucket so we can backfill 24h later and avoid duplicates per hour.
         tz_name = _get_tz_name()
         article.selected_hour_bucket_utc = _previous_completed_hour_bucket_utc(datetime.utcnow(), tz_name)
@@ -541,6 +545,7 @@ def pick_hourly_backfill(hours_back: int = 24, per_hour: int = 1) -> dict:
         ).all()
         for a in old_rows:
             a.selected_hour_bucket_utc = _hour_bucket_utc(a.updated_at or now_utc, tz_name)
+            a.status = ArticleStatus.READY
             a.updated_at = datetime.utcnow()
 
     # Track clusters already selected/published in last 24h + during this run.
@@ -551,8 +556,10 @@ def pick_hourly_backfill(hours_back: int = 24, per_hour: int = 1) -> dict:
             row[0]
             for row in session.execute(
                 select(Article.cluster_key).where(
-                    Article.status.in_([ArticleStatus.SELECTED_HOURLY, ArticleStatus.PUBLISHED]),
-                    Article.updated_at >= day_ago,
+                    or_(
+                        Article.status == ArticleStatus.PUBLISHED,
+                        Article.selected_hour_bucket_utc >= day_ago,
+                    ),
                     Article.cluster_key.is_not(None),
                 )
             ).all()
@@ -563,8 +570,11 @@ def pick_hourly_backfill(hours_back: int = 24, per_hour: int = 1) -> dict:
         with session_scope() as session:
             exists = session.scalars(
                 select(Article.id).where(
-                    Article.status == ArticleStatus.SELECTED_HOURLY,
                     Article.selected_hour_bucket_utc == bucket_start,
+                    Article.status != ArticleStatus.PUBLISHED,
+                    Article.status != ArticleStatus.ARCHIVED,
+                    Article.status != ArticleStatus.DOUBLE,
+                    Article.status != ArticleStatus.REJECTED,
                 )
             ).first()
             if exists:
@@ -580,7 +590,7 @@ def pick_hourly_backfill(hours_back: int = 24, per_hour: int = 1) -> dict:
                     Article.status != ArticleStatus.ARCHIVED,
                     Article.status != ArticleStatus.REJECTED,
                     Article.status != ArticleStatus.PUBLISHED,
-                    Article.status != ArticleStatus.SELECTED_HOURLY,
+                    Article.selected_hour_bucket_utc.is_(None),
                     ((Article.created_at >= bucket_start) & (Article.created_at < bucket_end))
                     | ((Article.published_at >= bucket_start) & (Article.published_at < bucket_end)),
                 )
@@ -615,13 +625,17 @@ def pick_hourly_backfill(hours_back: int = 24, per_hour: int = 1) -> dict:
                 # Double-check bucket isn't filled by a parallel request.
                 exists2 = session.scalars(
                     select(Article.id).where(
-                        Article.status == ArticleStatus.SELECTED_HOURLY,
                         Article.selected_hour_bucket_utc == bucket_start,
+                        Article.status != ArticleStatus.PUBLISHED,
+                        Article.status != ArticleStatus.ARCHIVED,
+                        Article.status != ArticleStatus.DOUBLE,
+                        Article.status != ArticleStatus.REJECTED,
                     )
                 ).first()
                 if exists2:
                     break
-                art.status = ArticleStatus.SELECTED_HOURLY
+                if art.status not in {ArticleStatus.REVIEW, ArticleStatus.SCORED, ArticleStatus.READY}:
+                    art.status = ArticleStatus.READY
                 art.selected_hour_bucket_utc = bucket_start
                 art.updated_at = datetime.utcnow()
                 selected_ids.append(int(art.id))
@@ -646,7 +660,7 @@ def pick_hourly_backfill(hours_back: int = 24, per_hour: int = 1) -> dict:
                     Article.status != ArticleStatus.ARCHIVED,
                     Article.status != ArticleStatus.REJECTED,
                     Article.status != ArticleStatus.PUBLISHED,
-                    Article.status != ArticleStatus.SELECTED_HOURLY,
+                    Article.selected_hour_bucket_utc.is_(None),
                     (Article.created_at >= window_start) | (Article.published_at >= window_start),
                 )
                 .options(joinedload(Article.source))
@@ -669,8 +683,11 @@ def pick_hourly_backfill(hours_back: int = 24, per_hour: int = 1) -> dict:
             with session_scope() as session:
                 exists2 = session.scalars(
                     select(Article.id).where(
-                        Article.status == ArticleStatus.SELECTED_HOURLY,
                         Article.selected_hour_bucket_utc == bucket_start,
+                        Article.status != ArticleStatus.PUBLISHED,
+                        Article.status != ArticleStatus.ARCHIVED,
+                        Article.status != ArticleStatus.DOUBLE,
+                        Article.status != ArticleStatus.REJECTED,
                     )
                 ).first()
                 if exists2:
@@ -678,7 +695,8 @@ def pick_hourly_backfill(hours_back: int = 24, per_hour: int = 1) -> dict:
                 art = session.get(Article, int(a.id))
                 if not art:
                     continue
-                art.status = ArticleStatus.SELECTED_HOURLY
+                if art.status not in {ArticleStatus.REVIEW, ArticleStatus.SCORED, ArticleStatus.READY}:
+                    art.status = ArticleStatus.READY
                 art.selected_hour_bucket_utc = bucket_start
                 art.updated_at = datetime.utcnow()
                 selected_ids.append(int(art.id))

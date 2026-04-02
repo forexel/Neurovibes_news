@@ -62,7 +62,7 @@ from app.services.content_generation import (
     translate_article_text,
 )
 from app.services.object_storage import upload_generated_image
-from app.services.pipeline import auto_select_by_profile, pick_hourly_top, run_hourly_cycle
+from app.services.pipeline import auto_select_by_profile, pick_hourly_top, run_hourly_cycle, _previous_completed_hour_bucket_utc
 from app.services.ingestion import (
     enrich_article_from_source,
     enrich_summary_only_articles,
@@ -1388,8 +1388,8 @@ def prune_start(body: PruneIn) -> dict:
                     if not article:
                         continue
 
-                    # Never auto-hide already published or hourly-selected content.
-                    if article.status in {ArticleStatus.PUBLISHED, ArticleStatus.SELECTED_HOURLY}:
+                    # Never auto-hide already published or currently hour-selected content.
+                    if article.status == ArticleStatus.PUBLISHED or article.selected_hour_bucket_utc is not None:
                         c_skipped += 1
                     else:
                         if body.archive_summary_only and (article.content_mode or "summary_only") == "summary_only":
@@ -1863,7 +1863,7 @@ def article_details(article_id: int) -> dict:
         data["post_preview"] = _build_post_preview_text(article)
         data["image_prompt"] = _latest_image_prompt(session, article_id)
         data["archived_kind"] = article.archived_kind
-        data["archived_reason"] = article.archived_reason
+        data["archived_reason"] = _display_archived_reason(article.archived_reason)
         data["archived_at"] = _dt_to_utc_z(article.archived_at)
         try:
             emb = session.scalars(
@@ -1946,6 +1946,18 @@ def admin_data_articles(
         selected_day_map: dict[int, date] = {}
         selected_any_day_ids: list[int] = []
         selected_today_ids: list[int] = []
+        selected_hour_ids = set(
+            int(x)
+            for x in session.scalars(
+                select(Article.id).where(
+                    Article.selected_hour_bucket_utc.is_not(None),
+                    Article.status != ArticleStatus.PUBLISHED,
+                    Article.status != ArticleStatus.ARCHIVED,
+                    Article.status != ArticleStatus.DOUBLE,
+                    Article.status != ArticleStatus.REJECTED,
+                )
+            ).all()
+        )
         base_query = select(ArticlePreview).options(_article_preview_list_load_options())
         if view == "deleted":
             base_query = base_query.where(ArticlePreview.status.in_([ArticleStatus.ARCHIVED.value, ArticleStatus.REJECTED.value]))
@@ -1954,7 +1966,7 @@ def admin_data_articles(
             base_query = base_query.where(ArticlePreview.status == ArticleStatus.PUBLISHED.value)
             articles = []
         elif view == "selected_hour":
-            base_query = base_query.where(ArticlePreview.status == ArticleStatus.SELECTED_HOURLY.value)
+            base_query = base_query.where(ArticlePreview.id.in_(selected_hour_ids)) if selected_hour_ids else base_query.where(ArticlePreview.id == -1)
             articles = []
         elif view == "selected_day":
             rows = session.execute(
@@ -1983,12 +1995,13 @@ def admin_data_articles(
             base_query = base_query.where(
                 ArticlePreview.status != ArticleStatus.ARCHIVED.value,
                 ArticlePreview.status != ArticleStatus.PUBLISHED.value,
-                ArticlePreview.status != ArticleStatus.SELECTED_HOURLY.value,
                 ArticlePreview.status != ArticleStatus.REJECTED.value,
             )
             recent_days = int(max(1, get_runtime_int("unsorted_recent_days", default=3)))
             cutoff = datetime.utcnow() - timedelta(days=recent_days)
             base_query = base_query.where(ArticlePreview.created_at >= cutoff)
+            if selected_hour_ids:
+                base_query = base_query.where(ArticlePreview.id.not_in(selected_hour_ids))
             if selected_any_day_ids:
                 base_query = base_query.where(ArticlePreview.id.not_in(list(set(int(x) for x in selected_any_day_ids))))
             articles = []
@@ -2009,8 +2022,9 @@ def admin_data_articles(
             )
             base_query = base_query.where(
                 ArticlePreview.status != ArticleStatus.PUBLISHED.value,
-                ArticlePreview.status != ArticleStatus.SELECTED_HOURLY.value,
             )
+            if selected_hour_ids:
+                base_query = base_query.where(ArticlePreview.id.not_in(selected_hour_ids))
             if selected_today_ids:
                 base_query = base_query.where(ArticlePreview.id.not_in(selected_today_ids))
             articles = []
@@ -2028,8 +2042,9 @@ def admin_data_articles(
             )
             base_query = base_query.where(
                 ArticlePreview.status != ArticleStatus.PUBLISHED.value,
-                ArticlePreview.status != ArticleStatus.SELECTED_HOURLY.value,
             )
+            if selected_hour_ids:
+                base_query = base_query.where(ArticlePreview.id.not_in(selected_hour_ids))
             if selected_today_ids:
                 base_query = base_query.where(ArticlePreview.id.not_in(selected_today_ids))
             articles = []
@@ -2118,6 +2133,7 @@ def admin_data_articles(
                 if article.id in selected_day_map:
                     item["selected_date"] = selected_day_map[article.id].isoformat()
                 item["is_selected_day"] = int(article.id) in selected_today_set
+                item["is_selected_hour"] = int(article.id) in selected_hour_ids
                 items.append(item)
 
             if not items and query_text.isdigit():
@@ -2137,6 +2153,7 @@ def admin_data_articles(
                             )
                         )
                     )
+                    one["is_selected_hour"] = int(article.id) in selected_hour_ids
                     items = [one]
                     total = 1
 
@@ -2166,6 +2183,7 @@ def admin_data_articles(
                     )
                 )
             )
+            item["is_selected_hour"] = int(a.id) in selected_hour_ids
             result.append(item)
 
         if hide_double:
@@ -3389,9 +3407,10 @@ def unselect_hour(article_id: int) -> dict:
         article = session.get(Article, article_id)
         if not article:
             raise HTTPException(status_code=404, detail="Article not found")
+        article.selected_hour_bucket_utc = None
         if article.status == ArticleStatus.SELECTED_HOURLY:
-            article.status = ArticleStatus.SCORED
-            article.updated_at = datetime.utcnow()
+            article.status = ArticleStatus.READY
+        article.updated_at = datetime.utcnow()
     return {"ok": True}
 
 
@@ -3471,7 +3490,13 @@ def set_article_status(article_id: int, body: StatusIn) -> dict:
         article = session.get(Article, article_id)
         if not article:
             raise HTTPException(status_code=404, detail="Article not found")
-        article.status = status
+        if status == ArticleStatus.SELECTED_HOURLY:
+            article.selected_hour_bucket_utc = _previous_completed_hour_bucket_utc(datetime.utcnow(), "Europe/Moscow")
+            if article.status not in {ArticleStatus.REVIEW, ArticleStatus.SCORED, ArticleStatus.READY}:
+                article.status = ArticleStatus.READY
+            status = article.status
+        else:
+            article.status = status
         article.updated_at = datetime.utcnow()
     return {"ok": True, "status": status}
 
@@ -4813,7 +4838,7 @@ def _render_admin_list_page(view: str) -> str:
           <td>${fmtUtcToTz(a.published_at, window.NV_TZ) || '-'}</td>
           <td>
             ${a.is_selected_day ? `<button onclick='unselectDay(${a.id})'>Remove Day</button>` : `<button onclick='selectDay(${a.id})'>Select Day</button>`}
-            ${String(a.status || '').toUpperCase() === 'SELECTED_HOURLY' ? `<button onclick='unselectHour(${a.id})'>Remove Hour</button>` : `<button onclick='selectHour(${a.id})'>Select Hour</button>`}
+            ${a.is_selected_hour ? `<button onclick='unselectHour(${a.id})'>Remove Hour</button>` : `<button onclick='selectHour(${a.id})'>Select Hour</button>`}
             ${CURRENT_VIEW === 'deleted' ? `<button onclick='restoreArticle(${a.id})'>Restore</button>` : `<button onclick='deleteArticle(${a.id})'>Delete</button>`}
             <button onclick='archiveArticle(${a.id})'>Archive</button>
             <button onclick='publish(${a.id})'>Publish</button>
@@ -5549,6 +5574,7 @@ def admin_article_page(article_id: int, request: Request):
         "image_prompt": image_prompt,
         "feedback": latest_feedback or "",
         "is_selected_day": is_selected_day,
+        "is_selected_hour": bool(article.selected_hour_bucket_utc),
     }
     payload = json.dumps(details, default=str).replace("</", "<\\/")
     return f"""
@@ -5649,7 +5675,7 @@ def admin_article_page(article_id: int, request: Request):
     <div class='action-row action-row-spaced'>
       <button id='btn_day_toggle' onclick='toggleDaySelection()'>Select Day</button>
       <button id='btn_hour_toggle' onclick='toggleHourSelection()'>Select Hour</button>
-      <button onclick="setStatus('selected_hourly')">Mark Selected</button>
+      <button onclick='toggleHourSelection()'>Mark Selected</button>
     </div>
     <div class='action-row'>
       <button onclick='archiveArticle()'>Archive</button>
@@ -5725,7 +5751,7 @@ function updateActionToggles() {{
     dayBtn.textContent = data.is_selected_day ? 'Remove Day' : 'Select Day';
   }}
   if (hourBtn) {{
-    const isHour = String(data.status || '').toUpperCase() === 'SELECTED_HOURLY';
+    const isHour = !!data.is_selected_hour;
     hourBtn.textContent = isHour ? 'Remove Hour' : 'Select Hour';
   }}
 }}
@@ -6055,13 +6081,13 @@ async function toggleDaySelection() {{
 }}
 
 async function toggleHourSelection() {{
-  const isHour = String(data.status || '').toUpperCase() === 'SELECTED_HOURLY';
+  const isHour = !!data.is_selected_hour;
   if (isHour) {{
     await unselectHour();
-    data.status = 'scored';
+    data.is_selected_hour = false;
   }} else {{
     await setStatus('selected_hourly');
-    data.status = 'selected_hourly';
+    data.is_selected_hour = true;
   }}
   renderMeta(data);
   updateActionToggles();
@@ -6228,7 +6254,7 @@ def _serialize_article(article: Article, score: Score | None, source: Source | N
         "ml_model_version": article.ml_model_version,
         "ml_recommendation_at": _dt_to_utc_z(article.ml_recommendation_at),
         "archived_kind": article.archived_kind,
-        "archived_reason": article.archived_reason,
+        "archived_reason": _display_archived_reason(article.archived_reason),
         "archived_at": _dt_to_utc_z(article.archived_at),
         "ml_verdict_confirmed": getattr(article, "ml_verdict_confirmed", None),
         "ml_verdict_comment": getattr(article, "ml_verdict_comment", None),
@@ -6276,6 +6302,17 @@ def _build_english_preview_text(article: Article) -> str:
     if last_stop > 280:
         return cut[: last_stop + 1].rstrip()
     return cut + "…"
+
+
+def _display_archived_reason(reason: str | None) -> str | None:
+    value = str(reason or "").strip()
+    if not value:
+        return None
+    if value in {"insufficient_content", "archive_insufficient_content"}:
+        return "system_insufficient_for_review"
+    if value == "insufficient_for_autopick":
+        return "system_insufficient_for_autopick"
+    return value
 
 
 def _is_incomplete_for_review(article: Article) -> bool:

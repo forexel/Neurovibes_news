@@ -27,6 +27,7 @@ from app.models import (
     RankingExample,
     Score,
     SelectionDecision,
+    Source,
     TelegramReviewJob,
     TrainingEvent,
     User,
@@ -195,6 +196,30 @@ _NEGATIVE_DEFAULT_TAGS = {
     "no_business_use",
 }
 _AMBIVALENT_TAGS = {"hype", "funding"}
+_REASON_TAG_HINTS: dict[str, str] = {
+    "duplicate": "Это повтор уже встречавшейся темы или релиза. Для канала важнее выбрать одну каноническую карточку с лучшим объяснением пользы и последствий.",
+    "too_technical": "Материал уходит в инженерные детали, архитектуру, бенчмарки или внутреннюю реализацию без достаточно понятного сценария для широкой аудитории.",
+    "insufficient_content": "В статье мало самостоятельного содержания или фактов для уверенного объяснения, поэтому она слаба для автономной публикации и требует ручной проверки.",
+    "hype": "Сюжет шумный или короткоживущий: громкий заголовок не даёт устойчивой пользы и быстро теряет значимость.",
+    "too_local": "История слишком локальна по рынку или аудитории и слабо переносится на русскоязычный массовый канал.",
+    "not_mass_audience": "Сюжет полезен узкой группе специалистов, но не даёт понятной ценности массовой аудитории.",
+    "short_lived": "Новость быстро устаревает и не формирует длительного эффекта для читателя или рынка.",
+    "low_significance": "Событие слишком маленькое по масштабу и вряд ли заметно повлияет на рынок, пользователей или бизнес-процессы.",
+    "no_business_use": "Из статьи не следует понятный сценарий применения для бизнеса, команды или типового пользователя.",
+    "funding": "Это в первую очередь история про инвестиции, оценку или сделку, а не про продуктовую пользу.",
+    "practical_tool": "Это инструмент с понятным сценарием применения, который можно быстро попробовать или встроить в работу.",
+    "industry_watch": "Это заметный сигнал для рынка: новость стоит держать в поле зрения даже без немедленного hands-on сценария.",
+    "global_shift": "Сюжет показывает движение крупных игроков и стратегический сдвиг на рынке AI.",
+    "market_signal": "Это важный сигнал для компаний и рынка о направлении развития продуктов, конкуренции или спроса.",
+    "future_trend": "Новость полезна как ранний индикатор того, куда движется индустрия и какие сценарии усилятся дальше.",
+    "mass_audience": "Материал понятен широкой аудитории и отражает сценарий, который можно быстро объяснить обычному пользователю.",
+    "business_impact": "Сюжет влияет на бизнес-процессы, стоимость работы или конкурентную среду.",
+    "ru_relevance": "У новости есть отдельная ценность для русскоязычной аудитории или сценариев использования в РФ.",
+    "product_release": "Это релиз, новая версия или заметное продуктовое обновление.",
+    "benchmark": "Сильная сторона статьи — конкретные цифры, сравнения и измеримый результат.",
+    "regulation": "Сюжет важен из-за безопасности, регулирования, доверия или операционных рисков.",
+    "breakthrough": "Новость выглядит как потенциальный технологический прорыв или новый уровень возможностей.",
+}
 
 
 def _sigmoid(z: float) -> float:
@@ -292,6 +317,9 @@ def _article_text_blob(article: Article | None = None, features: dict | None = N
                 str(article.title or ""),
                 str(article.subtitle or ""),
                 str((article.text or "")[:1500]),
+                str(feats.get("reason_tags_text") or ""),
+                str(feats.get("reason_context_text") or ""),
+                str(feats.get("source_name_text") or ""),
             ]
         ).strip()
     return " \n".join(
@@ -299,8 +327,80 @@ def _article_text_blob(article: Article | None = None, features: dict | None = N
             str(feats.get("title_text") or ""),
             str(feats.get("subtitle_text") or ""),
             str(feats.get("text_excerpt") or ""),
+            str(feats.get("reason_tags_text") or ""),
+            str(feats.get("reason_context_text") or ""),
+            str(feats.get("source_name_text") or ""),
         ]
     ).strip()
+
+
+def _article_context_cues(article: Article | None) -> list[str]:
+    if article is None:
+        return []
+    blob = " ".join(
+        [
+            str(article.title or ""),
+            str(article.subtitle or ""),
+            str((article.text or "")[:2000]),
+        ]
+    ).lower()
+    cue_map = [
+        ("benchmark", ["benchmark", "leaderboard", "latency", "accuracy", "eval", "mmlu"]),
+        ("architecture", ["architecture", "transformer", "attention", "distillation", "weights", "training stack"]),
+        ("agent tooling", ["agent", "tool use", "computer use", "workflow", "connector"]),
+        ("video", ["video", "image-to-video", "real-time video", "генерац", "runway"]),
+        ("voice/audio", ["audio", "voice", "speech", "music", "lyria", "podcast"]),
+        ("consumer app", ["ios", "android", "app store", "browser", "desktop", "mac"]),
+        ("business workflow", ["workspace", "docs", "slides", "sheets", "office", "crm", "support"]),
+        ("research", ["paper", "arxiv", "research preview", "ablation"]),
+    ]
+    cues: list[str] = []
+    for label, needles in cue_map:
+        if any(n in blob for n in needles):
+            cues.append(label)
+    return cues[:4]
+
+
+def _build_reason_context_text(
+    article: Article | None,
+    *,
+    source_name: str = "",
+    decision: str | None = None,
+    reason_text: str | None = None,
+    reason_tags: list[str] | None = None,
+) -> str:
+    title = str((article.title if article else "") or "").strip()
+    original = _normalize_reason_text(reason_text)
+    tags = [str(t).strip() for t in (reason_tags or []) if str(t).strip()]
+    cues = _article_context_cues(article)
+    cue_text = f" Ключевые признаки статьи: {', '.join(cues)}." if cues else ""
+    decision_text = str(decision or "").strip().lower()
+    parts: list[str] = []
+    if title:
+        parts.append(f"Статья: {title}.")
+    if source_name:
+        parts.append(f"Источник: {source_name}.")
+    if tags:
+        parts.append("Метки редактора: " + ", ".join(tags) + ".")
+    if original:
+        parts.append("Короткая причина редактора: " + original + ".")
+    for tag in tags:
+        hint = _REASON_TAG_HINTS.get(tag)
+        if not hint:
+            continue
+        if tag == "duplicate" and title:
+            parts.append(f"{hint} Текущая карточка про тему «{title}» слабее как отдельная публикация.{cue_text}")
+        elif tag == "too_technical" and cues:
+            parts.append(f"{hint} Здесь заметны признаки: {', '.join(cues)}.")
+        else:
+            parts.append(hint + cue_text)
+    if not parts and original:
+        parts.append(original)
+    if not parts and title:
+        parts.append(f"Статья: {title}.{cue_text}")
+    if decision_text in {"hide", "delete"} and "duplicate" in tags:
+        parts.append("Для обучения это негативный пример не потому, что тема плохая, а потому что в потоке уже была более удачная версия этой же новости.")
+    return " ".join(p.strip() for p in parts if p.strip())[:1800]
 
 
 def _editor_choice_vector_from_features(
@@ -870,6 +970,12 @@ def log_training_event(
         except Exception:
             local_user_id = None
         score = session.get(Score, int(article_id))
+        source_name = ""
+        try:
+            source = session.get(Source, int(article.source_id or 0)) if article.source_id else None
+            source_name = str(source.name or "").strip() if source else ""
+        except Exception:
+            source_name = ""
         audience_desc, audience_tags = _latest_workspace_audience(session, user_id=local_user_id)
         _ = audience_desc  # reserved for future use in feature engineering
         features = _feature_snapshot(
@@ -880,6 +986,15 @@ def log_training_event(
             audience_tags=audience_tags,
             reason_positive_tags=pos_tags,
             reason_negative_tags=neg_tags,
+        )
+        features["source_name_text"] = source_name[:200]
+        features["reason_tags_text"] = " ".join(tags + pos_tags + neg_tags)[:400]
+        features["reason_context_text"] = _build_reason_context_text(
+            article,
+            source_name=source_name,
+            decision=decision,
+            reason_text=reason_text,
+            reason_tags=tags,
         )
         candidate_ids = _candidate_ids_for_article(session, article)
 
@@ -1212,11 +1327,7 @@ def build_editor_choice_dataset(
         by_article: dict[int, TrainingEvent] = {}
         for row in rows:
             by_article[int(row.article_id)] = row
-        rows = [
-            row
-            for row in by_article.values()
-            if len(str(row.reason_text or "").strip()) >= max(0, int(min_reason_len))
-        ]
+        rows = list(by_article.values())
         rows.sort(key=lambda x: x.created_at or datetime.min)
 
     if not rows:
@@ -1232,10 +1343,31 @@ def build_editor_choice_dataset(
         for r in rows:
             feats = dict(r.features_json or {})
             article = session.get(Article, int(r.article_id))
+            source_name = ""
             if article is not None:
+                try:
+                    source = session.get(Source, int(article.source_id or 0)) if article.source_id else None
+                    source_name = str(source.name or "").strip() if source else ""
+                except Exception:
+                    source_name = ""
                 feats.setdefault("title_text", str(article.title or "")[:400])
                 feats.setdefault("subtitle_text", str(article.subtitle or "")[:800])
                 feats.setdefault("text_excerpt", str(article.text or "")[:1500])
+                reason_tags = [str(x).strip() for x in (r.reason_tags or _guess_reason_tags(r.reason_text)) if str(x).strip()]
+                reason_context = _build_reason_context_text(
+                    article,
+                    source_name=source_name,
+                    decision=r.decision,
+                    reason_text=r.reason_text,
+                    reason_tags=reason_tags,
+                )
+                feats["source_name_text"] = str(feats.get("source_name_text") or source_name)[:200]
+                feats["reason_tags_text"] = str(feats.get("reason_tags_text") or " ".join(reason_tags))[:400]
+                feats["reason_context_text"] = str(feats.get("reason_context_text") or reason_context)[:1800]
+                if clean_only:
+                    has_supervision = bool(reason_tags) or len(reason_context.strip()) >= max(0, int(min_reason_len))
+                    if not has_supervision:
+                        continue
             vec = _editor_choice_vector_from_features(feats)
             label = int(r.label)
             meta = {
@@ -1244,6 +1376,8 @@ def build_editor_choice_dataset(
                 "article_id": int(r.article_id),
                 "decision": r.decision,
                 "reason_text": str(r.reason_text or ""),
+                "reason_context_text": str(feats.get("reason_context_text") or ""),
+                "reason_tags": list(r.reason_tags or _guess_reason_tags(r.reason_text)),
                 "clean_label": bool(clean_only),
             }
             items.append((vec, label, meta))

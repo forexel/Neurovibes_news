@@ -87,7 +87,7 @@ RUNTIME_DEFAULTS: dict[str, str] = {
     "user_vector_half_life_days": "7",
     "user_vector_max_events": "500",
     "user_vector_manual_weight": "4",
-    "user_vector_positive_statuses_csv": "published,selected_hourly",
+    "user_vector_positive_statuses_csv": "published,ready",
     "user_vector_negative_statuses_csv": "deleted,archived,rejected",
     "user_vector_split_by_content_type": "true",
     # Auto disable low-value sources in Sources page

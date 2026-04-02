@@ -333,7 +333,12 @@ def _tokenize_style(text: str) -> list[str]:
 def _build_editor_style_profile(session) -> dict:
     positive_ids = set(
         session.scalars(
-            select(Article.id).where(Article.status.in_([ArticleStatus.PUBLISHED, ArticleStatus.SELECTED_HOURLY]))
+            select(Article.id).where(
+                or_(
+                    Article.status == ArticleStatus.PUBLISHED,
+                    Article.selected_hour_bucket_utc.is_not(None),
+                )
+            )
         ).all()
     )
     positive_ids.update(
@@ -736,9 +741,11 @@ def _normalize_article_invariants(article: Article) -> bool:
         ArticleStatus.INBOX,
         ArticleStatus.REVIEW,
         ArticleStatus.SCORED,
-        ArticleStatus.SELECTED_HOURLY,
         ArticleStatus.READY,
     }
+    if article.status == ArticleStatus.SELECTED_HOURLY:
+        article.status = ArticleStatus.READY
+        changed = True
     if article.status in active_statuses:
         if article.archived_kind is not None:
             article.archived_kind = None
@@ -780,7 +787,7 @@ def _mark_article_review_fallback(article: Article, reason: str = "review_fallba
     article.archived_at = None
     article.updated_at = datetime.utcnow()
     if not (article.short_hook or "").strip():
-        article.short_hook = reason[:260]
+        article.short_hook = "Нужна ручная проверка: preview есть, но для автопубликации данных недостаточно."
 
 
 def article_is_selection_eligible(article: Article, score: Score | None, *, mode: str = "auto", source_name: str | None = None) -> tuple[bool, str]:
@@ -790,10 +797,12 @@ def article_is_selection_eligible(article: Article, score: Score | None, *, mode
         return False, f"status:{article.status}"
     if article.scheduled_publish_at is not None and mode_l == "auto":
         return False, "scheduled"
-    if article.archived_reason == "insufficient_content":
-        return False, "insufficient_content"
-    if _is_insufficient_content(article):
-        return False, "insufficient_content"
+    if article.archived_reason in {"archive_insufficient_content", "insufficient_content"}:
+        return False, "archive_insufficient_content"
+    if mode_l == "auto" and _is_insufficient_for_autopick(article):
+        return False, "insufficient_for_autopick"
+    if mode_l == "review" and not _is_enough_for_manual_review(article):
+        return False, "insufficient_for_review"
     if score is None:
         return False, "missing_score"
     if source_low.startswith("hacker news") and mode_l == "auto":
@@ -802,11 +811,11 @@ def article_is_selection_eligible(article: Article, score: Score | None, *, mode
 
 
 def article_quality_gate(article: Article, source_name: str | None = None) -> tuple[str, str]:
-    if not _is_insufficient_content(article):
+    if not _is_insufficient_for_autopick(article):
         return "ok", "ok"
-    if _should_review_fallback_for_content(article, source_name):
-        return "review_fallback", "insufficient_content_strong_source"
-    return "archive", "insufficient_content"
+    if _is_enough_for_manual_review(article) or _should_review_fallback_for_content(article, source_name):
+        return "review_fallback", "insufficient_for_autopick"
+    return "archive", "archive_insufficient_content"
 
 
 def _title_hype_score(title: str) -> float:
@@ -918,10 +927,45 @@ def _is_summary_and_boring(article: Article, semantic: dict) -> bool:
     return False
 
 
-def _is_insufficient_content(article: Article) -> bool:
+def _is_enough_for_manual_review(article: Article) -> bool:
+    mode = str(article.content_mode or "").strip().lower()
+    if mode == "summary_only":
+        return False
+
+    text = str(article.text or "").strip()
+    subtitle = str(article.subtitle or "").strip()
+    ru_summary = str(article.ru_summary or "").strip()
+    title = str(article.title or "").strip()
+    source_name = ""
+    try:
+        source_name = str(article.source.name or "").strip().lower()
+    except Exception:
+        source_name = ""
+
+    if not any([title, text, subtitle, ru_summary]):
+        return False
+
+    if "hacker news" in source_name:
+        text_meta_only = bool(_HN_METADATA_ONLY_RE.match(text))
+        subtitle_meta_only = bool(_HN_METADATA_ONLY_RE.match(subtitle))
+        if (text_meta_only or not text) and (subtitle_meta_only or not subtitle) and len(ru_summary) < 80:
+            return False
+
+    if len(text) >= 220:
+        return True
+    if len(subtitle) >= 60:
+        return True
+    if len(ru_summary) >= 80:
+        return True
+    if len(text) >= 120 and len(title) >= 30:
+        return True
+    return False
+
+
+def _is_insufficient_for_autopick(article: Article) -> bool:
     """
-    Hard gate for empty/thin content.
-    Such articles should be auto-archived and not shown in manual review queues.
+    Conservative gate for automatic picking and publishing.
+    Articles can still be suitable for manual review even when they fail this check.
     """
     mode = str(article.content_mode or "").strip().lower()
     if mode == "summary_only":
@@ -1667,7 +1711,6 @@ def run_scoring(limit: int = 300, progress_cb=None, ru_progress_cb=None) -> int:
                             ArticleStatus.REVIEW,
                             ArticleStatus.SCORED,
                             ArticleStatus.READY,
-                            ArticleStatus.SELECTED_HOURLY,
                         ]
                     ),
                     Article.status != ArticleStatus.ARCHIVED,
@@ -1757,8 +1800,8 @@ def prune_bad_articles(limit: int = 50000, archive_summary_only: bool = True, ar
         ).all()
 
         for article, score in rows:
-            # Do not auto-hide already published or hourly-selected content.
-            if article.status in {ArticleStatus.PUBLISHED, ArticleStatus.SELECTED_HOURLY}:
+            # Do not auto-hide already published or currently hour-selected content.
+            if article.status == ArticleStatus.PUBLISHED or article.selected_hour_bucket_utc is not None:
                 continue
             # Never auto-hide explicitly scheduled items.
             if article.scheduled_publish_at is not None:
@@ -2037,7 +2080,7 @@ def reclassify_all_articles(
                         _normalize_article_invariants(article)
                         article.updated_at = datetime.utcnow()
                         restored += 1
-                    elif article.status != target_status and article.status != ArticleStatus.SELECTED_HOURLY:
+                    elif article.status != target_status:
                         article.status = target_status
                         _normalize_article_invariants(article)
                         article.updated_at = datetime.utcnow()

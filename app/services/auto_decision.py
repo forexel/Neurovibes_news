@@ -37,7 +37,7 @@ def decide_and_maybe_publish(top_n: int = 5) -> dict:
         rows = session.execute(
             select(Article, Score)
             .join(Score, Score.article_id == Article.id)
-            .where(Article.status.in_([ArticleStatus.SCORED, ArticleStatus.SELECTED_HOURLY, ArticleStatus.READY]))
+            .where(Article.status.in_([ArticleStatus.SCORED, ArticleStatus.READY]))
             .order_by(Score.final_score.desc())
             .limit(top_n)
         ).all()

@@ -9,7 +9,7 @@ services:
       APP_BUILD_SHA: ${APP_BUILD_SHA:-dev}
       DB_AUTO_PATCH_SCHEMA: "0"
       DB_AUTO_CREATE: "0"
-      ALLOW_ONLINE_LLM_GENERATION: "0"
+      ALLOW_ONLINE_LLM_GENERATION: "1"
       TELEGRAM_PROXY: ${TELEGRAM_PROXY:-}
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--timeout-keep-alive", "20"]
     ports:
@@ -69,7 +69,7 @@ services:
     environment:
       DB_AUTO_PATCH_SCHEMA: "0"
       DB_AUTO_CREATE: "0"
-      ALLOW_ONLINE_LLM_GENERATION: "0"
+      ALLOW_ONLINE_LLM_GENERATION: "1"
       TELEGRAM_PROXY: ${TELEGRAM_PROXY:-}
     command: ["python", "-m", "app.tasks.worker"]
     volumes:
